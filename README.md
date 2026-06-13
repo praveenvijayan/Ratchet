@@ -38,15 +38,19 @@ plugin/                        Optional Claude Code plugin packaging
 plan/
   README.md                    The plan-file format contract
   0001-email-login.md          Worked example
+memory/
+  USER.md                      Human-owned preferences (agent reads, never edits)
+  MEMORY.md                    Distilled knowledge cache (agent proposes via PR)
 scripts/plan-sync.mjs          Zero-dep deterministic plan→issue compiler
 .github/workflows/             plan-sync, unblock-dependents, sweep-stale-claims
 .env.example                   PAT documentation for local runs
 setup.sh                       Sync skills into each tool's location
 ```
 
-The three skills: **`/plan-issues`** (idea → `plan/*.md`), **`/plan-sync`**
+The four skills: **`/plan-issues`** (idea → `plan/*.md`), **`/plan-sync`**
 (compile plan files → issues now), **`/factory-init`** (one-time: labels, gate
-detection, PAT check).
+detection, memory scaffold, PAT check), **`/memory-compact`** (prune & dedupe
+`memory/MEMORY.md`).
 
 ## Install
 
@@ -96,3 +100,22 @@ With pure human merges the fallback works; the PAT makes it bulletproof.
 
 Every failure path (red gate, crash, oversized issue, requested changes) returns
 the issue to `state:ready` with a comment — nothing gets silently stuck.
+
+## Memory (so it scales to multi-year projects)
+
+Three tiers, all GitHub-native — no vector DB, no external service:
+
+1. **Working** — the claimed issue + acceptance criteria, in context.
+2. **Durable curated** — `memory/USER.md` (human-owned preferences) and
+   `memory/MEMORY.md` (agent-proposed, human-approved distilled knowledge),
+   read at the start of every issue. `MEMORY.md` is a **cache, not a log**: each
+   entry is 1–2 lines linking to the issue/PR that is its real source, so it
+   stays small even as the project grows huge.
+3. **Episodic** — closed issues, merged PRs, `git log`/`blame`, and `plan/*.md`,
+   searched on demand. This is the unbounded long-term store.
+
+The agent reads Tiers 1–2 each issue, searches Tier 3 when context is missing,
+and proposes `MEMORY.md` edits **inside its PR** — so memory changes are reviewed
+like code, never written silently. It never edits `USER.md`. Run
+`/memory-compact` periodically to prune stale entries. Because all three tools
+read `AGENTS.md`, this works identically in Claude Code, Codex, and Antigravity.

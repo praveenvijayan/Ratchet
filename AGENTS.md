@@ -103,6 +103,39 @@ remembering anything.
 
 ---
 
+## Memory (three tiers, all GitHub-native)
+
+Memory keeps the project tractable over years. Three tiers, no external service:
+
+1. **Working (in-context).** The issue you claimed plus its acceptance criteria
+   and this conversation. Ephemeral.
+2. **Durable curated (committed files), read at the start of every issue:**
+   - `memory/USER.md` — **human-owned**: team preferences, conventions, glossary,
+     "always X / never Y" rules. You **read** it; you never edit it.
+   - `memory/MEMORY.md` — **agent-proposed, human-approved**: distilled,
+     still-true project knowledge (decisions, gotchas, env facts, patterns).
+     A **cache, not a log** — each entry is one or two lines linking to the
+     issue/PR that is its source of truth.
+3. **Episodic / archival (GitHub itself), searched on demand:** closed issues
+   and merged PRs (`gh issue list --search`, `gh pr list`) hold *why* and *what*;
+   `git log` / `git blame` hold *how*; `plan/*.md` holds intent. Unbounded and
+   free — this is the long-term store, so it never goes in `MEMORY.md`.
+
+How you use it each issue:
+- **At pick/claim:** read `memory/USER.md` and `memory/MEMORY.md`. If the issue
+  touches a subsystem you have no context on, search Tier 3 (`MEMORY.md` usually
+  points to the relevant issue/PR numbers).
+- **At hand-off:** if you learned something durable and still-true, add or update
+  one entry in `memory/MEMORY.md` **in the same PR** as the code, linking the
+  source. Memory changes are reviewed like any other diff — never write silently.
+
+Rules: a fact earns a place in `MEMORY.md` only if it will save a future agent
+from re-reading history; raw detail stays in issues/PRs. Never edit `USER.md`.
+Keep `MEMORY.md` small — prune obsolete entries (run `/memory-compact`); the
+history in Tier 3 means pruning never loses information.
+
+---
+
 ## Gates (EDIT THIS TABLE PER PROJECT — the only project-specific part)
 
 Run in order, fail-fast. Replace the commands with your stack's equivalents.

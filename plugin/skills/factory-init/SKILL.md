@@ -64,7 +64,18 @@ If code exists, detect commands **from real evidence only**:
    `<!-- auto-detected by /factory-init on <date>; verify before first run -->`.
 4. **Never run a gate.** Detection only.
 
-## Step 3 — Personal Access Token (CRITICAL for the issue flow)
+## Step 3 — Scaffold the memory files
+
+Ensure the durable-memory files exist (create from the kit templates if absent;
+never overwrite existing ones):
+- `memory/USER.md` — human-owned preferences/conventions.
+- `memory/MEMORY.md` — agent-proposed, human-approved distilled knowledge.
+
+If you created them fresh, tell the user to seed `memory/USER.md` with the
+team's conventions. Do not populate `MEMORY.md` — it fills up through PRs over
+time. Both files are committed (not gitignored); they are the project's memory.
+
+## Step 4 — Personal Access Token (CRITICAL for the issue flow)
 
 The issue lifecycle relies on workflows reacting to each other's events.
 GitHub's default `GITHUB_TOKEN` **does not trigger another workflow** from events
@@ -93,9 +104,11 @@ creating a token and setting a secret are credential actions the user owns):
   4. State clearly: until both are set, automation falls back to the default
      token and the loop may stall on automated issue closes.
 
-## Step 4 — Report and hand off
+## Step 5 — Report and hand off
 
 - Confirm the nine labels (`gh label list`).
+- Confirm `memory/USER.md` and `memory/MEMORY.md` exist; if just created, remind
+  the user to seed `USER.md` with team conventions.
 - Show the filled Gates table; call out every `TODO` row.
 - State PAT status: `FACTORY_PAT` secret present? `.env` `GITHUB_PAT` present?
   If either is missing, repeat the Step 3 instruction.
