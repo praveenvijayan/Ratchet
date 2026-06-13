@@ -7,8 +7,9 @@ webhook service — events in GitHub advance the system, not agents.
 
 This manual is read natively by all three tools (Codex and Antigravity read
 `AGENTS.md`; Claude Code reads it too, and the thin `CLAUDE.md` points here as a
-backstop). It is project-agnostic. The only thing you edit per project is the
-**Gates** table below — and `/factory-init` fills that in for you. Everything else is reusable as-is.
+backstop). It is 100% framework and project-agnostic — the only project-specific
+file is `GATES.md`, which `/factory-init` fills in for you. Everything in this
+manual is reusable as-is and safe to overwrite on update.
 
 ---
 
@@ -136,17 +137,12 @@ history in Tier 3 means pruning never loses information.
 
 ---
 
-## Gates (EDIT THIS TABLE PER PROJECT — the only project-specific part)
+## Gates (defined in GATES.md)
 
-Run in order, fail-fast. Replace the commands with your stack's equivalents.
-
-| Order | Gate      | Command              | Pass condition       |
-|-------|-----------|----------------------|----------------------|
-| 1     | format    | `npm run format:check` | no diff            |
-| 2     | typecheck | `npm run typecheck`  | exit 0               |
-| 3     | lint      | `npm run lint`       | exit 0               |
-| 4     | test      | `npm test`           | exit 0               |
-| 5     | build     | `npm run build`      | exit 0               |
+The verification gates — what must pass before a PR opens — live in `GATES.md`,
+the one project-owned config file. Read `GATES.md` and run its commands in order,
+fail-fast. `/factory-init` fills `GATES.md` in by detecting your stack; this
+manual never needs per-project edits.
 
 ---
 

@@ -1,6 +1,6 @@
 ---
 name: factory-init
-description: One-time setup for a repo adopting the factory. Creates the state:* and priority:* labels, detects the project's stack and fills the Gates table in AGENTS.md, and ensures the Personal Access Token the issue-flow automation depends on is configured (informs the user; never handles the token itself). Idempotent — safe to re-run.
+description: One-time setup for a repo adopting the factory. Creates the state:* and priority:* labels, detects the project's stack and fills GATES.md, scaffolds the memory files, and ensures the Personal Access Token the issue-flow automation depends on is configured (informs the user; never handles the token itself). Idempotent — safe to re-run.
 disable-model-invocation: true
 allowed-tools: Read, Edit, Write, Glob, Grep, Bash(gh:*)
 ---
@@ -31,11 +31,11 @@ gh label create "priority:medium"         --color "8a63d2" --description "Defaul
 gh label create "priority:low"            --color "c5b3f0" --description "Pick last" --force
 ```
 
-## Step 2 — Detect the stack and fill the Gates table
+## Step 2 — Detect the stack and fill GATES.md
 
 **Does code exist?** Look for a manifest (`package.json`, `pyproject.toml`,
 `requirements.txt`, `Cargo.toml`, `go.mod`, `Makefile`, etc.). If none, this is
-greenfield: leave the default Gates table, note that the user should re-run
+greenfield: leave the default `GATES.md`, note that the user should re-run
 `/factory-init` once code lands, and skip to Step 3.
 
 If code exists, detect commands **from real evidence only**:
@@ -59,8 +59,8 @@ If code exists, detect commands **from real evidence only**:
    Commands to **recognise**, not invent. If a gate has no matching
    script/config, or the script is a stub, write `TODO: <gate> command` instead
    of guessing.
-3. **Edit `AGENTS.md`** — replace the body rows of the Gates table with the
-   detected commands, keeping the columns. Add one comment above it:
+3. **Edit `GATES.md`** — replace the body rows of the table with the detected
+   commands, keeping the columns. Add one comment above the table:
    `<!-- auto-detected by /factory-init on <date>; verify before first run -->`.
 4. **Never run a gate.** Detection only.
 
@@ -109,7 +109,7 @@ creating a token and setting a secret are credential actions the user owns):
 - Confirm the nine labels (`gh label list`).
 - Confirm `memory/USER.md` and `memory/MEMORY.md` exist; if just created, remind
   the user to seed `USER.md` with team conventions.
-- Show the filled Gates table; call out every `TODO` row.
+- Show the filled `GATES.md` table; call out every `TODO` row.
 - State PAT status: `FACTORY_PAT` secret present? `.env` `GITHUB_PAT` present?
   If either is missing, repeat the Step 3 instruction.
 - Remaining human-owned steps: verify the detected gates; confirm the three

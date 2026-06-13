@@ -35,22 +35,35 @@ CLAUDE.md / GEMINI.md          One-line pointers to AGENTS.md for each tool.
 .claude/skills/<name>/SKILL.md Mirror for Claude Code
 plugin/                        Optional Claude Code plugin packaging
 .claude-plugin/marketplace.json  Optional marketplace (Claude Code only)
+AGENTS.md                      Operating manual (100% framework, overwrite-safe)
+GATES.md                       The ONLY project-owned config (verification gates)
+CLAUDE.md / GEMINI.md          One-line pointers to AGENTS.md for each tool
+.ratchet-version              Installed framework version (managed by the updater)
+.agents/skills/<name>/         Canonical skills (Codex + Antigravity)
+  SKILL.md                       portable skill body
+  agents/openai.yaml             Codex invocation policy (explicit-only)
+.claude/skills/<name>/SKILL.md Mirror for Claude Code
+plugin/                        Optional Claude Code plugin packaging
+.claude-plugin/marketplace.json  Optional marketplace (Claude Code only)
 plan/
   README.md                    The plan-file format contract
   0001-email-login.md          Worked example
 memory/
   USER.md                      Human-owned preferences (agent reads, never edits)
   MEMORY.md                    Distilled knowledge cache (agent proposes via PR)
-scripts/plan-sync.mjs          Zero-dep deterministic plan→issue compiler
+scripts/
+  plan-sync.mjs                Zero-dep deterministic plan→issue compiler
+  ratchet-update.sh            Pulls framework updates, preserves project files
 .github/workflows/             plan-sync, unblock-dependents, sweep-stale-claims
 .env.example                   PAT documentation for local runs
 setup.sh                       Sync skills into each tool's location
 ```
 
-The four skills: **`/plan-issues`** (idea → `plan/*.md`), **`/plan-sync`**
+The five skills: **`/plan-issues`** (idea → `plan/*.md`), **`/plan-sync`**
 (compile plan files → issues now), **`/factory-init`** (one-time: labels, gate
-detection, memory scaffold, PAT check), **`/memory-compact`** (prune & dedupe
-`memory/MEMORY.md`).
+detection into `GATES.md`, memory scaffold, PAT check), **`/memory-compact`**
+(prune & dedupe `memory/MEMORY.md`), **`/ratchet-update`** (pull a newer
+framework version, project files untouched).
 
 ## Install
 
@@ -119,3 +132,21 @@ and proposes `MEMORY.md` edits **inside its PR** — so memory changes are revie
 like code, never written silently. It never edits `USER.md`. Run
 `/memory-compact` periodically to prune stale entries. Because all three tools
 read `AGENTS.md`, this works identically in Claude Code, Codex, and Antigravity.
+
+## Updating Ratchet
+
+Repos created from the template don't auto-update (that's the template
+trade-off), but upgrading is one command and never needs a manual merge, because
+`AGENTS.md` is 100% framework and the only project-owned config is `GATES.md`.
+
+```
+/ratchet-update           # pull upstream main onto a review branch
+/ratchet-update v1.2.0    # or a specific release tag
+```
+
+It pulls only framework paths (skills, workflows, scripts, `AGENTS.md`),
+re-syncs the skill mirrors, bumps `.ratchet-version`, and stops for you to review
+the diff and open a PR. It never touches `GATES.md`, `memory/`, your `plan/*.md`
+issues, `.env`, `README.md`, `LICENSE`, or your code. (Claude Code users who
+installed via the plugin can also update skills with
+`/plugin marketplace update ratchet`; the git update covers all three tools.)

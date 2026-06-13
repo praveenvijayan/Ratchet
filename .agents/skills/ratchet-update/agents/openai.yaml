@@ -1,0 +1,7 @@
+# Codex skill metadata. Explicit-only: this rewrites framework files, so Codex
+# must not invoke it implicitly. Invoke with /skills or $ratchet-update.
+policy:
+  allow_implicit_invocation: false
+interface:
+  display_name: "ratchet-update"
+  short_description: "Update Ratchet framework files from upstream."
