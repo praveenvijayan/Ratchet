@@ -1,0 +1,14 @@
+{
+  "name": "ratchet",
+  "owner": { "name": "Praveen Vijayan", "url": "https://github.com/praveenvijayan" },
+  "metadata": {
+    "description": "Ratchet — a forward-only, GitHub-native continuous-delivery loop. Skills for Claude Code; the repo also works with Codex and Antigravity via .agents/skills and AGENTS.md."
+  },
+  "plugins": [
+    {
+      "name": "ratchet",
+      "source": "./plugin",
+      "description": "plan-issues, plan-sync, factory-init skills + the AGENTS.md continuous-delivery loop."
+    }
+  ]
+}

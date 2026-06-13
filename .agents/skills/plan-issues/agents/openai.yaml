@@ -1,0 +1,7 @@
+# Codex skill metadata. Explicit-only: these skills have side effects, so Codex
+# must not invoke them implicitly. Invoke with /skills or $plan-issues.
+policy:
+  allow_implicit_invocation: false
+interface:
+  display_name: "plan-issues"
+  short_description: "Turn the solidified idea into plan/*.md issue files."

@@ -1,0 +1,45 @@
+name: unblock-dependents
+
+# When an issue closes (e.g. via "Closes #N" on a merged PR), find every issue
+# blocked only by it and, if all their blockers are now closed, mark them ready.
+# This is what re-feeds the queue and makes the loop continuous.
+
+on:
+  issues:
+    types: [closed]
+
+permissions:
+  issues: write
+
+jobs:
+  unblock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          # Prefer a PAT so this workflow can trigger further workflows.
+          # Falls back to the default token (fine for pure human-merge flows).
+          github-token: ${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN }}
+          script: |
+            const closed = context.payload.issue.number;
+            const all = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner, repo: context.repo.repo, state: "open", per_page: 100,
+            });
+            for (const issue of all) {
+              if (issue.pull_request) continue;
+              const blockers = [...(issue.body || "").matchAll(/Blocked by #(\d+)/g)].map(m => Number(m[1]));
+              if (!blockers.includes(closed)) continue;
+
+              // Are ALL blockers now closed?
+              let allClosed = true;
+              for (const n of blockers) {
+                const b = await github.rest.issues.get({ owner: context.repo.owner, repo: context.repo.repo, issue_number: n });
+                if (b.data.state !== "closed") { allClosed = false; break; }
+              }
+              if (!allClosed) continue;
+
+              const labels = issue.labels.map(l => l.name).filter(l => !l.startsWith("state:"));
+              labels.push("state:ready");
+              await github.rest.issues.setLabels({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number, labels });
+              await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number, body: `Unblocked: all blockers closed (#${closed}). Now \`state:ready\`.` });
+            }

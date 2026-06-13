@@ -1,0 +1,27 @@
+name: plan-sync
+
+# Compiles plan/*.md into GitHub issues whenever the plan changes.
+# This is the seam: commit a plan file, issues appear. No manual step.
+
+on:
+  push:
+    paths:
+      - "plan/**"
+  workflow_dispatch: {}   # allow manual re-sync
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: node scripts/plan-sync.mjs
+        env:
+          GITHUB_TOKEN: ${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}

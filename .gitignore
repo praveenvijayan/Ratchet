@@ -1,0 +1,9 @@
+# Secrets — never commit a real token
+.env
+.env.*
+!.env.example
+
+# Noise
+node_modules/
+*.log
+.DS_Store

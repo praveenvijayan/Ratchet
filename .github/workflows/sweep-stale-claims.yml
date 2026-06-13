@@ -1,0 +1,59 @@
+name: sweep-stale-claims
+
+# Poor-man's lease expiry. Every 30 min, find issues stuck in state:in-progress
+# whose agent branch has had no commit for STALE_HOURS, and return them to the
+# queue. A crashed agent costs at most STALE_HOURS of delay, no human action.
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  issues: write
+  contents: read
+
+env:
+  STALE_HOURS: "2"
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN }}
+          script: |
+            const STALE_MS = Number(process.env.STALE_HOURS) * 3600 * 1000;
+            const now = Date.now();
+            const stuck = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: "open", labels: "state:in-progress", per_page: 100,
+            });
+            for (const issue of stuck) {
+              if (issue.pull_request) continue;
+              const branch = `agent/issue-${issue.number}`;
+              let lastCommit = null;
+              try {
+                const c = await github.rest.repos.listCommits({
+                  owner: context.repo.owner, repo: context.repo.repo, sha: branch, per_page: 1,
+                });
+                lastCommit = c.data[0]?.commit?.committer?.date;
+              } catch (e) {
+                // no branch at all -> claim never really happened; treat as stale
+              }
+              const ref = lastCommit ? new Date(lastCommit).getTime() : new Date(issue.updated_at).getTime();
+              if (now - ref < STALE_MS) continue;
+
+              const labels = issue.labels.map(l => l.name).filter(l => !l.startsWith("state:"));
+              labels.push("state:ready");
+              await github.rest.issues.setLabels({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number, labels });
+              await github.rest.issues.removeAssignees({
+                owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number,
+                assignees: issue.assignees.map(a => a.login),
+              }).catch(() => {});
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number,
+                body: `Stale claim swept: no activity on \`${branch}\` for >${process.env.STALE_HOURS}h. Returned to \`state:ready\`.`,
+              });
+            }
