@@ -20,6 +20,7 @@ FRAMEWORK_PATHS=(
   .agents .claude plugin .claude-plugin
   .github/workflows
   scripts/plan-sync.mjs scripts/ratchet-update.sh
+  scripts/ratchet-watch.sh scripts/ratchet-watch.mjs
   setup.sh
   plan/README.md
   AGENTS.md CLAUDE.md GEMINI.md

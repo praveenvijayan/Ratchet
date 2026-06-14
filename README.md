@@ -54,7 +54,7 @@ memory/
 scripts/
   plan-sync.mjs                Zero-dep deterministic plan→issue compiler
   ratchet-update.sh            Pulls framework updates, preserves project files
-.github/workflows/             plan-sync, unblock-dependents, sweep-stale-claims
+.github/workflows/             plan-sync, unblock-dependents, sweep-stale-claims, ratchet-run
 .env.example                   PAT documentation for local runs
 setup.sh                       Sync skills into each tool's location
 ```
@@ -150,3 +150,27 @@ the diff and open a PR. It never touches `GATES.md`, `memory/`, your `plan/*.md`
 issues, `.env`, `README.md`, `LICENSE`, or your code. (Claude Code users who
 installed via the plugin can also update skills with
 `/plugin marketplace update ratchet`; the git update covers all three tools.)
+
+## Hands-off continuous execution (opt-in)
+
+By default a human re-invokes the agent after each merge ("pick the next issue").
+To make the loop fully hands-off — human involvement ends at the merge until the
+next PR — enable the `ratchet-run` workflow:
+
+```
+gh variable set RATCHET_AUTO --body true
+gh secret set ANTHROPIC_API_KEY        # the agent runtime in CI (or swap to Codex)
+# FACTORY_PAT is already set by /factory-init
+gh workflow run ratchet-run            # kick off the first task after planning
+```
+
+Then every human merge triggers `ratchet-run`: it checks out the latest `main`
+(fresh, so the next branch is never stale), picks the top ready issue, and an
+agent works it to a PR and stops. You merge; it advances. The backlog drains one
+merge at a time, and the merge is the only thing you do.
+
+It is **safe by default**: without `RATCHET_AUTO=true` the workflow exists but
+no-ops, so nothing runs or fails unexpectedly. The agent step uses Claude Code;
+swap that one step for an OpenAI Codex action if you prefer. (Antigravity is used
+interactively rather than in CI.) Mind the cost — each run spends agent API
+tokens; set a budget/alert on your provider.

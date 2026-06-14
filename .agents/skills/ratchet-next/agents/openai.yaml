@@ -1,0 +1,7 @@
+# Codex skill metadata. Explicit-only: this acts on the repo (branches, pushes,
+# labels), so Codex must not invoke it implicitly. Invoke with /skills or $ratchet-next.
+policy:
+  allow_implicit_invocation: false
+interface:
+  display_name: "ratchet-next"
+  short_description: "Advance after merge, or rework after a PR rejection."

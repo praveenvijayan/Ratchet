@@ -1,8 +1,11 @@
 {
   "name": "ratchet",
-  "version": "1.0.0",
-  "description": "Ratchet — forward-only GitHub-native delivery loop: plan-issues, plan-sync, and factory-init skills for the AGENTS.md operating manual.",
-  "author": { "name": "Praveen Vijayan", "url": "https://github.com/praveenvijayan" },
+  "version": "1.2.0",
+  "description": "Ratchet \u2014 forward-only GitHub-native delivery loop: plan-issues, plan-sync, and factory-init skills for the AGENTS.md operating manual.",
+  "author": {
+    "name": "Praveen Vijayan",
+    "url": "https://github.com/praveenvijayan"
+  },
   "homepage": "https://github.com/praveenvijayan/Ratchet",
   "skills": "./skills"
 }

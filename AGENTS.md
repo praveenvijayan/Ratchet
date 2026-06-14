@@ -55,13 +55,25 @@ to you, it outranks all new work — finish what a human already reviewed.
 Never pick a blocked issue. Never skip the queue because something looks more
 interesting.
 
-### 2. Claim — atomic, via branch creation
-The claim **is** creating the branch `agent/issue-<N>`. Branch creation
-succeeds or fails atomically. If it fails, another agent owns the issue — exit
-quietly. After the branch exists, set label `state:in-progress` and self-assign.
-Labels never claim anything; they only report.
+### 2. Claim — atomic, via branch creation, from up-to-date main
+**Always branch from the latest `main`.** Before creating the branch, sync:
+`git fetch origin` then `git checkout main` and `git pull --ff-only origin main`
+(for worktree agents: create the worktree off freshly-fetched `origin/main`).
+`--ff-only` is deliberate — if local `main` can't fast-forward, stop and surface
+it rather than entangle histories. Never branch from another agent's branch;
+every issue starts from a clean, current `main` so its PR diffs against today's
+code, not yesterday's.
 
-> No branch, no work.
+Then the claim **is** creating the branch `agent/issue-<N>` off that updated
+`main`. Branch creation succeeds or fails atomically. If it fails, another agent
+owns the issue — exit quietly. After the branch exists, set label
+`state:in-progress` and self-assign. Labels never claim anything; they report.
+
+**Pick → claim → build is one continuous motion.** Having picked an issue,
+proceed through claim and build without pausing to ask for confirmation — the
+human gate is the PR review, not the claim. Do not ask "shall I start?"; start.
+
+> No branch, no work. Always from fresh main.
 
 ### 3. Build — to the criteria, not the idea
 Implement exactly what the issue's acceptance criteria state, in small
@@ -69,6 +81,7 @@ conventional commits, following patterns already in the repo. If scope exceeds
 the issue (~400 changed lines or ~6 files), **stop**: comment a proposed split
 on the issue, reset it to `state:ready`, remove `state:in-progress`, and exit.
 Scope creep is a planning failure, not a licence to improvise.
+
 
 ### 4. Verify — locally, fail-fast, before pushing
 Run the **Gates** in order. Stop at the first failure. You get two fix attempts.
@@ -87,13 +100,24 @@ and the gate checklist with real results. If an open PR already exists for
 > You never merge, never approve, never close issues, never push to `main`.
 > The PR is your terminal action.
 
-### 6. Rework — only when a human requests changes
-When a PR gets a "Request changes" review, the issue flips to
-`state:changes-requested` and you are re-invoked. Work the **same branch and
-same PR**: read every review comment, fix each with a focused commit, re-run all
-gates, and reply to each comment with the commit SHA that addresses it. New
-scope discovered in review does **not** expand this PR — it becomes a new
-`plan/*.md` file. Merge what is correct; queue what is new.
+### 6. Rework — when a human rejects, via any channel
+A rejection can arrive three ways; recognise and handle all of them (the
+`/ratchet-next` skill automates this):
+- **Request Changes review** — `gh pr view <N> --json reviewDecision` shows
+  `CHANGES_REQUESTED`.
+- **Closed with a comment** (not merged) — the PR is closed; read the closing
+  comment, reopen the PR (`gh pr reopen <N>`) or open a fresh one from the same
+  branch after fixing.
+- **Direct feedback in chat** — the human just tells you the reason.
+
+Gather all available feedback (review summary + line comments via
+`gh pr view`/`gh api .../pulls/<N>/comments`, plus anything said in chat) and
+reconcile it. Then work the **same branch and same PR**: set the issue to
+`state:changes-requested`, fix each point with a focused commit, re-run the
+gates, push (the PR updates automatically — never open a second), and reply to
+each comment with the commit SHA that resolves it. Set the issue back to
+`state:in-review`. New scope discovered in review does **not** expand this PR —
+it becomes a new `plan/*.md` file. Fix what's wrong; queue what's new.
 
 ### 7. System closes the loop (no agent involved)
 A human merges. GitHub closes the issue via `Closes #<N>`. Two workflows react:
@@ -137,7 +161,30 @@ history in Tier 3 means pruning never loses information.
 
 ---
 
+## Continuous operation (how the next task starts)
+
+You never poll, wait, or self-invoke. You do exactly one issue and stop at the
+PR. The human reviews it, and their decision drives what happens next — surfaced
+to your local environment in real time by the watcher
+(`scripts/ratchet-watch.sh`, built on `gh webhook forward`). Run `/ratchet-next`
+in response (the watcher can do this for you):
+
+- **Approved & merged →** sync to the merged code
+  (`git checkout main && git fetch && git pull --ff-only`) and start the next
+  ready issue. Because this happens *after* the merge, your new branch is always
+  based on current `main` — never stale.
+- **Rejected →** rework the same PR (step 6), reading feedback from the Request
+  Changes review, a close-with-comment, or what the human told you in chat.
+
+This stays fully local — no CI, no extra API key, just your authenticated `gh`.
+The human gate is the merge/review; between decisions the loop advances on its
+own. (An optional CI-based runner, `ratchet-run.yml`, exists for teams who want
+unattended execution, but it is off by default and not required.)
+
+---
+
 ## Gates (defined in GATES.md)
+
 
 The verification gates — what must pass before a PR opens — live in `GATES.md`,
 the one project-owned config file. Read `GATES.md` and run its commands in order,

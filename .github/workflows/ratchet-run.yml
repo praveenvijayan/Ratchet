@@ -1,0 +1,88 @@
+name: ratchet-run
+
+# Hands-off continuous execution. On every human merge, pick the next ready
+# issue and have an agent work it, then stop at a PR. The human's only action
+# between PRs is the merge.
+#
+# OPT-IN and SAFE BY DEFAULT: the job is skipped unless the repo variable
+# RATCHET_AUTO is set to "true". To enable:
+#   1) gh variable set RATCHET_AUTO --body true
+#   2) gh secret set ANTHROPIC_API_KEY      (or swap the agent step for Codex)
+#   3) gh secret set FACTORY_PAT            (already set by /factory-init)
+# Disable any time by setting RATCHET_AUTO=false — the workflow stays but no-ops.
+#
+# Why a fresh checkout solves staleness: the next task starts only AFTER a merge,
+# so checking out main here always includes the just-merged work. No drift.
+
+on:
+  pull_request:
+    types: [closed]
+  workflow_dispatch: {}   # kick off the loop after planning, or restart it
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: ratchet-run        # never two agents at once
+  cancel-in-progress: false # queue, don't cancel
+
+jobs:
+  next-task:
+    if: ${{ vars.RATCHET_AUTO == 'true' && (github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.FACTORY_PAT }}
+
+      - name: Pick the next ready, unblocked issue
+        id: pick
+        env:
+          GH_TOKEN: ${{ secrets.FACTORY_PAT }}
+        run: |
+          set -euo pipefail
+          # state:ready issues are unblocked by construction (unblock-dependents
+          # only promotes once all blockers close). Rank by priority, then age.
+          issues="$(gh issue list --state open --label 'state:ready' --limit 100 \
+            --json number,createdAt,labels)"
+          pick="$(printf '%s' "$issues" | jq -r '
+            map(. + {pri: (
+              if any(.labels[]; .name=="priority:high") then 0
+              elif any(.labels[]; .name=="priority:medium") then 1
+              else 2 end)})
+            | sort_by(.pri, .createdAt)
+            | (.[0].number // empty)')"
+          if [ -n "$pick" ]; then
+            echo "has_issue=true" >> "$GITHUB_OUTPUT"
+            echo "number=$pick"  >> "$GITHUB_OUTPUT"
+            echo "Picked issue #$pick"
+          else
+            echo "has_issue=false" >> "$GITHUB_OUTPUT"
+            echo "No ready issues — backlog drained. Nothing to do."
+          fi
+
+      # --- Agent step: Claude Code. Swap this block for OpenAI Codex if preferred. ---
+      - name: Work the issue
+        if: steps.pick.outputs.has_issue == 'true'
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.FACTORY_PAT }}
+          prompt: |
+            Follow the operating manual in AGENTS.md exactly.
+            Work issue #${{ steps.pick.outputs.number }} end to end:
+            - Claim it: branch agent/issue-${{ steps.pick.outputs.number }} from
+              up-to-date main, set label state:in-progress.
+            - Build to the issue's acceptance criteria, small commits.
+            - Run the gates in GATES.md in order, fail-fast. Never open a red PR.
+            - Open a PR whose first line is "Closes #${{ steps.pick.outputs.number }}",
+              with a summary and the gate results. Then STOP.
+            Do not merge. Do not pick or touch any other issue.
+          claude_args: |
+            --model claude-sonnet-4-6
+            --max-turns 60
+            --allowedTools Bash,Edit,Write,Read,Glob,Grep
