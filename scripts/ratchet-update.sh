@@ -23,7 +23,7 @@ FRAMEWORK_PATHS=(
   scripts/ratchet-watch.sh scripts/ratchet-watch.mjs
   setup.sh
   plan/README.md
-  AGENTS.md CLAUDE.md GEMINI.md
+  AGENTS.md CLAUDE.md GEMINI.md DOCS.md
   .env.example
 )
 

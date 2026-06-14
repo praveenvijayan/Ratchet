@@ -170,6 +170,7 @@ side effects. Invoke as `/name` in Claude Code or Antigravity, or `/skills` /
 |-------|-------------|--------------|
 | `/factory-init` | Once per repo | Creates the 9 state/priority labels, detects the stack and fills `GATES.md`, scaffolds `memory/`, and verifies the PAT. Idempotent. |
 | `/plan-issues` | After ideating | Turns the solidified idea into `plan/*.md` files (one per issue), then stops for review. Never creates issues directly. |
+| `/ratchet-issue-report` | The moment you find a bug/improvement | Writes one well-formed `plan/*.md` (with acceptance criteria) and stops. Never fixes, edits code, or branches — the strict "found something" front door. |
 | `/plan-sync` | While iterating on a plan | Runs `plan-sync.mjs` locally to compile `plan/*.md` into issues now, instead of waiting for the push-triggered workflow. |
 | `/ratchet-next` | After a merge or review | Advances (sync main + next issue) on approval, or reworks the same PR on rejection. The heart of the continuous local loop. |
 | `/memory-compact` | Periodically (e.g. quarterly) | Prunes and dedupes `memory/MEMORY.md`, verifies issue/PR links, stops for review. |
@@ -260,10 +261,12 @@ For new work, **do not hand-create the issue on github.com.** Issues are compile
 from `plan/*.md`, and a hand-made issue almost always lacks acceptance criteria —
 which parks it in `state:draft`, unpickable, forever. The disciplined path:
 
-1. Add a plan file — describe it to your agent ("found a bug: …, file it") and let
-   `/plan-issues` write a correctly-formed `plan/NNNN-slug.md`, or write it by
-   hand. It **must** have an `## Acceptance criteria` block with `- [ ]` items.
-   A standalone bug uses `blocked_by: []` so it lands straight in `state:ready`.
+1. **The front door is `/ratchet-issue-report <description>`** — e.g.
+   `/ratchet-issue-report google signin not working`. It writes a well-formed
+   `plan/*.md` (slug, priority, and a real `## Acceptance criteria` block derived
+   from the symptom) and **stops** — it never edits code, branches, or applies a
+   fix, even if the fix is obvious or the report is urgent. (`/plan-issues` is
+   the equivalent for turning a whole ideation into multiple plan files.)
 2. Commit `plan/` (triggers `plan-sync`) or run `/plan-sync` to compile it now.
 3. The agent picks it up automatically on its next advance. **Priority is how you
    triage:** a `priority:high` issue with no blockers jumps to the front of the
@@ -463,8 +466,7 @@ gh secret set FACTORY_PAT          # enable workflow chaining
 # Plan
 /plan-issues                       # idea → plan/*.md  (then commit, or:)
 /plan-sync                         # compile plan/*.md → issues now
-# Report a found bug/improvement: describe it, /plan-issues writes a plan file
-# (must have ## Acceptance criteria); priority:high jumps the queue.
+/ratchet-issue-report <desc>      # file a found bug/improvement as a plan file (never fixes)
 
 # Run the loop (local)
 ./scripts/ratchet-watch.sh         # real-time merge/review signals

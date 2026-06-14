@@ -59,11 +59,11 @@ scripts/
 setup.sh                       Sync skills into each tool's location
 ```
 
-The five skills: **`/plan-issues`** (idea → `plan/*.md`), **`/plan-sync`**
+The skills: **`/plan-issues`** (idea → `plan/*.md`), **`/plan-sync`**
 (compile plan files → issues now), **`/factory-init`** (one-time: labels, gate
-detection into `GATES.md`, memory scaffold, PAT check), **`/memory-compact`**
-(prune & dedupe `memory/MEMORY.md`), **`/ratchet-update`** (pull a newer
-framework version, project files untouched).
+detection into `GATES.md`, memory scaffold, PAT check), **`/ratchet-issue-report`** (file a found bug/improvement as a plan file, never
+fixing it directly), **`/memory-compact`** (prune & dedupe `memory/MEMORY.md`),
+**`/ratchet-update`** (pull a newer framework version, project files untouched).
 
 ## Install
 
