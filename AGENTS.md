@@ -8,7 +8,7 @@ webhook service — events in GitHub advance the system, not agents.
 This manual is read natively by all three tools (Codex and Antigravity read
 `AGENTS.md`; Claude Code reads it too, and the thin `CLAUDE.md` points here as a
 backstop). It is 100% framework and project-agnostic — the only project-specific
-file is `GATES.md`, which `/factory-init` fills in for you. Everything in this
+file is `GATES.md`, which `/ratchet-init` fills in for you. Everything in this
 manual is reusable as-is and safe to overwrite on update.
 
 ---
@@ -159,7 +159,7 @@ How you use it each issue:
 
 Rules: a fact earns a place in `MEMORY.md` only if it will save a future agent
 from re-reading history; raw detail stays in issues/PRs. Never edit `USER.md`.
-Keep `MEMORY.md` small — prune obsolete entries (run `/memory-compact`); the
+Keep `MEMORY.md` small — prune obsolete entries (run `/ratchet-memory`); the
 history in Tier 3 means pruning never loses information.
 
 ---
@@ -191,7 +191,7 @@ unattended execution, but it is off by default and not required.)
 
 The verification gates — what must pass before a PR opens — live in `GATES.md`,
 the one project-owned config file. Read `GATES.md` and run its commands in order,
-fail-fast. `/factory-init` fills `GATES.md` in by detecting your stack; this
+fail-fast. `/ratchet-init` fills `GATES.md` in by detecting your stack; this
 manual never needs per-project edits.
 
 ---

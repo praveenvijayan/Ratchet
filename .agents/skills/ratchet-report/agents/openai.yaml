@@ -1,0 +1,7 @@
+# Codex skill metadata. Explicit-only: it writes a plan file as a deliberate act
+# and must never auto-fire. Invoke with /skills or $ratchet-report.
+policy:
+  allow_implicit_invocation: false
+interface:
+  display_name: "ratchet-report"
+  short_description: "File a found bug/improvement as a plan file — never fix it directly."

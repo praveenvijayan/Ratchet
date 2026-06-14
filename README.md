@@ -59,10 +59,10 @@ scripts/
 setup.sh                       Sync skills into each tool's location
 ```
 
-The skills: **`/plan-issues`** (idea → `plan/*.md`), **`/plan-sync`**
-(compile plan files → issues now), **`/factory-init`** (one-time: labels, gate
-detection into `GATES.md`, memory scaffold, PAT check), **`/ratchet-issue-report`** (file a found bug/improvement as a plan file, never
-fixing it directly), **`/memory-compact`** (prune & dedupe `memory/MEMORY.md`),
+The skills: **`/ratchet-plan`** (idea → `plan/*.md`), **`/ratchet-sync`**
+(compile plan files → issues now), **`/ratchet-init`** (one-time: labels, gate
+detection into `GATES.md`, memory scaffold, PAT check), **`/ratchet-report`** (file a found bug/improvement as a plan file, never
+fixing it directly), **`/ratchet-memory`** (prune & dedupe `memory/MEMORY.md`),
 **`/ratchet-update`** (pull a newer framework version, project files untouched).
 
 ## Install
@@ -75,7 +75,7 @@ fixing it directly), **`/memory-compact`** (prune & dedupe `memory/MEMORY.md`),
    ./setup.sh user-agents     # optional: install for Codex/Antigravity across all repos
    ```
    Codex and Antigravity also read `.agents/skills/` directly with no setup.
-3. Run **`/factory-init`** in your agent. It creates the labels, detects your
+3. Run **`/ratchet-init`** in your agent. It creates the labels, detects your
    stack to fill the Gates table in `AGENTS.md`, and walks you through the PAT.
 
 ### Claude Code, one-command alternative
@@ -94,14 +94,14 @@ issue close would stall the loop. The workflows read
 `${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN }}`, so set a fine-grained PAT
 as the `FACTORY_PAT` repo secret (and in `.env` as `GITHUB_PAT` for local runs).
 With pure human merges the fallback works; the PAT makes it bulletproof.
-`/factory-init` checks this and guides you. **Never commit a real token** —
+`/ratchet-init` checks this and guides you. **Never commit a real token** —
 `.env` is gitignored; only `.env.example` is committed.
 
 ## The loop
 
 1. **Ideate** with the LLM until the idea is solid.
-2. **`/plan-issues`** → writes `plan/*.md`, one file per issue, then stops.
-3. **Review** the plan files; commit `plan/` (or run **`/plan-sync`**).
+2. **`/ratchet-plan`** → writes `plan/*.md`, one file per issue, then stops.
+3. **Review** the plan files; commit `plan/` (or run **`/ratchet-sync`**).
 4. Issues appear (`state:ready`). The agent **picks** the top unblocked one,
    **claims** it by creating `agent/issue-N`, **builds** to the acceptance
    criteria, **verifies** the gates fail-fast, and opens a **PR** with
@@ -130,7 +130,7 @@ Three tiers, all GitHub-native — no vector DB, no external service:
 The agent reads Tiers 1–2 each issue, searches Tier 3 when context is missing,
 and proposes `MEMORY.md` edits **inside its PR** — so memory changes are reviewed
 like code, never written silently. It never edits `USER.md`. Run
-`/memory-compact` periodically to prune stale entries. Because all three tools
+`/ratchet-memory` periodically to prune stale entries. Because all three tools
 read `AGENTS.md`, this works identically in Claude Code, Codex, and Antigravity.
 
 ## Updating Ratchet
@@ -160,7 +160,7 @@ next PR — enable the `ratchet-run` workflow:
 ```
 gh variable set RATCHET_AUTO --body true
 gh secret set ANTHROPIC_API_KEY        # the agent runtime in CI (or swap to Codex)
-# FACTORY_PAT is already set by /factory-init
+# FACTORY_PAT is already set by /ratchet-init
 gh workflow run ratchet-run            # kick off the first task after planning
 ```
 

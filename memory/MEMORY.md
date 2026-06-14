@@ -7,7 +7,7 @@ Rules:
 - An entry earns its place only if it saves a future agent from re-reading
   history. Raw detail lives in issues/PRs/commits — link to them, don't copy them.
 - Each entry is 1–2 lines and cites its source: (#123) or (PR #456).
-- Keep it small and current. Prune obsolete entries with /memory-compact — the
+- Keep it small and current. Prune obsolete entries with /ratchet-memory — the
   full history in closed issues/PRs/git means pruning never loses information.
 - Group by area. If this file outgrows ~300 lines, that's a signal to compact.
 -->

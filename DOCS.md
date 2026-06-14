@@ -168,15 +168,15 @@ side effects. Invoke as `/name` in Claude Code or Antigravity, or `/skills` /
 
 | Skill | When to run | What it does |
 |-------|-------------|--------------|
-| `/factory-init` | Once per repo | Creates the 9 state/priority labels, detects the stack and fills `GATES.md`, scaffolds `memory/`, and verifies the PAT. Idempotent. |
-| `/plan-issues` | After ideating | Turns the solidified idea into `plan/*.md` files (one per issue), then stops for review. Never creates issues directly. |
-| `/ratchet-issue-report` | The moment you find a bug/improvement | Writes one well-formed `plan/*.md` (with acceptance criteria) and stops. Never fixes, edits code, or branches — the strict "found something" front door. |
-| `/plan-sync` | While iterating on a plan | Runs `plan-sync.mjs` locally to compile `plan/*.md` into issues now, instead of waiting for the push-triggered workflow. |
+| `/ratchet-init` | Once per repo | Creates the 9 state/priority labels, detects the stack and fills `GATES.md`, scaffolds `memory/`, and verifies the PAT. Idempotent. |
+| `/ratchet-plan` | After ideating | Turns the solidified idea into `plan/*.md` files (one per issue), then stops for review. Never creates issues directly. |
+| `/ratchet-report` | The moment you find a bug/improvement | Writes one well-formed `plan/*.md` (with acceptance criteria) and stops. Never fixes, edits code, or branches — the strict "found something" front door. |
+| `/ratchet-sync` | While iterating on a plan | Runs `plan-sync.mjs` locally to compile `plan/*.md` into issues now, instead of waiting for the push-triggered workflow. |
 | `/ratchet-next` | After a merge or review | Advances (sync main + next issue) on approval, or reworks the same PR on rejection. The heart of the continuous local loop. |
-| `/memory-compact` | Periodically (e.g. quarterly) | Prunes and dedupes `memory/MEMORY.md`, verifies issue/PR links, stops for review. |
+| `/ratchet-memory` | Periodically (e.g. quarterly) | Prunes and dedupes `memory/MEMORY.md`, verifies issue/PR links, stops for review. |
 | `/ratchet-update` | To upgrade | Pulls newer framework files onto a review branch; never touches project-owned files. |
 
-### Detail: `/factory-init`
+### Detail: `/ratchet-init`
 
 Run once in a new repo. It is the only setup step beyond installing the skills.
 It creates labels with `--force` (idempotent), detects the project's package
@@ -187,7 +187,7 @@ scaffolds `memory/USER.md` and `memory/MEMORY.md`, and checks that the
 it never reads, writes, or prints a token). On a greenfield repo it leaves the
 default `GATES.md` and asks you to re-run once code exists.
 
-### Detail: `/plan-issues`
+### Detail: `/ratchet-plan`
 
 Decomposes the current conversation's idea into issue-sized units (one PR closes
 one issue), assigns sequential slugs continuing from the highest existing
@@ -261,13 +261,13 @@ For new work, **do not hand-create the issue on github.com.** Issues are compile
 from `plan/*.md`, and a hand-made issue almost always lacks acceptance criteria —
 which parks it in `state:draft`, unpickable, forever. The disciplined path:
 
-1. **The front door is `/ratchet-issue-report <description>`** — e.g.
-   `/ratchet-issue-report google signin not working`. It writes a well-formed
+1. **The front door is `/ratchet-report <description>`** — e.g.
+   `/ratchet-report google signin not working`. It writes a well-formed
    `plan/*.md` (slug, priority, and a real `## Acceptance criteria` block derived
    from the symptom) and **stops** — it never edits code, branches, or applies a
-   fix, even if the fix is obvious or the report is urgent. (`/plan-issues` is
+   fix, even if the fix is obvious or the report is urgent. (`/ratchet-plan` is
    the equivalent for turning a whole ideation into multiple plan files.)
-2. Commit `plan/` (triggers `plan-sync`) or run `/plan-sync` to compile it now.
+2. Commit `plan/` (triggers `plan-sync`) or run `/ratchet-sync` to compile it now.
 3. The agent picks it up automatically on its next advance. **Priority is how you
    triage:** a `priority:high` issue with no blockers jumps to the front of the
    deterministic pick order, preempting lower-priority ready work — so an urgent
@@ -297,7 +297,7 @@ Ratchet keeps a long-running project tractable without a vector database:
 
 The agent reads tiers 1–2 each issue, searches tier 3 when context is missing,
 and proposes `MEMORY.md` edits **inside its PR** — so memory changes are reviewed
-like code, never written silently. `/memory-compact` prunes the cache; because
+like code, never written silently. `/ratchet-memory` prunes the cache; because
 the real record is in tier 3, pruning never loses information.
 
 ---
@@ -377,7 +377,7 @@ Ratchet is published as a GitHub **template repository** and (for Claude Code) a
    ./setup.sh user-agents     # optional: ~/.agents/skills for all projects
    ```
    Codex and Antigravity read `.agents/skills/` directly with no setup.
-3. **Run `/factory-init`** in your agent — labels, gate detection into
+3. **Run `/ratchet-init`** in your agent — labels, gate detection into
    `GATES.md`, memory scaffold, PAT check.
 4. **Set the PAT** (see §10).
 
@@ -407,7 +407,7 @@ GITHUB_PAT=<your fine-grained PAT>
 
 Scope it to the repo with **Issues: Read/Write, Contents: Read/Write, Pull
 requests: Read/Write**. With pure human merges the default-token fallback works;
-the PAT makes the loop bulletproof against any automated close. `/factory-init`
+the PAT makes the loop bulletproof against any automated close. `/ratchet-init`
 checks presence (never the value). **Never commit a real token** — `.env` is
 gitignored; only `.env.example` is committed.
 
@@ -448,7 +448,7 @@ project-owned set:
 | Dotfolders (`.github`, `.agents`, `.claude`) missing after upload | macOS Finder hides dotfiles, so a browser drag-and-drop skips them | Upload via `git` (`cp -R src/. .` copies hidden files), never the web file picker |
 | Dependents don't become `state:ready` after a merge | `FACTORY_PAT` not set, so workflow-chaining is blocked | Set the `FACTORY_PAT` secret (§10) |
 | Agent's PR conflicts / re-does merged work | Branched from stale local `main` | The claim step now does `git pull --ff-only` first; ensure you're on the current framework (`/ratchet-update`) |
-| `/factory-init` doesn't create `GATES.md` | Legacy repo created before the GATES extraction; gates still inline in `AGENTS.md` | `/ratchet-update` to get the new `AGENTS.md`, then `/factory-init` to write `GATES.md` |
+| `/ratchet-init` doesn't create `GATES.md` | Legacy repo created before the GATES extraction; gates still inline in `AGENTS.md` | `/ratchet-update` to get the new `AGENTS.md`, then `/ratchet-init` to write `GATES.md` |
 | Agent pauses and asks "shall I start?" | Claim-step autonomy not in older `AGENTS.md`, or tool needs permission for `gh`/`git` | Update via `/ratchet-update`; grant the agent standing `Bash(gh:*)` / `Bash(git:*)` permission |
 | Watcher receives nothing | `gh webhook forward` needs the `cli/gh-webhook` extension and a running receiver | `ratchet-watch.sh` installs the extension and starts the receiver; check it's still in the foreground |
 | `ratchet-run` workflow does nothing | It is off by default | Set repo variable `RATCHET_AUTO=true` and an agent API key — only if you want CI execution |
@@ -460,20 +460,20 @@ project-owned set:
 ```
 # Setup (once per repo)
 ./setup.sh                         # place skills for all three tools
-/factory-init                      # labels, gates, memory, PAT check
+/ratchet-init                      # labels, gates, memory, PAT check
 gh secret set FACTORY_PAT          # enable workflow chaining
 
 # Plan
-/plan-issues                       # idea → plan/*.md  (then commit, or:)
-/plan-sync                         # compile plan/*.md → issues now
-/ratchet-issue-report <desc>      # file a found bug/improvement as a plan file (never fixes)
+/ratchet-plan                       # idea → plan/*.md  (then commit, or:)
+/ratchet-sync                         # compile plan/*.md → issues now
+/ratchet-report <desc>      # file a found bug/improvement as a plan file (never fixes)
 
 # Run the loop (local)
 ./scripts/ratchet-watch.sh         # real-time merge/review signals
 /ratchet-next                      # advance after merge, or rework after reject
 
 # Maintain
-/memory-compact                    # prune memory/MEMORY.md
+/ratchet-memory                    # prune memory/MEMORY.md
 /ratchet-update [vX.Y.Z]           # upgrade the framework
 ```
 

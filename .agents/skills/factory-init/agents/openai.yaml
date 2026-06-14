@@ -1,7 +1,0 @@
-# Codex skill metadata. Explicit-only: these skills have side effects, so Codex
-# must not invoke them implicitly. Invoke with /skills or $factory-init.
-policy:
-  allow_implicit_invocation: false
-interface:
-  display_name: "factory-init"
-  short_description: "One-time repo setup: labels, gates, PAT check."

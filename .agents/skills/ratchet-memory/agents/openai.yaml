@@ -1,0 +1,7 @@
+# Codex skill metadata. Explicit-only: editing MEMORY.md is a side effect, so
+# Codex must not invoke it implicitly. Invoke with /skills or $ratchet-memory.
+policy:
+  allow_implicit_invocation: false
+interface:
+  display_name: "ratchet-memory"
+  short_description: "Prune and dedupe MEMORY.md; verify links."

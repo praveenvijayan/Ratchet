@@ -32,7 +32,7 @@ Pull a newer version of the Ratchet framework into this repo, safely.
 
 - Show `git diff --stat` and a short summary of what changed (framework only).
 - If `AGENTS.md` or `GATES.md` semantics changed in this release, remind the
-  user they can re-run `/factory-init` to refresh `GATES.md` from their stack.
+  user they can re-run `/ratchet-init` to refresh `GATES.md` from their stack.
 - Do **not** commit, push, or merge. Hand the user the commands to finish:
   ```
   git add -A && git commit -m "Update Ratchet framework to <version>"

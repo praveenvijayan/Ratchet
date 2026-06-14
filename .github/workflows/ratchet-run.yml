@@ -8,7 +8,7 @@ name: ratchet-run
 # RATCHET_AUTO is set to "true". To enable:
 #   1) gh variable set RATCHET_AUTO --body true
 #   2) gh secret set ANTHROPIC_API_KEY      (or swap the agent step for Codex)
-#   3) gh secret set FACTORY_PAT            (already set by /factory-init)
+#   3) gh secret set FACTORY_PAT            (already set by /ratchet-init)
 # Disable any time by setting RATCHET_AUTO=false — the workflow stays but no-ops.
 #
 # Why a fresh checkout solves staleness: the next task starts only AFTER a merge,
