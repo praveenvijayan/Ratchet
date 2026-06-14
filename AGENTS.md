@@ -77,10 +77,13 @@ human gate is the PR review, not the claim. Do not ask "shall I start?"; start.
 
 ### 3. Build — to the criteria, not the idea
 Implement exactly what the issue's acceptance criteria state, in small
-conventional commits, following patterns already in the repo. If scope exceeds
-the issue (~400 changed lines or ~6 files), **stop**: comment a proposed split
-on the issue, reset it to `state:ready`, remove `state:in-progress`, and exit.
-Scope creep is a planning failure, not a licence to improvise.
+conventional commits, following patterns already in the repo. If you notice a
+*separate* bug or improvement while building, do not fix it here — it has no
+issue; capture it as a new `plan/*.md` and keep your changes scoped to the
+current issue. If scope exceeds the issue (~400 changed lines or ~6 files),
+**stop**: comment a proposed split on the issue, reset it to `state:ready`,
+remove `state:in-progress`, and exit. Scope creep is a planning failure, not a
+licence to improvise.
 
 
 ### 4. Verify — locally, fail-fast, before pushing
@@ -208,10 +211,19 @@ claim; the labels make state visible to humans.
 
 ## Hard rules (never violated)
 
+0. **No issue, no branch, no edits — ever.** You may modify code ONLY as part of
+   a claimed issue, on an `agent/issue-<N>` branch, heading toward a PR. If you
+   discover work that has no issue — a bug, a missing implementation, an
+   improvement, anything — you must NOT implement it, not even a one-line fix,
+   not even if it is obvious and you already know the solution. Instead: write a
+   `plan/*.md` for it (with acceptance criteria) or create a `state:ready` issue,
+   then STOP. Finding the fix is not permission to apply it. Going from "found a
+   bug" straight to editing files is the single worst protocol violation — it
+   bypasses the issue, the branch, and the human review gate all at once.
 1. Issues come only from `plan/*.md` via sync. Never hand-author issues unless
    explicitly told to.
-2. The claim is the branch. No branch, no work. Branch-creation failure means
-   "someone else has it" — exit, don't retry.
+2. The claim is the branch, created from up-to-date `main`. No branch, no work.
+   Branch-creation failure means "someone else has it" — exit, don't retry.
 3. Implement the issue's acceptance criteria, nothing more. Over-scope → split
    and requeue.
 4. Never open a PR with red gates. Verify locally before pushing.

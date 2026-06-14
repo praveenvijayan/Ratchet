@@ -244,7 +244,39 @@ an issue with any open blocker is `state:blocked`. The file owns issue *content*
 once an issue leaves `ready`/`draft`, sync stops touching it so live work is
 never clobbered.
 
+### Reporting something you found (bug, improvement, follow-up)
+
+When you spot a problem or an improvement, first decide which of two paths it is —
+they are handled differently on purpose:
+
+- **It blocks the PR you're reviewing** → that's a **rejection, not a new issue**.
+  Request Changes (or comment), and `/ratchet-next` reworks the same branch (§8).
+  Do not open an issue for it.
+- **It's separate or new work** (a bug in unrelated code, an improvement, anything
+  noticed after merge) → it becomes a **new plan-backed issue** and re-enters the
+  queue.
+
+For new work, **do not hand-create the issue on github.com.** Issues are compiled
+from `plan/*.md`, and a hand-made issue almost always lacks acceptance criteria —
+which parks it in `state:draft`, unpickable, forever. The disciplined path:
+
+1. Add a plan file — describe it to your agent ("found a bug: …, file it") and let
+   `/plan-issues` write a correctly-formed `plan/NNNN-slug.md`, or write it by
+   hand. It **must** have an `## Acceptance criteria` block with `- [ ]` items.
+   A standalone bug uses `blocked_by: []` so it lands straight in `state:ready`.
+2. Commit `plan/` (triggers `plan-sync`) or run `/plan-sync` to compile it now.
+3. The agent picks it up automatically on its next advance. **Priority is how you
+   triage:** a `priority:high` issue with no blockers jumps to the front of the
+   deterministic pick order, preempting lower-priority ready work — so an urgent
+   bug is worked next without any manual assignment.
+
+If you must create an issue directly on GitHub for speed, you own the contract by
+hand: include the `## Acceptance criteria` + `- [ ]` block in the body and apply
+`state:ready` plus a `priority:*` label yourself, or no agent will pick it. The
+label is not the fix — the criteria are.
+
 ### Memory (three tiers)
+
 
 Ratchet keeps a long-running project tractable without a vector database:
 
@@ -431,6 +463,8 @@ gh secret set FACTORY_PAT          # enable workflow chaining
 # Plan
 /plan-issues                       # idea → plan/*.md  (then commit, or:)
 /plan-sync                         # compile plan/*.md → issues now
+# Report a found bug/improvement: describe it, /plan-issues writes a plan file
+# (must have ## Acceptance criteria); priority:high jumps the queue.
 
 # Run the loop (local)
 ./scripts/ratchet-watch.sh         # real-time merge/review signals
