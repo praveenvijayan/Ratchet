@@ -65,7 +65,8 @@ The skills: **`/ratchet-plan`** (idea → `plan/*.md`), **`/ratchet-sync`**
 detection into `GATES.md`, memory scaffold, codebase map, PAT check),
 **`/ratchet-memory`** (prune & dedupe `memory/MEMORY.md`), **`/ratchet-map`**
 (regenerate the coarse codebase map),
-**`/ratchet-update`** (pull a newer framework version, project files untouched).
+**`/ratchet-update`** (pull a newer framework version, project files untouched),
+**`/ratchet-uninstall`** (cleanly remove Ratchet; keeps your data by default).
 
 ## Install
 

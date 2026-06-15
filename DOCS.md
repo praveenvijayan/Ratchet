@@ -176,6 +176,7 @@ side effects. Invoke as `/name` in Claude Code or Antigravity, or `/skills` /
 | `/ratchet-memory` | Periodically (e.g. quarterly) | Prunes and dedupes `memory/MEMORY.md`, verifies issue/PR links, stops for review. |
 | `/ratchet-map` | When structure drifts | Regenerates the coarse codebase map `memory/ARCHITECTURE.md` (language-agnostic), stops for review. |
 | `/ratchet-update` | To upgrade | Pulls newer framework files onto a review branch; never touches project-owned files. |
+| `/ratchet-uninstall` | To remove Ratchet | Removes framework files (keeps your `memory/` and plans by default) and offers GitHub-side cleanup; never deletes issues or branch protection. |
 
 ### Detail: `/ratchet-init`
 
@@ -481,6 +482,7 @@ gh secret set FACTORY_PAT          # enable workflow chaining
 /ratchet-memory                    # prune memory/MEMORY.md
 /ratchet-map                       # regenerate memory/ARCHITECTURE.md
 /ratchet-update [vX.Y.Z]           # upgrade the framework
+/ratchet-uninstall                 # remove Ratchet (files via PR; data kept by default)
 ```
 
 ---

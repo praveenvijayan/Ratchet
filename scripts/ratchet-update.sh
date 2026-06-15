@@ -21,6 +21,7 @@ FRAMEWORK_PATHS=(
   .github/workflows
   scripts/plan-sync.mjs scripts/ratchet-update.sh
   scripts/ratchet-watch.sh scripts/ratchet-watch.mjs
+  scripts/ratchet-uninstall.sh
   setup.sh
   plan/README.md
   AGENTS.md CLAUDE.md GEMINI.md DOCS.md

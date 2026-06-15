@@ -1,5 +1,6 @@
 <!--
-GATES.md — the ONLY project-specific file in Ratchet. It holds the verification
+GATES.md — the project config you hand-author (the memory/ files are the other
+project-specific files, but those are agent-generated). It holds the verification
 gates the agent runs before opening a PR. /ratchet-init fills this in by
 detecting your stack; edit it freely. Ratchet updates never overwrite this file.
 

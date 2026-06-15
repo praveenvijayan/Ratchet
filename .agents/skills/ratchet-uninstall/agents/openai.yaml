@@ -1,0 +1,7 @@
+# Codex skill metadata. Explicit-only: it deletes files and offers destructive
+# GitHub cleanup. Invoke with /skills or $ratchet-uninstall.
+policy:
+  allow_implicit_invocation: false
+interface:
+  display_name: "ratchet-uninstall"
+  short_description: "Cleanly remove Ratchet from this project (files + optional GitHub cleanup)."
