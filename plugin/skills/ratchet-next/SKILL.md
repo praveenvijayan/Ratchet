@@ -25,7 +25,12 @@ Decide what happened to the work in flight and act on it, against the live repo.
    unblocked issue (priority then age), claim it (branch from this fresh main),
    build to the acceptance criteria, run the gates in `GATES.md`, open a PR with
    `Closes #<N>`, then stop. Pick → claim → build is continuous; don't ask first.
-3. If no issue is `state:ready`, say the backlog is drained and stop.
+3. If no issue is `state:ready`, **do not just say "drained" and stop.**
+   Diagnose why (run the `/ratchet-status` checks): count states, find
+   `state:draft` issues missing acceptance criteria, trace `state:blocked`
+   chains to their root, and check for an open planning PR or uncommitted plan
+   files. Report the specific cause and the single next action to unblock — then
+   stop.
 
 ## 2B. Rework — PR rejected, or direct feedback
 

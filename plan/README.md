@@ -1,8 +1,37 @@
 # `plan/` — the source of truth for issues
 
 Every file in this folder compiles to exactly **one GitHub issue**. You author
-intent here; the `plan-sync` workflow turns it into issues on push. You never
-create issues by hand.
+intent here; the `plan-sync` workflow turns it into issues when the planning PR
+merges to `main`. You never create issues by hand.
+
+> **The one rule that matters most:** a file **must** have an
+> `## Acceptance criteria` block with at least one `- [ ]` item. Without it the
+> issue is created as `state:draft` — **unpickable** — and anything that depends
+> on it stays **frozen** forever. Most "the queue is stuck" problems are simply
+> drafts missing criteria. If you can't state a testable criterion, the work
+> isn't ready to plan yet.
+
+## Copy this template
+
+```markdown
+---
+title: <imperative summary of the one change>
+priority: high              # high | medium | low   (required)
+labels: [area]              # optional extra labels
+blocked_by: []              # other slugs like [0002-user-model], or []  (required)
+---
+
+One or two sentences: what this is and why it exists.
+
+## Acceptance criteria
+- [ ] <observable, testable outcome 1>
+- [ ] <observable, testable outcome 2>
+- [ ] <a test exists covering the above>
+```
+
+**Good criteria are observable outcomes, not tasks.** "Returns 401 on bad
+credentials" is testable; "handle errors properly" is not. If a criterion can't
+be checked by reading code or running a test, rewrite it.
 
 ## File naming
 
@@ -51,7 +80,7 @@ One or two sentences: what this is and why it exists.
   It enters the queue by priority. A `priority:high` file with no blockers jumps
   to the front automatically — that is the whole triage system.
 - **Rework on an open PR** → handled as review comments, not a plan file. See
-  `AGENT.md` step 6.
+  `AGENTS.md` step 6.
 
 The marker `<!-- plan-id: <slug> -->` embedded in each issue body is how the
 sync recognises its own issues. Do not remove it.

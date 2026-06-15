@@ -1,0 +1,7 @@
+# Codex skill metadata. Read-only diagnosis, but explicit-invoke for consistency.
+# Invoke with /skills or $ratchet-status.
+policy:
+  allow_implicit_invocation: false
+interface:
+  display_name: "ratchet-status"
+  short_description: "Diagnose the queue and recommend the next unblocking action."

@@ -110,22 +110,20 @@ async function main() {
   }
 
   // Pass 2: build bodies (with resolved Blocked by #N), then upsert.
+  const drafted = [];   // slugs that landed as state:draft (no acceptance criteria)
   for (const [slug, { fm, body, hasCriteria }] of plans) {
     const blockerNums = (fm.blocked_by || []).map((s) => slugToNumber.get(s)).filter(Boolean);
     const blockedText = blockerNums.length ? `\n\n${blockerNums.map((n) => `Blocked by #${n}`).join("\n")}` : "";
     const fullBody = `${body}${blockedText}\n\n${markerOf(slug)}`;
-    const labels = [
-      hasCriteria ? "state:ready" : "state:draft",
-      `priority:${fm.priority}`,
-      ...(fm.labels || []),
-    ];
-    if (blockerNums.length) labels[0] = "state:blocked";
+    const state = blockerNums.length ? "state:blocked" : (hasCriteria ? "state:ready" : "state:draft");
+    const labels = [state, `priority:${fm.priority}`, ...(fm.labels || [])];
+    if (state === "state:draft") drafted.push(slug);
 
     const existing = bySlug.get(slug);
     if (!existing) {
       const created = await gh("POST", `/repos/${REPO}/issues`, { title: fm.title, body: fullBody, labels });
       slugToNumber.set(slug, created.number);
-      console.log(`CREATE #${created.number} ${slug}`);
+      console.log(`CREATE #${created.number} [${state}] ${slug}`);
     } else {
       const current = stateLabels(existing).filter((l) => l.startsWith("state:"))[0];
       if (!EDITABLE_STATES.has(current) && current !== "state:blocked") {
@@ -133,8 +131,18 @@ async function main() {
         continue;
       }
       await gh("PATCH", `/repos/${REPO}/issues/${existing.number}`, { title: fm.title, body: fullBody, labels });
-      console.log(`UPDATE #${existing.number} ${slug}`);
+      console.log(`UPDATE #${existing.number} [${state}] ${slug}`);
     }
+  }
+
+  // Loud summary: drafts are unpickable and freeze anything that depends on them.
+  if (drafted.length) {
+    console.log("");
+    console.log(`WARNING: ${drafted.length} file(s) have NO acceptance criteria and were`);
+    console.log(`labelled state:draft — they will NOT be picked, and any issue blocked on`);
+    console.log(`them stays frozen. Add a "## Acceptance criteria" block with at least one`);
+    console.log(`- [ ] item to each, then re-sync:`);
+    for (const s of drafted) console.log(`  • ${s}`);
   }
 }
 

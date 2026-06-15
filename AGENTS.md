@@ -65,6 +65,14 @@ to you, it outranks all new work — finish what a human already reviewed.
 Never pick a blocked issue. Never skip the queue because something looks more
 interesting.
 
+If the query is empty (nothing `state:ready`), **do not stop with a bare
+"backlog drained."** Diagnose and report the real cause (this is what
+`/ratchet-status` does): how many issues are `state:draft` and which lack
+acceptance criteria; which are `state:blocked` and on what (a draft blocker is
+usually the root); whether a planning PR is open with unmerged plans; whether
+there are uncommitted plan files. End with the one action that unblocks the
+queue. "Drained" is almost always a planning-state problem, not an empty backlog.
+
 ### 2. Claim — atomic, via branch creation, from up-to-date main
 **Always branch from the latest `main`.** Before creating the branch, sync:
 `git fetch origin` then `git checkout main` and `git pull --ff-only origin main`
