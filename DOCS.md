@@ -126,7 +126,7 @@ identically everywhere.
 
 ```
 AGENTS.md                       Operating manual — the 7-step loop (100% framework)
-GATES.md                        The ONLY project-owned config: verification gates
+GATES.md                        Project config you hand-author: verification gates
 CLAUDE.md / GEMINI.md           One-line pointers to AGENTS.md
 DOCS.md                         This document
 README.md                       Overview and quick start
@@ -421,8 +421,8 @@ gitignored; only `.env.example` is committed.
 ## 11. Updating Ratchet
 
 Repos created from the template do not auto-update — upgrading is a deliberate,
-zero-merge command, because `AGENTS.md` is 100% framework and the only
-project-owned config is `GATES.md`.
+zero-merge command, because `AGENTS.md` is 100% framework; the project-specific
+files (`GATES.md` plus everything under `memory/`) live outside it.
 
 ```
 /ratchet-update           # pull upstream main onto a review branch
@@ -436,8 +436,8 @@ project-owned set:
 
 | Framework (pulled, overwrite-safe) | Project-owned (never touched) |
 |------------------------------------|-------------------------------|
-| `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `DOCS.md` | `GATES.md` |
-| `.agents/`, `.claude/`, `plugin/`, `.claude-plugin/` | `memory/USER.md`, `memory/MEMORY.md` |
+| `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `DOCS.md` | `GATES.md` (config) |
+| `.agents/`, `.claude/`, `plugin/`, `.claude-plugin/` | `memory/` (`USER.md`, `ARCHITECTURE.md`, `MEMORY.md`) |
 | `.github/workflows/`, `scripts/*` | your `plan/*.md` issue files |
 | `.env.example` | `.env`, `README.md`, `LICENSE`, `.gitignore`, your code |
 

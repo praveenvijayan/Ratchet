@@ -36,7 +36,7 @@ CLAUDE.md / GEMINI.md          One-line pointers to AGENTS.md for each tool.
 plugin/                        Optional Claude Code plugin packaging
 .claude-plugin/marketplace.json  Optional marketplace (Claude Code only)
 AGENTS.md                      Operating manual (100% framework, overwrite-safe)
-GATES.md                       The ONLY project-owned config (verification gates)
+GATES.md                       Project config you hand-author (verification gates)
 CLAUDE.md / GEMINI.md          One-line pointers to AGENTS.md for each tool
 .ratchet-version              Installed framework version (managed by the updater)
 .agents/skills/<name>/         Canonical skills (Codex + Antigravity)
@@ -50,6 +50,7 @@ plan/
   0001-email-login.md          Worked example
 memory/
   USER.md                      Human-owned preferences (agent reads, never edits)
+  ARCHITECTURE.md              Coarse codebase map (generated; scopes the agent's reads)
   MEMORY.md                    Distilled knowledge cache (agent proposes via PR)
 scripts/
   plan-sync.mjs                Zero-dep deterministic plan→issue compiler
@@ -121,8 +122,9 @@ the issue to `state:ready` with a comment — nothing gets silently stuck.
 Three tiers, all GitHub-native — no vector DB, no external service:
 
 1. **Working** — the claimed issue + acceptance criteria, in context.
-2. **Durable curated** — `memory/USER.md` (human-owned preferences) and
-   `memory/MEMORY.md` (agent-proposed, human-approved distilled knowledge),
+2. **Durable curated** — `memory/USER.md` (human-owned preferences),
+   `memory/ARCHITECTURE.md` (a coarse, generated codebase map that scopes the
+   agent's reads), and `memory/MEMORY.md` (agent-proposed distilled knowledge),
    read at the start of every issue. `MEMORY.md` is a **cache, not a log**: each
    entry is 1–2 lines linking to the issue/PR that is its real source, so it
    stays small even as the project grows huge.
@@ -139,7 +141,8 @@ read `AGENTS.md`, this works identically in Claude Code, Codex, and Antigravity.
 
 Repos created from the template don't auto-update (that's the template
 trade-off), but upgrading is one command and never needs a manual merge, because
-`AGENTS.md` is 100% framework and the only project-owned config is `GATES.md`.
+`AGENTS.md` is 100% framework; the project-specific files (`GATES.md` config
+plus the `memory/` files) live outside it and the updater never touches them.
 
 ```
 /ratchet-update           # pull upstream main onto a review branch
