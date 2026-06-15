@@ -1,10 +1,12 @@
 name: plan-sync
 
-# Compiles plan/*.md into GitHub issues whenever the plan changes.
-# This is the seam: commit a plan file, issues appear. No manual step.
+# Compiles plan/*.md into GitHub issues when plans land on main (i.e. when a
+# planning PR is merged). Scoped to main so pushing the planning branch does NOT
+# create issues early — the PR review gate is preserved.
 
 on:
   push:
+    branches: [main]
     paths:
       - "plan/**"
   workflow_dispatch: {}   # allow manual re-sync

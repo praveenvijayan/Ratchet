@@ -170,9 +170,8 @@ side effects. Invoke as `/name` in Claude Code or Antigravity, or `/skills` /
 | Skill | When to run | What it does |
 |-------|-------------|--------------|
 | `/ratchet-init` | Once per repo | Creates the 9 state/priority labels, detects the stack and fills `GATES.md`, scaffolds `memory/`, and verifies the PAT. Idempotent. |
-| `/ratchet-plan` | After ideating | Turns the solidified idea into `plan/*.md` files (one per issue), then stops for review. Never creates issues directly. |
-| `/ratchet-report` | The moment you find a bug/improvement | Writes one well-formed `plan/*.md` (with acceptance criteria) and stops. Never fixes, edits code, or branches — the strict "found something" front door. |
-| `/ratchet-sync` | While iterating on a plan | Runs `plan-sync.mjs` locally to compile `plan/*.md` into issues now, instead of waiting for the push-triggered workflow. |
+| `/ratchet-plan` | Planning, or reporting a found bug | Writes plan file(s) — one for a quick report, several for a full plan — onto the rolling planning branch and opens/updates the always-open planning PR, then stops. Never fixes or creates issues directly. |
+| `/ratchet-sync` | Only without the PR flow | Local/no-PR escape hatch: compiles working-tree `plan/*.md` into issues now. Normally unused — merging the planning PR does this. |
 | `/ratchet-next` | After a merge or review | Advances (sync main + next issue) on approval, or reworks the same PR on rejection. The heart of the continuous local loop. |
 | `/ratchet-memory` | Periodically (e.g. quarterly) | Prunes and dedupes `memory/MEMORY.md`, verifies issue/PR links, stops for review. |
 | `/ratchet-map` | When structure drifts | Regenerates the coarse codebase map `memory/ARCHITECTURE.md` (language-agnostic), stops for review. |
@@ -207,7 +206,7 @@ See §8 — this is the routine that responds to a human's PR decision.
 
 | Workflow | Trigger | Effect |
 |----------|---------|--------|
-| `plan-sync` | push to `plan/**`, or manual | Compiles `plan/*.md` into issues, idempotently (dedup via a `<!-- plan-id -->` marker in each issue body). |
+| `plan-sync` | push to `plan/**` on `main` (i.e. planning-PR merge), or manual | Compiles `plan/*.md` into issues, idempotently (dedup via a `<!-- plan-id -->` marker). Scoped to `main` so the planning branch doesn't create issues early. |
 | `unblock-dependents` | `issues: closed` | Promotes every issue whose blockers are now all closed to `state:ready`. This re-feeds the queue. |
 | `sweep-stale-claims` | every 30 min, or manual | Returns `state:in-progress` issues with no branch commits for >2h to `state:ready` — a poor-man's lease expiry for crashed agents. |
 | `ratchet-run` | PR merged, or manual | OPTIONAL, off by default. Runs an agent in CI to work the next issue. Requires `RATCHET_AUTO=true` and an agent API key. Most users do not enable this — the local loop (§8) is the recommended path. |
@@ -263,13 +262,14 @@ For new work, **do not hand-create the issue on github.com.** Issues are compile
 from `plan/*.md`, and a hand-made issue almost always lacks acceptance criteria —
 which parks it in `state:draft`, unpickable, forever. The disciplined path:
 
-1. **The front door is `/ratchet-report <description>`** — e.g.
-   `/ratchet-report google signin not working`. It writes a well-formed
+1. **The front door is `/ratchet-plan <description>`** — e.g.
+   `/ratchet-plan google signin not working`. It writes a well-formed
    `plan/*.md` (slug, priority, and a real `## Acceptance criteria` block derived
-   from the symptom) and **stops** — it never edits code, branches, or applies a
-   fix, even if the fix is obvious or the report is urgent. (`/ratchet-plan` is
-   the equivalent for turning a whole ideation into multiple plan files.)
-2. Commit `plan/` (triggers `plan-sync`) or run `/ratchet-sync` to compile it now.
+   from the symptom) onto the rolling planning branch and opens/updates the
+   planning PR, then **stops** — it never edits code, fixes anything, or creates
+   issues directly, even if the fix is obvious or the report is urgent. The same
+   skill plans a whole idea into many files when you describe a feature.
+2. Review and **merge the planning PR**; `plan-sync` runs on `main` and creates the issue(s).
 3. The agent picks it up automatically on its next advance. **Priority is how you
    triage:** a `priority:high` issue with no blockers jumps to the front of the
    deterministic pick order, preempting lower-priority ready work — so an urgent
@@ -469,9 +469,9 @@ project-owned set:
 gh secret set FACTORY_PAT          # enable workflow chaining
 
 # Plan
-/ratchet-plan                       # idea → plan/*.md  (then commit, or:)
-/ratchet-sync                         # compile plan/*.md → issues now
-/ratchet-report <desc>      # file a found bug/improvement as a plan file (never fixes)
+/ratchet-plan [desc]               # plan, or report a found bug → rolling planning PR
+#   (review & MERGE the planning PR to create the issues)
+/ratchet-sync                      # local/no-PR escape hatch only
 
 # Run the loop (local)
 ./scripts/ratchet-watch.sh         # real-time merge/review signals

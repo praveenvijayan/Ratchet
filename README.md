@@ -61,8 +61,8 @@ setup.sh                       Sync skills into each tool's location
 
 The skills: **`/ratchet-plan`** (idea → `plan/*.md`), **`/ratchet-sync`**
 (compile plan files → issues now), **`/ratchet-init`** (one-time: labels, gate
-detection into `GATES.md`, memory scaffold, PAT check), **`/ratchet-report`** (file a found bug/improvement as a plan file, never
-fixing it directly), **`/ratchet-memory`** (prune & dedupe `memory/MEMORY.md`), **`/ratchet-map`**
+detection into `GATES.md`, memory scaffold, codebase map, PAT check),
+**`/ratchet-memory`** (prune & dedupe `memory/MEMORY.md`), **`/ratchet-map`**
 (regenerate the coarse codebase map),
 **`/ratchet-update`** (pull a newer framework version, project files untouched).
 
@@ -101,8 +101,9 @@ With pure human merges the fallback works; the PAT makes it bulletproof.
 ## The loop
 
 1. **Ideate** with the LLM until the idea is solid.
-2. **`/ratchet-plan`** → writes `plan/*.md`, one file per issue, then stops.
-3. **Review** the plan files; commit `plan/` (or run **`/ratchet-sync`**).
+2. **`/ratchet-plan`** → writes `plan/*.md` (one for a report, many for a plan)
+   onto the rolling planning branch and opens/updates the planning PR.
+3. **Review and merge the planning PR**; `plan-sync` creates the issues on `main`.
 4. Issues appear (`state:ready`). The agent **picks** the top unblocked one,
    **claims** it by creating `agent/issue-N`, **builds** to the acceptance
    criteria, **verifies** the gates fail-fast, and opens a **PR** with

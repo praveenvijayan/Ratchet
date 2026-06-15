@@ -1,14 +1,20 @@
 ---
 name: ratchet-sync
-description: Compile plan/*.md into GitHub issues immediately by running scripts/plan-sync.mjs locally, instead of waiting for the push-triggered plan-sync workflow. Use while iterating on a plan and you want the issues created or updated now. Idempotent — safe to run repeatedly.
+description: Compile plan/*.md into GitHub issues immediately by running scripts/plan-sync.mjs locally. This is the LOCAL / no-PR escape hatch — the normal path is to merge the rolling planning PR (which runs plan-sync on main). Use this only when you are NOT using the planning-PR flow (e.g. an unprotected main, or fast solo iteration) and want issues created from your working-tree plan files now. Idempotent — safe to run repeatedly.
 disable-model-invocation: true
 allowed-tools: Bash(node:*), Bash(gh:*)
 ---
 
-# Plan sync (local)
+# Plan sync (local / no-PR path)
+
+> Normally you do **not** run this. Plan files reach issues by merging the
+> rolling planning PR opened by `/ratchet-plan` — the `plan-sync` workflow then
+> runs on `main`. Use this skill only when you are deliberately working without
+> that PR flow (unprotected `main`, or quick solo iteration) and want issues
+> created from your **working-tree** plan files right now, before any merge.
 
 Run the deterministic compiler against `plan/*.md` now, using local credentials,
-so issues are created/updated without pushing first.
+so issues are created/updated without going through the planning PR.
 
 ## Preflight
 

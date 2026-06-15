@@ -28,19 +28,26 @@ Everything between is mechanical.
 
 ## Phase 0 — Plan (source of truth: `plan/*.md`)
 
-Issues are not authored by hand. They are *compiled* from `plan/*.md`.
+Issues are not authored by hand. They are *compiled* from `plan/*.md`, and those
+files reach `main` through one **rolling planning PR**, never by direct push.
 
 - Ideation happens in chat. Its **only output is markdown files in `plan/`**,
   one file per issue, in the format described in `plan/README.md`.
-- On push to `plan/**`, the `plan-sync` workflow creates or updates issues
-  deterministically. You do **not** create issues yourself unless explicitly
-  asked; you let the sync do it.
+- `/ratchet-plan` writes the file(s) onto the evergreen `ratchet/planning`
+  branch and opens (or updates) a single always-open **planning PR**. Both a
+  quick one-off report and a full multi-issue plan use this same path. Plan files
+  never go straight to `main` and are never stranded on a working branch.
+- A human **merges the planning PR** when a batch is ready. `plan-sync` runs on
+  push to `main` under `plan/**` (only `main` — pushing the planning branch does
+  not create issues) and compiles the batch into issues deterministically.
 - The file is the source of truth for issue *content* (title, body, criteria,
   priority, blockers). Once an issue leaves `state:ready`, the sync stops
   touching it — live work is never clobbered.
 
-If you are asked to "plan" something, you write `plan/*.md` files and commit
-them. You never create issues as a side effect of any other task.
+If you are asked to "plan" or to "report" a found bug, you run `/ratchet-plan`:
+write the file(s), push the planning branch, open/update the planning PR, and
+stop. You never create issues as a side effect of any other task, and you never
+fix found work — it becomes a plan file.
 
 ---
 
