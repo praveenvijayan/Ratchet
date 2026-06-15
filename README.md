@@ -62,7 +62,8 @@ setup.sh                       Sync skills into each tool's location
 The skills: **`/ratchet-plan`** (idea → `plan/*.md`), **`/ratchet-sync`**
 (compile plan files → issues now), **`/ratchet-init`** (one-time: labels, gate
 detection into `GATES.md`, memory scaffold, PAT check), **`/ratchet-report`** (file a found bug/improvement as a plan file, never
-fixing it directly), **`/ratchet-memory`** (prune & dedupe `memory/MEMORY.md`),
+fixing it directly), **`/ratchet-memory`** (prune & dedupe `memory/MEMORY.md`), **`/ratchet-map`**
+(regenerate the coarse codebase map),
 **`/ratchet-update`** (pull a newer framework version, project files untouched).
 
 ## Install

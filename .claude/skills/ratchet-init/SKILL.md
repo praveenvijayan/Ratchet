@@ -1,8 +1,8 @@
 ---
 name: ratchet-init
-description: One-time setup for a repo adopting the factory. Creates the state:* and priority:* labels, detects the project's stack and fills GATES.md, scaffolds the memory files, and ensures the Personal Access Token the issue-flow automation depends on is configured (informs the user; never handles the token itself). Idempotent — safe to re-run.
+description: One-time setup for a repo adopting the factory. Creates the state:* and priority:* labels, detects the project's stack and fills GATES.md, scaffolds the memory files and generates a coarse codebase map (memory/ARCHITECTURE.md), and ensures the Personal Access Token the issue-flow automation depends on is configured (informs the user; never handles the token itself). Idempotent — safe to re-run.
 disable-model-invocation: true
-allowed-tools: Read, Edit, Write, Glob, Grep, Bash(gh:*)
+allowed-tools: Read, Edit, Write, Glob, Grep, Bash(ls:*), Bash(gh:*)
 ---
 
 # Factory init (one-time per repo)
@@ -64,16 +64,38 @@ If code exists, detect commands **from real evidence only**:
    `<!-- auto-detected by /ratchet-init on <date>; verify before first run -->`.
 4. **Never run a gate.** Detection only.
 
-## Step 3 — Scaffold the memory files
+## Step 3 — Scaffold memory and map the codebase
 
 Ensure the durable-memory files exist (create from the kit templates if absent;
-never overwrite existing ones):
+never overwrite an existing one):
 - `memory/USER.md` — human-owned preferences/conventions.
 - `memory/MEMORY.md` — agent-proposed, human-approved distilled knowledge.
+- `memory/ARCHITECTURE.md` — the coarse codebase map (generated below).
 
-If you created them fresh, tell the user to seed `memory/USER.md` with the
-team's conventions. Do not populate `MEMORY.md` — it fills up through PRs over
-time. Both files are committed (not gitignored); they are the project's memory.
+If you created `USER.md` fresh, tell the user to seed it with team conventions.
+Do not populate `MEMORY.md` — it fills through PRs over time.
+
+**Generate `memory/ARCHITECTURE.md` from the actual codebase** (skip if the repo
+is empty/greenfield — leave the placeholder and note to re-run later). This is
+language-agnostic: do not assume any stack.
+
+1. Detect the project type from manifests (`package.json`, `pyproject.toml`,
+   `Cargo.toml`, `go.mod`, `pubspec.yaml`, `pom.xml`, `Gemfile`, etc.) and the
+   conventional source root(s) (`src/`, `lib/`, `app/`, `cmd/`, …).
+2. Walk the top-level and source directories and describe each one's apparent
+   **purpose** and the **major components/modules by role**. **Ignore generated
+   and vendor directories entirely** — `build/`, `dist/`, `target/`, `out/`,
+   `bin/`, `obj/`, `node_modules/`, `.dart_tool/`, `ios/Pods/`, `vendor/`,
+   `__pycache__/`, `.next/`, and any package cache. Never read into them.
+3. Note visible **conventions** (layering, naming, where new code of each kind
+   goes) and, cautiously, what is **not yet present** (e.g. no tests directory).
+4. Write **coarse only**: directories and responsibilities. **Never record line
+   numbers, function signatures, dependency versions, or absolute machine
+   paths** — repo-relative paths only. Mark it machine-generated and provisional.
+
+If you don't recognise the ecosystem, fall back to describing the top-level
+directories and their apparent purpose. The goal is fast orientation that lets a
+future agent scope its reads — not a complete index.
 
 ## Step 4 — Personal Access Token (CRITICAL for the issue flow)
 
@@ -107,7 +129,7 @@ creating a token and setting a secret are credential actions the user owns):
 ## Step 5 — Report and hand off
 
 - Confirm the nine labels (`gh label list`).
-- Confirm `memory/USER.md` and `memory/MEMORY.md` exist; if just created, remind
+- Confirm `memory/USER.md`, `memory/MEMORY.md`, and `memory/ARCHITECTURE.md` exist; if just created, remind
   the user to seed `USER.md` with team conventions.
 - Show the filled `GATES.md` table; call out every `TODO` row.
 - State PAT status: `FACTORY_PAT` secret present? `.env` `GITHUB_PAT` present?

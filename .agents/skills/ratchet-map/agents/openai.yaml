@@ -1,0 +1,7 @@
+# Codex skill metadata. Explicit-only: it rewrites the architecture map, a
+# deliberate act. Invoke with /skills or $ratchet-map.
+policy:
+  allow_implicit_invocation: false
+interface:
+  display_name: "ratchet-map"
+  short_description: "Regenerate the coarse codebase map (memory/ARCHITECTURE.md)."
