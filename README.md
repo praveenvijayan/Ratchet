@@ -1,4 +1,24 @@
-# Ratchet — continuous, GitHub-native delivery for Claude Code, Codex & Antigravity
+<div align="center">
+
+<img src="https://github.com/user-attachments/assets/6cc454f7-b616-4415-9571-fe8938a98c53" alt="Ratchet — forward-only delivery for coding agents" width="100%">
+
+<br>
+
+**A continuous, GitHub-native delivery loop for coding agents — Claude Code, Codex & Antigravity.**
+
+<br>
+
+![last commit](https://img.shields.io/github/last-commit/praveenvijayan/Ratchet?style=for-the-badge&logo=github&labelColor=15191e&color=ea8f3c)
+![open issues](https://img.shields.io/github/issues/praveenvijayan/Ratchet?style=for-the-badge&logo=github&labelColor=15191e&color=ea8f3c)
+![open pull requests](https://img.shields.io/github/issues-pr/praveenvijayan/Ratchet?style=for-the-badge&logo=github&labelColor=15191e&color=ea8f3c)
+![license](https://img.shields.io/github/license/praveenvijayan/Ratchet?style=for-the-badge&labelColor=15191e&color=8b97a3)
+![framework version](https://img.shields.io/badge/framework-v3.2.0-ea8f3c?style=for-the-badge&labelColor=15191e)
+
+[Install](#install) · [The loop](#the-loop) · [Memory](#memory-so-it-scales-to-multi-year-projects) · [Updating](#updating-ratchet) · [Continuous execution](#hands-off-continuous-execution-opt-in) · [Cross-tool](#why-its-cross-tool) · [The PAT](#the-pat-read-this) · [License](LICENSE)
+
+</div>
+
+---
 
 A forward-only delivery loop: work only moves toward shipped, and every failure
 path returns to the queue rather than slipping backward or stalling. A drop-in
@@ -108,9 +128,10 @@ With pure human merges the fallback works; the PAT makes it bulletproof.
    onto the rolling planning branch and opens/updates the planning PR.
 3. **Review and merge the planning PR**; `plan-sync` creates the issues on `main`.
 4. Issues appear (`state:ready`). The agent **picks** the top unblocked one,
-   **claims** it by creating `agent/issue-N`, **builds** to the acceptance
-   criteria, **verifies** the gates fail-fast, and opens a **PR** with
-   `Closes #N` — then stops.
+   **claims** it with an atomic server-side branch ref (`agent/issue-N`, created
+   off fresh `main` — a 422 means another agent already holds it), **builds** to
+   the acceptance criteria, **verifies** the gates fail-fast, and opens a **PR**
+   with `Closes #N` — then stops.
 5. A **human reviews and merges**. GitHub closes the issue.
 6. `unblock-dependents` flips newly-unblocked issues to `state:ready`;
    `sweep-stale-claims` returns abandoned work to the queue.

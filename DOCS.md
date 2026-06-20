@@ -63,11 +63,17 @@ The seven steps, as defined in `AGENTS.md`:
 1. **Pick** — one deterministic query: open issues, `state:ready`, no open
    blockers, sorted by priority then age. Take the top one. Rework outranks new
    work.
-2. **Claim from fresh `main`** — sync first (`git fetch && git checkout main &&
-   git pull --ff-only`), then create the branch `agent/issue-<N>`. Branch
-   creation is the atomic claim; if it already exists, another agent owns the
-   issue. Set `state:in-progress`. Pick → claim → build is one continuous motion
-   — the agent does not pause to ask permission.
+2. **Claim — atomic, server-side** — the claim *is* creating the branch
+   `agent/issue-<N>` as a ref on the server, before any local work:
+   `gh api repos/{owner}/{repo}/git/refs -f ref=refs/heads/agent/issue-<N> -f sha=<main-sha>`.
+   GitHub's ref-create is a compare-and-swap, so this is atomic across every
+   machine, session, and tool — not just one clone. A **422** ("Reference
+   already exists") means another agent owns the issue; exit quietly, don't
+   retry. Only after the claim succeeds, attach a local working copy
+   (`git fetch origin agent/issue-<N>` then checkout or `git worktree add`) and
+   set `state:in-progress`. Creating the ref is a zero-commit pointer, not a
+   code push, so it triggers no gates. Pick → claim → build is one continuous
+   motion — the agent does not pause to ask permission.
 3. **Build** — implement exactly the acceptance criteria, in small commits,
    following existing repo patterns. If scope exceeds the issue (~400 lines or
    ~6 files), stop, propose a split, and requeue.
@@ -210,7 +216,7 @@ See §8 — this is the routine that responds to a human's PR decision.
 |----------|---------|--------|
 | `plan-sync` | push to `plan/**` on `main` (i.e. planning-PR merge), or manual | Compiles `plan/*.md` into issues, idempotently (dedup via a `<!-- plan-id -->` marker). Scoped to `main` so the planning branch doesn't create issues early. |
 | `unblock-dependents` | `issues: closed` | Promotes every issue whose blockers are now all closed to `state:ready`. This re-feeds the queue. |
-| `sweep-stale-claims` | every 30 min, or manual | Returns `state:in-progress` issues with no branch commits for >2h to `state:ready` — a poor-man's lease expiry for crashed agents. |
+| `sweep-stale-claims` | every 30 min, or manual | Returns `state:in-progress` issues with no branch commits for >2h to `state:ready` — a poor-man's lease expiry for crashed agents. A pure claim (zero commits, no PR) also has its orphaned `agent/issue-<N>` ref deleted so the issue re-claims cleanly; branches that carry commits are kept for inspection. |
 | `ratchet-run` | PR merged, or manual | OPTIONAL, off by default. Runs an agent in CI to work the next issue. Requires `RATCHET_AUTO=true` and an agent API key. Most users do not enable this — the local loop (§8) is the recommended path. |
 
 All three core workflows read `${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN }}`
@@ -454,7 +460,7 @@ project-owned set:
 |---------|-------|-----|
 | Dotfolders (`.github`, `.agents`, `.claude`) missing after upload | macOS Finder hides dotfiles, so a browser drag-and-drop skips them | Upload via `git` (`cp -R src/. .` copies hidden files), never the web file picker |
 | Dependents don't become `state:ready` after a merge | `FACTORY_PAT` not set, so workflow-chaining is blocked | Set the `FACTORY_PAT` secret (§10) |
-| Agent's PR conflicts / re-does merged work | Branched from stale local `main` | The claim step now does `git pull --ff-only` first; ensure you're on the current framework (`/ratchet-update`) |
+| Agent's PR conflicts / re-does merged work | Branched from a stale base | The claim now creates the ref from the server's current `main` SHA, and the local copy syncs `--ff-only` before building; ensure you're on the current framework (`/ratchet-update`) |
 | `/ratchet-init` doesn't create `GATES.md` | Legacy repo created before the GATES extraction; gates still inline in `AGENTS.md` | `/ratchet-update` to get the new `AGENTS.md`, then `/ratchet-init` to write `GATES.md` |
 | Agent pauses and asks "shall I start?" | Claim-step autonomy not in older `AGENTS.md`, or tool needs permission for `gh`/`git` | Update via `/ratchet-update`; grant the agent standing `Bash(gh:*)` / `Bash(git:*)` permission |
 | Watcher receives nothing | `gh webhook forward` needs the `cli/gh-webhook` extension and a running receiver | `ratchet-watch.sh` installs the extension and starts the receiver; check it's still in the foreground |
