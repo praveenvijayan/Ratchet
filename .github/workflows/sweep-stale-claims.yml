@@ -11,7 +11,7 @@ on:
 
 permissions:
   issues: write
-  contents: read
+  contents: write   # delete orphaned (zero-commit) claim refs
 
 env:
   STALE_HOURS: "2"
@@ -45,6 +45,18 @@ jobs:
               const ref = lastCommit ? new Date(lastCommit).getTime() : new Date(issue.updated_at).getTime();
               if (now - ref < STALE_MS) continue;
 
+              // Does the claim branch carry real work, or is it a pure abandoned claim?
+              let aheadBy = null;
+              try {
+                const cmp = await github.rest.repos.compareCommitsWithBasehead({
+                  owner: context.repo.owner, repo: context.repo.repo,
+                  basehead: `main...${branch}`,
+                });
+                aheadBy = cmp.data.ahead_by;
+              } catch (e) {
+                // branch absent or uncomparable -> nothing to delete
+              }
+
               const labels = issue.labels.map(l => l.name).filter(l => !l.startsWith("state:"));
               labels.push("state:ready");
               await github.rest.issues.setLabels({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number, labels });
@@ -52,8 +64,21 @@ jobs:
                 owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number,
                 assignees: issue.assignees.map(a => a.login),
               }).catch(() => {});
+
+              // A pure claim (zero commits beyond main, no PR) is litter: delete the
+              // ref so the issue can be cleanly re-claimed. Never delete a branch that
+              // has commits — that work is recoverable and stays for a human to inspect.
+              let deleted = false;
+              if (aheadBy === 0) {
+                await github.rest.git.deleteRef({
+                  owner: context.repo.owner, repo: context.repo.repo, ref: `heads/${branch}`,
+                }).then(() => { deleted = true; }).catch(() => {});
+              }
+
               await github.rest.issues.createComment({
                 owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number,
-                body: `Stale claim swept: no activity on \`${branch}\` for >${process.env.STALE_HOURS}h. Returned to \`state:ready\`.`,
+                body: deleted
+                  ? `Stale claim swept: \`${branch}\` had no work for >${process.env.STALE_HOURS}h. Orphaned claim ref deleted; issue returned to \`state:ready\`.`
+                  : `Stale claim swept: no activity on \`${branch}\` for >${process.env.STALE_HOURS}h. Branch kept (has commits); issue returned to \`state:ready\`.`,
               });
             }

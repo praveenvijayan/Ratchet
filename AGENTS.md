@@ -73,25 +73,46 @@ usually the root); whether a planning PR is open with unmerged plans; whether
 there are uncommitted plan files. End with the one action that unblocks the
 queue. "Drained" is almost always a planning-state problem, not an empty backlog.
 
-### 2. Claim — atomic, via branch creation, from up-to-date main
-**Always branch from the latest `main`.** Before creating the branch, sync:
-`git fetch origin` then `git checkout main` and `git pull --ff-only origin main`
-(for worktree agents: create the worktree off freshly-fetched `origin/main`).
-`--ff-only` is deliberate — if local `main` can't fast-forward, stop and surface
-it rather than entangle histories. Never branch from another agent's branch;
-every issue starts from a clean, current `main` so its PR diffs against today's
-code, not yesterday's.
+### 2. Claim — atomic, via a server-side branch ref, from up-to-date main
+The claim **is** creating the branch `agent/issue-<N>` as a ref *on the server*,
+before any local work. GitHub's ref-create is a compare-and-swap: it creates the
+ref only if it does not already exist. That makes the claim atomic across every
+machine, session, and tool — not just within one clone — and makes the branch
+visible to everyone the instant it is claimed.
 
-Then the claim **is** creating the branch `agent/issue-<N>` off that updated
-`main`. Branch creation succeeds or fails atomically. If it fails, another agent
-owns the issue — exit quietly. After the branch exists, set label
-`state:in-progress` and self-assign. Labels never claim anything; they report.
+```sh
+# main's current commit, read from the server (authoritative)
+SHA=$(gh api repos/{owner}/{repo}/git/ref/heads/main --jq .object.sha)
+# atomic claim — succeeds, or returns 422 "Reference already exists"
+gh api repos/{owner}/{repo}/git/refs -f ref=refs/heads/agent/issue-<N> -f sha="$SHA"
+```
+
+A **422** (already exists) means another agent owns the issue — exit quietly,
+**do not retry**, pick the next one. There is no local race to lose: the branch
+exists remotely the moment it is claimed, which is what makes "the branch is the
+claim" literally true rather than a label convention.
+
+Creating this ref is **not** a code push and does not fall under "never push red
+work" (Hard Rule 4) — it is a zero-commit pointer at `main`, carries no changes,
+and triggers no gates. Rule 4 governs commits, not the claim.
+
+Only **after** the claim succeeds, attach a local working copy to the claimed
+branch and keep it current with `main`:
+
+```sh
+git fetch origin agent/issue-<N>
+git checkout agent/issue-<N>     # or: git worktree add ../wt/issue-<N> agent/issue-<N>
+```
+
+`--ff-only` discipline still applies whenever you integrate `main`; never branch
+from another agent's branch. Then set label `state:in-progress` and self-assign.
+Labels never claim anything; they report — the ref is the claim.
 
 **Pick → claim → build is one continuous motion.** Having picked an issue,
 proceed through claim and build without pausing to ask for confirmation — the
 human gate is the PR review, not the claim. Do not ask "shall I start?"; start.
 
-> No branch, no work. Always from fresh main.
+> No claim ref, no work. The branch is created server-side, off fresh main.
 
 ### 3. Build — to the criteria, not the idea
 Implement exactly what the issue's acceptance criteria state, in small
@@ -249,8 +270,9 @@ claim; the labels make state visible to humans.
    bypasses the issue, the branch, and the human review gate all at once.
 1. Issues come only from `plan/*.md` via sync. Never hand-author issues unless
    explicitly told to.
-2. The claim is the branch, created from up-to-date `main`. No branch, no work.
-   Branch-creation failure means "someone else has it" — exit, don't retry.
+2. The claim is the `agent/issue-<N>` ref, created server-side off up-to-date
+   `main` before any local work. No claim ref, no work. A 422 ("already exists")
+   means someone else has it — exit, don't retry.
 3. Implement the issue's acceptance criteria, nothing more. Over-scope → split
    and requeue.
 4. Never open a PR with red gates. Verify locally before pushing.
