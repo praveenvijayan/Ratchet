@@ -111,6 +111,8 @@ so they upgrade automatically once the PAT exists.
 
 **What you (the agent) do — setup and verification only:**
 - Ensure `.env` is gitignored: if `.gitignore` lacks a `.env` line, append it.
+  Do the same for `.ratchet/` (local watcher state) and `.ratchet-owner` (the
+  per-worktree claim-owner marker written at claim time — see AGENTS.md step 2).
 - Ensure `.env.example` exists documenting `GITHUB_PAT` (create from the kit's
   template if missing).
 - Check presence only: `gh secret list` (is `FACTORY_PAT` listed?) and a

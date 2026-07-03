@@ -1,6 +1,6 @@
 {
   "name": "ratchet",
-  "version": "3.2.0",
+  "version": "3.3.0",
   "description": "Ratchet \u2014 forward-only GitHub-native delivery loop: ratchet-plan, ratchet-sync, and ratchet-init skills for the AGENTS.md operating manual.",
   "author": {
     "name": "Praveen Vijayan",

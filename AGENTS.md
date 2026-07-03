@@ -106,13 +106,33 @@ single working tree:
 git fetch origin agent/issue-<N>
 git worktree add ../wt/issue-<N> agent/issue-<N>
 cd ../wt/issue-<N>               # all build/verify work happens here
+
+# Owner marker — mechanical resume guard. Invent OWNER_ID once per
+# conversation (e.g. "claude-code amber-falcon-3841"), state it in chat so it
+# is in your transcript, and reuse it verbatim for every issue you claim.
+EXCLUDE="$(git rev-parse --git-common-dir)/info/exclude"
+grep -qxF '.ratchet-owner' "$EXCLUDE" 2>/dev/null || echo '.ratchet-owner' >> "$EXCLUDE"
+echo "<OWNER_ID> issue-<N> claimed $(date -u +%Y-%m-%dT%H:%M:%SZ)" > .ratchet-owner
 ```
 
 Running `git checkout agent/issue-<N>` in the shared clone is a protocol
 violation — it hijacks the one working tree every other agent assumes is on
-`main`. If the worktree already exists (resuming after an interruption), `cd`
-into it instead of adding it again. After the PR is merged, clean up with
+`main`. After the PR is merged, clean up with
 `git worktree remove ../wt/issue-<N>`.
+
+**Resuming mirrors the 422 rule.** On a claim, a 422 means another agent owns
+the issue — exit, don't retry. On a resume, an existing `state:in-progress`
+issue, `agent/issue-<N>` branch, or `../wt/issue-<N>` worktree means someone
+owns work in flight — and that someone is you **only if you can prove it**:
+this conversation created the claim, or the human explicitly hands the issue to
+you (in chat, or by directing rework of its PR at you). Check mechanically
+before touching anything: read `../wt/issue-<N>/.ratchet-owner` and compare it
+to your OWNER_ID. Match → `cd` into the worktree and continue (never add it
+again). Mismatch, a marker you didn't write, or no proof at all → the work is
+**foreign**: do not touch its branch, worktree, or PR, and fall through to
+picking the next `state:ready` issue as if the in-progress one did not exist.
+On an explicit human handoff, overwrite `.ratchet-owner` with your own
+OWNER_ID before resuming.
 
 `--ff-only` discipline still applies whenever you integrate `main`; never branch
 from another agent's branch. Then set label `state:in-progress` and self-assign.
@@ -167,7 +187,11 @@ Gather all available feedback (review summary + line comments via
 `gh pr view`/`gh api .../pulls/<N>/comments`, plus anything said in chat) and
 reconcile it. Then work the **same branch and same PR**, in its worktree
 (`../wt/issue-<N>` — recreate it with `git worktree add` if it is gone; never
-checkout the branch in the shared clone): set the issue to
+checkout the branch in the shared clone). Apply the resume-ownership rule from
+step 2 first: rework directed at you by the human (or a watcher event for your
+PR) is an explicit handoff, so if `.ratchet-owner` isn't yours, overwrite it
+with your OWNER_ID; without such a handoff, another agent's in-review work is
+foreign — leave it alone. Set the issue to
 `state:changes-requested`, fix each point with a focused commit, re-run the
 gates, push (the PR updates automatically — never open a second), and reply to
 each comment with the commit SHA that resolves it. Set the issue back to
@@ -289,7 +313,11 @@ claim; the labels make state visible to humans.
    `main` before any local work. No claim ref, no work. A 422 ("already exists")
    means someone else has it — exit, don't retry. Attach the branch locally
    **only** via `git worktree add ../wt/issue-<N> agent/issue-<N>` — never
-   `git checkout` in the shared clone, which stays on `main`.
+   `git checkout` in the shared clone, which stays on `main`. Resuming follows
+   the same rule: an existing in-progress issue, branch, or worktree is yours
+   only if this conversation claimed it (prove it against `.ratchet-owner`) or
+   the human explicitly hands it to you — otherwise it is foreign; leave it
+   alone and pick the next `state:ready` issue.
 3. Implement the issue's acceptance criteria, nothing more. Over-scope → split
    and requeue.
 4. Never open a PR with red gates. Verify locally before pushing.

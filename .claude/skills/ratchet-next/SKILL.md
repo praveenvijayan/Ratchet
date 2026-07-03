@@ -16,6 +16,14 @@ Decide what happened to the work in flight and act on it, against the live repo.
 - Otherwise locate the work in flight: the open PR whose head is
   `agent/issue-<N>`, or the issue labelled `state:in-progress`.
 - Also use any feedback the human gave you directly in this chat.
+- **Prove ownership before resuming.** An in-progress issue (or its branch,
+  worktree, or PR) is resumable only if you can prove it is yours: this
+  conversation claimed it, or the human explicitly hands it to you (chat
+  feedback or a watcher event pointing you at that PR counts). Check the
+  `.ratchet-owner` marker in `../wt/issue-<N>` against your OWNER_ID (see
+  AGENTS.md step 2). If you cannot prove ownership, the work is **foreign** —
+  never touch its branch, worktree, or PR; treat that issue as if it did not
+  exist and fall through to picking the top `state:ready` issue (step 2A.2).
 
 ## 2A. Advance — PR approved & merged
 
@@ -51,7 +59,11 @@ Then:
    (`gh pr view <N> --json reviews,comments`; threads via
    `gh api repos/{owner}/{repo}/pulls/<N>/comments`) plus the chat message.
 2. Work in the issue's worktree — never checkout the branch in the shared
-   clone. If `../wt/issue-<N>` exists, `cd` into it and `git pull`; otherwise
+   clone. If `../wt/issue-<N>` exists, apply the ownership rule from step 1
+   first: a human's rework request for this PR is an explicit handoff, so
+   overwrite `.ratchet-owner` with your OWNER_ID if it isn't yours; without
+   such a handoff, another agent's in-review work is foreign — stop. Then `cd`
+   into it and `git pull`; otherwise
    `git fetch origin agent/issue-<N> && git worktree add ../wt/issue-<N> agent/issue-<N>`.
    Set the issue to `state:changes-requested`.
 3. Fix each point with a focused commit. Re-run the `GATES.md` gates, fail-fast;
@@ -66,5 +78,8 @@ Then:
 - Agent branches live only in `../wt/issue-<N>` worktrees; the shared clone
   never changes branches.
 - Rework stays on the same branch and PR; never duplicate.
+- Resume only work you can prove is yours — this conversation's claim or an
+  explicit human handoff, verified against `.ratchet-owner`. Foreign
+  in-progress work is untouchable.
 - You never merge or approve — the human's merge/review is the only gate.
 - One issue at a time, then stop. The next trigger is the next human decision.
