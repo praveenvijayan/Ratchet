@@ -47,7 +47,24 @@ git fetch origin
 
 Never write plan files onto `main` or onto an `agent/issue-*` working branch.
 
-## Step 2 — Write the plan file(s)
+## Step 2 — Scan for duplicates, then write the plan file(s)
+
+**Scan before create.** Every issue in this system starts as a `plan/*.md` file,
+so after Step 1's pull the `plan/` directory on `ratchet/planning` is the
+complete dedup surface: merged batches plus anything pending on the planning PR.
+Read the frontmatter `title` and `## Acceptance criteria` of the existing files
+and compare against what you are about to write **by meaning, not by slug or
+wording** — "google signin broken" and "OAuth login fails" are the same plan.
+For each item you were going to write:
+
+- **Covered by a file pending on the planning PR** → update that file in place
+  (tighten criteria, adjust priority) instead of creating a second one.
+- **Covered by a file already merged to `main`** → the issue exists; do not
+  recreate it. If your version adds something material, edit the existing file —
+  plan-sync updates the issue on merge while it is still `state:draft`/
+  `state:ready` and holds once work is live. Otherwise report it as already
+  tracked (slug + title) and write nothing for that item.
+- **Genuinely new** → create a new file as below.
 
 List `plan/` for the highest existing slug number. For a quick report, write one
 `plan/NNNN-slug.md`; for a full plan, decompose the idea into the smallest units
@@ -92,5 +109,8 @@ item jumps to the front of the queue). Then stop.
   it, on its own branch, through a reviewed PR.
 - One always-open planning PR. Append if open; reset from main and open a new one
   only when none is open. Never open a second concurrent planning PR.
+- Scan before create: never add a plan file for work an existing `plan/*.md`
+  already covers (match by meaning, not wording) — update the existing file or
+  report it as already tracked. Duplicate plan files become duplicate issues.
 - Every file has testable `## Acceptance criteria`, or it lands `state:draft`.
 - `blocked_by` references slugs (e.g. `0002-user-model`), never `#numbers`.
