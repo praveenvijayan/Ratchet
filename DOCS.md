@@ -69,8 +69,11 @@ The seven steps, as defined in `AGENTS.md`:
    GitHub's ref-create is a compare-and-swap, so this is atomic across every
    machine, session, and tool — not just one clone. A **422** ("Reference
    already exists") means another agent owns the issue; exit quietly, don't
-   retry. Only after the claim succeeds, attach a local working copy
-   (`git fetch origin agent/issue-<N>` then checkout or `git worktree add`) and
+   retry. Only after the claim succeeds, attach a local working copy — always
+   as a dedicated worktree (`git fetch origin agent/issue-<N>` then
+   `git worktree add ../wt/issue-<N> agent/issue-<N>`), never by checking the
+   branch out in the shared clone, which stays parked on `main` so parallel
+   agents never fight over one working tree — and
    set `state:in-progress`. Creating the ref is a zero-commit pointer, not a
    code push, so it triggers no gates. Pick → claim → build is one continuous
    motion — the agent does not pause to ask permission.
@@ -347,10 +350,12 @@ event into an action, writing `.ratchet/last-event.json` and printing a line:
 
 In response to an event (or whenever you ask), the agent runs `/ratchet-next`:
 
-- **Approve → merged:** it syncs to the merged code
-  (`git checkout main && git fetch && git pull --ff-only`) and starts the next
-  ready issue. Because this happens *after* the merge, the new branch is always
-  based on current `main` — the stale-base problem cannot occur.
+- **Approve → merged:** it syncs to the merged code from the shared clone,
+  which always sits on `main` (`git fetch && git pull --ff-only` — no checkout),
+  removes the finished issue's worktree, and starts the next
+  ready issue — in a fresh worktree (`git worktree add ../wt/issue-<N>
+  agent/issue-<N>`). Because this happens *after* the merge, the new branch is
+  always based on current `main` — the stale-base problem cannot occur.
 - **Reject:** it reworks the same PR, reading feedback from any of three
   channels — a Request Changes review, a close-with-comment, or what you told it
   directly in chat — reconciling them, fixing the same branch, re-running gates,

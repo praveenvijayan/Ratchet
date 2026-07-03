@@ -19,12 +19,18 @@ Decide what happened to the work in flight and act on it, against the live repo.
 
 ## 2A. Advance — PR approved & merged
 
-1. Sync to the merged code (never branch from stale main):
-   `git checkout main && git fetch origin && git pull --ff-only origin main`
+1. Sync to the merged code (never branch from stale main). The shared clone
+   always sits on `main` — no checkout:
+   `git fetch origin && git pull --ff-only origin main`
+   Then remove the merged issue's worktree:
+   `git worktree remove ../wt/issue-<N>` (skip if already gone).
 2. Run the normal loop from AGENTS.md step 1 onward: pick the top ready,
-   unblocked issue (priority then age), claim it (branch from this fresh main),
-   build to the acceptance criteria, run the gates in `GATES.md`, open a PR with
-   `Closes #<N>`, then stop. Pick → claim → build is continuous; don't ask first.
+   unblocked issue (priority then age), claim it (server-side ref off this
+   fresh main), attach it as a worktree — **mandatory, never checkout in the
+   shared clone**: `git worktree add ../wt/issue-<N> agent/issue-<N>` and work
+   in that directory. Build to the acceptance criteria, run the gates in
+   `GATES.md`, open a PR with `Closes #<N>`, then stop. Pick → claim → build is
+   continuous; don't ask first.
 3. If no issue is `state:ready`, **do not just say "drained" and stop.**
    Diagnose why (run the `/ratchet-status` checks): count states, find
    `state:draft` issues missing acceptance criteria, trace `state:blocked`
@@ -44,8 +50,10 @@ Then:
 1. Gather all feedback and reconcile it: review summary + line comments
    (`gh pr view <N> --json reviews,comments`; threads via
    `gh api repos/{owner}/{repo}/pulls/<N>/comments`) plus the chat message.
-2. `git checkout agent/issue-<N> && git pull`. Set the issue to
-   `state:changes-requested`.
+2. Work in the issue's worktree — never checkout the branch in the shared
+   clone. If `../wt/issue-<N>` exists, `cd` into it and `git pull`; otherwise
+   `git fetch origin agent/issue-<N> && git worktree add ../wt/issue-<N> agent/issue-<N>`.
+   Set the issue to `state:changes-requested`.
 3. Fix each point with a focused commit. Re-run the `GATES.md` gates, fail-fast;
    never push red.
 4. Push — the existing PR updates (never open a second). Reply to each review
@@ -55,6 +63,8 @@ Then:
 ## Hard rules
 
 - Advance always re-syncs `main` first, `--ff-only`.
+- Agent branches live only in `../wt/issue-<N>` worktrees; the shared clone
+  never changes branches.
 - Rework stays on the same branch and PR; never duplicate.
 - You never merge or approve — the human's merge/review is the only gate.
 - One issue at a time, then stop. The next trigger is the next human decision.

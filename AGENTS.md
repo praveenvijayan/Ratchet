@@ -96,13 +96,23 @@ Creating this ref is **not** a code push and does not fall under "never push red
 work" (Hard Rule 4) — it is a zero-commit pointer at `main`, carries no changes,
 and triggers no gates. Rule 4 governs commits, not the claim.
 
-Only **after** the claim succeeds, attach a local working copy to the claimed
-branch and keep it current with `main`:
+Only **after** the claim succeeds, attach a local working copy — **always as a
+dedicated worktree, never by switching the shared clone's branch**. The clone
+stays parked on `main` permanently; every claimed issue gets its own directory,
+so multiple agents can work out of the same clone without fighting over a
+single working tree:
 
 ```sh
 git fetch origin agent/issue-<N>
-git checkout agent/issue-<N>     # or: git worktree add ../wt/issue-<N> agent/issue-<N>
+git worktree add ../wt/issue-<N> agent/issue-<N>
+cd ../wt/issue-<N>               # all build/verify work happens here
 ```
+
+Running `git checkout agent/issue-<N>` in the shared clone is a protocol
+violation — it hijacks the one working tree every other agent assumes is on
+`main`. If the worktree already exists (resuming after an interruption), `cd`
+into it instead of adding it again. After the PR is merged, clean up with
+`git worktree remove ../wt/issue-<N>`.
 
 `--ff-only` discipline still applies whenever you integrate `main`; never branch
 from another agent's branch. Then set label `state:in-progress` and self-assign.
@@ -112,7 +122,8 @@ Labels never claim anything; they report — the ref is the claim.
 proceed through claim and build without pausing to ask for confirmation — the
 human gate is the PR review, not the claim. Do not ask "shall I start?"; start.
 
-> No claim ref, no work. The branch is created server-side, off fresh main.
+> No claim ref, no work. The branch is created server-side, off fresh main,
+> and attached locally only as a worktree — the shared clone never leaves `main`.
 
 ### 3. Build — to the criteria, not the idea
 Implement exactly what the issue's acceptance criteria state, in small
@@ -154,7 +165,9 @@ A rejection can arrive three ways; recognise and handle all of them (the
 
 Gather all available feedback (review summary + line comments via
 `gh pr view`/`gh api .../pulls/<N>/comments`, plus anything said in chat) and
-reconcile it. Then work the **same branch and same PR**: set the issue to
+reconcile it. Then work the **same branch and same PR**, in its worktree
+(`../wt/issue-<N>` — recreate it with `git worktree add` if it is gone; never
+checkout the branch in the shared clone): set the issue to
 `state:changes-requested`, fix each point with a focused commit, re-run the
 gates, push (the PR updates automatically — never open a second), and reply to
 each comment with the commit SHA that resolves it. Set the issue back to
@@ -220,8 +233,10 @@ to your local environment in real time by the watcher
 (`scripts/ratchet-watch.sh`, built on `gh webhook forward`). Run `/ratchet-next`
 in response (the watcher can do this for you):
 
-- **Approved & merged →** sync to the merged code
-  (`git checkout main && git fetch && git pull --ff-only`) and start the next
+- **Approved & merged →** sync to the merged code from the shared clone, which
+  is always on `main` (`git fetch origin && git pull --ff-only origin main` —
+  no checkout needed), remove the finished issue's worktree
+  (`git worktree remove ../wt/issue-<N>`), and start the next
   ready issue. Because this happens *after* the merge, your new branch is always
   based on current `main` — never stale.
 - **Rejected →** rework the same PR (step 6), reading feedback from the Request
@@ -272,7 +287,9 @@ claim; the labels make state visible to humans.
    explicitly told to.
 2. The claim is the `agent/issue-<N>` ref, created server-side off up-to-date
    `main` before any local work. No claim ref, no work. A 422 ("already exists")
-   means someone else has it — exit, don't retry.
+   means someone else has it — exit, don't retry. Attach the branch locally
+   **only** via `git worktree add ../wt/issue-<N> agent/issue-<N>` — never
+   `git checkout` in the shared clone, which stays on `main`.
 3. Implement the issue's acceptance criteria, nothing more. Over-scope → split
    and requeue.
 4. Never open a PR with red gates. Verify locally before pushing.
