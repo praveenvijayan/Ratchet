@@ -1,8 +1,11 @@
 name: unblock-dependents
 
-# When an issue closes (e.g. via "Closes #N" on a merged PR), find every issue
-# blocked only by it and, if all their blockers are now closed, mark them ready.
-# This is what re-feeds the queue and makes the loop continuous.
+# When an issue closes (e.g. via "Closes #N" on a merged PR), two jobs:
+# 1. Strip the closed issue's own state:* label — the lifecycle labels describe
+#    open work, and a lingering state:in-review on a closed issue misleads.
+# 2. Find every issue blocked only by it and, if all their blockers are now
+#    closed, mark them ready. This is what re-feeds the queue and makes the
+#    loop continuous.
 
 on:
   issues:
@@ -22,6 +25,15 @@ jobs:
           github-token: ${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN }}
           script: |
             const closed = context.payload.issue.number;
+
+            // The state machine only applies to open issues: closed means done
+            // (or discarded), so the lifecycle label comes off.
+            const ownLabels = (context.payload.issue.labels || []).map(l => l.name);
+            const kept = ownLabels.filter(l => !l.startsWith("state:"));
+            if (kept.length !== ownLabels.length) {
+              await github.rest.issues.setLabels({ owner: context.repo.owner, repo: context.repo.repo, issue_number: closed, labels: kept });
+            }
+
             const all = await github.paginate(github.rest.issues.listForRepo, {
               owner: context.repo.owner, repo: context.repo.repo, state: "open", per_page: 100,
             });

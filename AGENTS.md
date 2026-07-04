@@ -285,9 +285,10 @@ manual never needs per-project edits.
 
 ## Labels (the state machine — create these once per repo)
 
-State (exactly one at a time): `state:draft`, `state:ready`,
-`state:in-progress`, `state:in-review`, `state:changes-requested`,
-`state:blocked`.
+State (exactly one at a time, on **open** issues only): `state:draft`,
+`state:ready`, `state:in-progress`, `state:in-review`,
+`state:changes-requested`, `state:blocked`. On close, `unblock-dependents`
+strips the state label — closed is the terminal state.
 
 Priority (exactly one): `priority:high`, `priority:medium`, `priority:low`.
 

@@ -106,6 +106,10 @@ Priority labels `priority:high` / `medium` / `low` determine pick order. Exactly
 one state label and one priority label per issue at any time; labels are a
 *projection* of state, never the authority — the branch is the real claim.
 
+State labels describe **open** work only. When an issue closes,
+`unblock-dependents` strips its `state:*` label — closed is the terminal state,
+and a leftover `state:in-review` on a closed issue would mislead.
+
 ---
 
 ## 3. Cross-tool design
@@ -218,7 +222,7 @@ See §8 — this is the routine that responds to a human's PR decision.
 | Workflow | Trigger | Effect |
 |----------|---------|--------|
 | `plan-sync` | push to `plan/**` on `main` (i.e. planning-PR merge), or manual | Compiles `plan/*.md` into issues, idempotently (dedup via a `<!-- plan-id -->` marker). Scoped to `main` so the planning branch doesn't create issues early. |
-| `unblock-dependents` | `issues: closed` | Promotes every issue whose blockers are now all closed to `state:ready`. This re-feeds the queue. |
+| `unblock-dependents` | `issues: closed` | Strips the closed issue's own `state:*` label (closed is terminal; a lingering `state:in-review` misleads), then promotes every issue whose blockers are now all closed to `state:ready`. This re-feeds the queue. |
 | `sweep-stale-claims` | every 30 min, or manual | Returns `state:in-progress` issues with no branch commits for >2h to `state:ready` — a poor-man's lease expiry for crashed agents. A pure claim (zero commits, no PR) also has its orphaned `agent/issue-<N>` ref deleted so the issue re-claims cleanly; branches that carry commits are kept for inspection. |
 | `ratchet-run` | PR merged, or manual | OPTIONAL, off by default. Runs an agent in CI to work the next issue. Requires `RATCHET_AUTO=true` and an agent API key. Most users do not enable this — the local loop (§8) is the recommended path. |
 
