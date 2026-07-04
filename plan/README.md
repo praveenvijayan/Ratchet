@@ -69,6 +69,12 @@ One or two sentences: what this is and why it exists.
 - **`blocked_by` lists slugs, not issue numbers.** The sync resolves each slug
   to its issue number and writes `Blocked by #N` into the body. An issue with
   any open blocker is given `state:blocked` until `unblock-dependents` clears it.
+  Resolution is order-independent: new issues are created (as `state:draft`)
+  before any body is rendered, so a blocker on a brand-new file resolves on the
+  first sync regardless of filename order, and a blocker whose plan file was
+  since removed still resolves through its issue's marker. A slug that matches
+  no plan file and no issue is a loud `WARNING` in the sync log, never a silent
+  drop — check it for typos.
 - **The file owns content; GitHub owns state.** Edit a file and push: the sync
   updates the matching issue's title, body, and labels — *but only while the
   issue is still `state:ready` or `state:draft`*. Once work starts, the file is

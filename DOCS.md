@@ -1,6 +1,6 @@
 # Ratchet — Complete Documentation
 
-Version 1.2.0 · MIT · https://github.com/praveenvijayan/Ratchet
+Version 3.3.3 · MIT · https://github.com/praveenvijayan/Ratchet
 
 Ratchet is a continuous, GitHub-native software-delivery loop run by coding
 agents (Claude Code, GPT Codex, or Google Antigravity) with a human reviewing
@@ -158,6 +158,7 @@ memory/
   MEMORY.md                     Distilled knowledge cache (agent proposes via PR)
 scripts/
   plan-sync.mjs                 Deterministic plan→issue compiler (zero-dep, Node 20+)
+  plan-sync.test.mjs            Regression test for the compiler (zero-dep, run with node)
   ratchet-update.sh             Pull framework updates, preserve project files
   ratchet-watch.sh              Real-time GitHub→local bridge (gh webhook forward)
   ratchet-watch.mjs             Zero-dep webhook receiver / event classifier
@@ -257,7 +258,10 @@ Short description of what and why.
 `title` and `priority` are required. A file with at least one `- [ ]` acceptance
 criterion becomes `state:ready`; without criteria it becomes `state:draft` and
 no agent picks it. `blocked_by` slugs are resolved to `Blocked by #N` lines, and
-an issue with any open blocker is `state:blocked`. The file owns issue *content*;
+an issue with any open blocker is `state:blocked`. Resolution is
+order-independent — the sync creates issues for new files before rendering any
+body, so a blocker on a brand-new file resolves on the first run, and a slug
+that matches nothing is a loud `WARNING`, never a silent drop. The file owns issue *content*;
 once an issue leaves `ready`/`draft`, sync stops touching it so live work is
 never clobbered.
 

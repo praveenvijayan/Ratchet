@@ -94,8 +94,11 @@ async function main() {
     if (mm) bySlug.set(mm[1], issue);
   }
 
-  // Pass 1: create or update each plan file's issue, record slug -> number.
+  // Pass 1: parse plan files. Seed slug -> number from every marker-bearing
+  // issue (not just those with a live plan file) so blockers on removed or
+  // skipped plans still resolve.
   const slugToNumber = new Map();
+  for (const [slug, issue] of bySlug) slugToNumber.set(slug, issue.number);
   const plans = new Map();
   for (const file of files) {
     const slug = file.replace(/\.md$/, "");
@@ -105,40 +108,53 @@ async function main() {
       continue;
     }
     plans.set(slug, parsed);
-    const existing = bySlug.get(slug);
-    if (existing) slugToNumber.set(slug, existing.number);
   }
 
-  // Pass 2: build bodies (with resolved Blocked by #N), then upsert.
+  // Pass 2a: create a minimal issue for every new plan BEFORE rendering any
+  // body, so slugToNumber is total and a blocker can never be dropped just
+  // because its file sorts later in the directory. The marker goes in now:
+  // a crash before pass 2b must leave an issue the next run finds and
+  // repairs, not a duplicate. state:draft is deliberate — never expose a
+  // pickable state until blockers are resolved in pass 2b.
+  for (const [slug, { fm }] of plans) {
+    if (bySlug.has(slug)) continue;
+    const created = await gh("POST", `/repos/${REPO}/issues`, {
+      title: fm.title,
+      body: markerOf(slug),
+      labels: ["state:draft", `priority:${fm.priority}`],
+    });
+    bySlug.set(slug, created);
+    slugToNumber.set(slug, created.number);
+    console.log(`CREATE #${created.number} ${slug}`);
+  }
+
+  // Pass 2b: build bodies (with resolved Blocked by #N), then patch.
   const drafted = [];   // slugs that landed as state:draft (no acceptance criteria)
   const byNumber = new Map(issues.map((i) => [i.number, i]));
   for (const [slug, { fm, body, hasCriteria }] of plans) {
+    for (const s of (fm.blocked_by || []).filter((s) => !slugToNumber.has(s))) {
+      console.log(`WARNING: unresolved blocker '${s}' in ${slug} — no plan file or issue has that slug; link dropped`);
+    }
     const blockerNums = (fm.blocked_by || []).map((s) => slugToNumber.get(s)).filter(Boolean);
     const blockedText = blockerNums.length ? `\n\n${blockerNums.map((n) => `Blocked by #${n}`).join("\n")}` : "";
     const fullBody = `${body}${blockedText}\n\n${markerOf(slug)}`;
     // Blocked means blocked *now*: a closed blocker no longer blocks. Deriving
     // state from the plan file alone would re-block issues unblock-dependents
     // already flipped to ready. (A blocker missing from byNumber was created
-    // this run, so it is open by definition.)
+    // in pass 2a, so it is open by definition.)
     const openBlockers = blockerNums.filter((n) => byNumber.get(n)?.state !== "closed");
     const state = openBlockers.length ? "state:blocked" : (hasCriteria ? "state:ready" : "state:draft");
     const labels = [state, `priority:${fm.priority}`, ...(fm.labels || [])];
     if (state === "state:draft") drafted.push(slug);
 
     const existing = bySlug.get(slug);
-    if (!existing) {
-      const created = await gh("POST", `/repos/${REPO}/issues`, { title: fm.title, body: fullBody, labels });
-      slugToNumber.set(slug, created.number);
-      console.log(`CREATE #${created.number} [${state}] ${slug}`);
-    } else {
-      const current = stateLabels(existing).filter((l) => l.startsWith("state:"))[0];
-      if (!EDITABLE_STATES.has(current) && current !== "state:blocked") {
-        console.log(`HOLD  #${existing.number} ${slug} (live: ${current})`);
-        continue;
-      }
-      await gh("PATCH", `/repos/${REPO}/issues/${existing.number}`, { title: fm.title, body: fullBody, labels });
-      console.log(`UPDATE #${existing.number} [${state}] ${slug}`);
+    const current = stateLabels(existing).filter((l) => l.startsWith("state:"))[0];
+    if (!EDITABLE_STATES.has(current) && current !== "state:blocked") {
+      console.log(`HOLD  #${existing.number} ${slug} (live: ${current})`);
+      continue;
     }
+    await gh("PATCH", `/repos/${REPO}/issues/${existing.number}`, { title: fm.title, body: fullBody, labels });
+    console.log(`UPDATE #${existing.number} [${state}] ${slug}`);
   }
 
   // Loud summary: drafts are unpickable and freeze anything that depends on them.
@@ -152,7 +168,11 @@ async function main() {
   }
 }
 
-main().catch((e) => {
+// Top-level await (not .catch()) so a test that dynamically imports this
+// module resumes only after the sync has fully finished.
+try {
+  await main();
+} catch (e) {
   console.error(e.message);
   process.exit(1);
-});
+}
