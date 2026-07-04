@@ -111,11 +111,17 @@ async function main() {
 
   // Pass 2: build bodies (with resolved Blocked by #N), then upsert.
   const drafted = [];   // slugs that landed as state:draft (no acceptance criteria)
+  const byNumber = new Map(issues.map((i) => [i.number, i]));
   for (const [slug, { fm, body, hasCriteria }] of plans) {
     const blockerNums = (fm.blocked_by || []).map((s) => slugToNumber.get(s)).filter(Boolean);
     const blockedText = blockerNums.length ? `\n\n${blockerNums.map((n) => `Blocked by #${n}`).join("\n")}` : "";
     const fullBody = `${body}${blockedText}\n\n${markerOf(slug)}`;
-    const state = blockerNums.length ? "state:blocked" : (hasCriteria ? "state:ready" : "state:draft");
+    // Blocked means blocked *now*: a closed blocker no longer blocks. Deriving
+    // state from the plan file alone would re-block issues unblock-dependents
+    // already flipped to ready. (A blocker missing from byNumber was created
+    // this run, so it is open by definition.)
+    const openBlockers = blockerNums.filter((n) => byNumber.get(n)?.state !== "closed");
+    const state = openBlockers.length ? "state:blocked" : (hasCriteria ? "state:ready" : "state:draft");
     const labels = [state, `priority:${fm.priority}`, ...(fm.labels || [])];
     if (state === "state:draft") drafted.push(slug);
 
