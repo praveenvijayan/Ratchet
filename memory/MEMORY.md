@@ -20,8 +20,14 @@ Rules:
   they can't drift. TODO rows are skipped, not passed (#9).
 - (e.g.) Auth standardized on JWT after rejecting sessions — see #142.
 - `scripts/criteria.mjs` is the single "has acceptance criteria" rule, shared by
-  `plan-sync.mjs` and the `unblock-dependents` workflow so promote-vs-hold can
-  never diverge from what the compiler decided at creation (#5).
+  `plan-sync.mjs`, the `unblock-dependents` workflow, and `sweep-stale-claims`
+  (via `classifyRequeue`) so promote/requeue-vs-hold can never diverge from what
+  the compiler decided at creation (#5, #54).
+- `sweep-stale-claims` re-reads each issue at write time before relabelling: if
+  its state label changed since the initial listing the sweep skips it (never
+  clobbers a concurrent transition), and it gates the requeue on the freshly
+  read body — a claim that lost its criteria is held at `state:draft`, not
+  re-exposed as `state:ready` (#54).
 - `ratchet-run` treats the issue body as a trust boundary: it only works issues
   whose body carries a `plan-id` marker and still matches `plan/<slug>.md`
   (`scripts/verify-issue-body.mjs`); an edited body is commented + skipped with

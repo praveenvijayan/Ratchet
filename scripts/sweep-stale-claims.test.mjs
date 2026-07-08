@@ -140,6 +140,10 @@ assert.equal(decideSweep({ ...base, state: "state:blocked" }).sweep, false, "non
     { number: 200, pull_request: undefined, updated_at: staleIso, assignees: [], labels: [label("state:in-progress")] },
     { number: 300, pull_request: undefined, updated_at: staleIso, assignees: [], labels: [label("state:in-progress")] },
   ];
+  // Every requeued issue is re-read at write time; give the ready-bound ones a
+  // body that still carries acceptance criteria so they are not held at draft.
+  const withCriteria = "Body.\n\n## Acceptance criteria\n- [ ] does the observable thing\n";
+  const freshBodies = { 100: withCriteria, 150: withCriteria, 200: withCriteria };
   const calls = [];
   const respond = (data, status = 200) => ({ ok: true, status, json: async () => data, text: async () => JSON.stringify(data) });
   globalThis.fetch = async (url, opts = {}) => {
@@ -149,6 +153,11 @@ assert.equal(decideSweep({ ...base, state: "state:blocked" }).sweep, false, "non
     calls.push({ method, pathname, body });
     if (method === "GET" && pathname === "/repos/o/r/issues") {
       return respond(Number(searchParams.get("page")) === 1 ? openIssues : []);
+    }
+    if (method === "GET" && /^\/repos\/o\/r\/issues\/\d+$/.test(pathname)) {
+      const n = Number(pathname.split("/").pop());
+      const src = openIssues.find((i) => i.number === n);
+      return respond({ ...src, body: freshBodies[n] ?? "" });
     }
     if (method === "GET" && pathname === "/repos/o/r/pulls") {
       if (searchParams.get("head") === "o:agent/issue-150") return respond([{ number: 15, state: "closed", merged_at: "2026-01-01T00:00:00Z", closed_at: staleIso }]);
@@ -201,4 +210,90 @@ assert.equal(decideSweep({ ...base, state: "state:blocked" }).sweep, false, "non
   assert.equal(result.swept, 3, "exactly three issues were swept");
 }
 
-console.log("PASS sweep-stale-claims.test.mjs (39 assertions)");
+// --- #54 orchestration: criteria gate + write-time re-read -------------------
+// AC1: a swept issue whose live body lost its acceptance criteria is held at
+// state:draft, never re-exposed as state:ready. AC2: labels are computed from a
+// re-read at write time — a state change made after the initial listing is not
+// overwritten, and the written label set reflects the fresh snapshot.
+{
+  const staleIso = new Date(now - 3 * HOUR).toISOString();
+  const label = (name) => ({ name });
+  const withCriteria = "Body.\n\n## Acceptance criteria\n- [ ] does the thing\n\n<!-- plan-id: 0029-sweep-requeue-safety -->";
+  const noCriteria = "Body with no criteria at all.\n\n<!-- plan-id: 0029-sweep-requeue-safety -->";
+  // All three are stale zero-commit in-progress claims, so decideSweep decides
+  // to sweep each; the write-time re-read is what differentiates them.
+  const openIssues = [
+    { number: 500, pull_request: undefined, updated_at: staleIso, assignees: [], labels: [label("state:in-progress"), label("priority:medium")] },
+    { number: 600, pull_request: undefined, updated_at: staleIso, assignees: [], labels: [label("state:in-progress")] },
+    { number: 700, pull_request: undefined, updated_at: staleIso, assignees: [{ login: "bob" }], labels: [label("state:in-progress"), label("priority:low")] },
+  ];
+  // Re-reads at write time: #500 lost its criteria; #600 was moved to in-review
+  // by an agent after the listing; #700 gained a non-state label, kept criteria.
+  const fresh = {
+    500: { number: 500, assignees: [], labels: [label("state:in-progress"), label("priority:medium")], body: noCriteria },
+    600: { number: 600, assignees: [], labels: [label("state:in-review")], body: withCriteria },
+    700: { number: 700, assignees: [{ login: "bob" }], labels: [label("state:in-progress"), label("priority:low"), label("needs-design")], body: withCriteria },
+  };
+  const calls = [];
+  const respond = (data, status = 200) => ({ ok: true, status, json: async () => data, text: async () => JSON.stringify(data) });
+  globalThis.fetch = async (url, opts = {}) => {
+    const { pathname, searchParams } = new URL(url);
+    const method = opts.method || "GET";
+    const body = opts.body ? JSON.parse(opts.body) : null;
+    calls.push({ method, pathname, body });
+    if (method === "GET" && pathname === "/repos/o/r/issues") {
+      return respond(Number(searchParams.get("page")) === 1 ? openIssues : []);
+    }
+    if (method === "GET" && /^\/repos\/o\/r\/issues\/\d+$/.test(pathname)) {
+      return respond(fresh[Number(pathname.split("/").pop())]);
+    }
+    if (method === "GET" && /^\/repos\/o\/r\/compare\/main\.\.\.agent\/issue-\d+$/.test(pathname)) return respond({ ahead_by: 0 });
+    if (method === "GET" && /\/issues\/\d+\/comments$/.test(pathname)) return respond([]);
+    if (method === "GET" && /\/issues\/\d+\/events$/.test(pathname)) {
+      return respond([{ event: "labeled", label: { name: "state:in-progress" }, created_at: staleIso }]);
+    }
+    if (method !== "GET") return respond({}, 200);
+    throw new Error(`unexpected request: ${method} ${pathname}`);
+  };
+
+  process.env.GITHUB_TOKEN = "test-token";
+  process.env.GITHUB_REPOSITORY = "o/r";
+  process.env.STALE_HOURS = "2";
+  process.env.SWEEP_NOW = String(now);
+  const realLog = console.log;
+  console.log = () => {};
+  let result;
+  try {
+    result = await main();
+  } finally {
+    console.log = realLog;
+  }
+
+  const put = (n) => calls.find((c) => c.method === "PUT" && c.pathname === `/repos/o/r/issues/${n}/labels`);
+  const comment = (n) => calls.find((c) => c.method === "POST" && c.pathname === `/repos/o/r/issues/${n}/comments`);
+
+  // #54 AC1: #500 lost its criteria -> held at state:draft, never state:ready,
+  // with an explanatory comment; the orphan claim ref is still deleted.
+  assert.ok(put(500), "#500 must be relabelled");
+  assert.ok(put(500).body.labels.includes("state:draft"), "#500 with no criteria must become state:draft");
+  assert.ok(!put(500).body.labels.includes("state:ready"), "#500 must never be requeued as ready");
+  assert.match(comment(500).body.body, /state:draft/, "#500 comment must explain the draft hold");
+  assert.match(comment(500).body.body, /acceptance criteria/i, "#500 comment must name the missing criteria");
+  assert.ok(calls.some((c) => c.method === "DELETE" && c.pathname === "/repos/o/r/git/refs/heads/agent/issue-500"), "#500 orphan claim ref must still be deleted");
+
+  // #54 AC2: #600 was moved to state:in-review after listing -> the sweep must
+  // not overwrite that newer state; no label write, no comment.
+  assert.ok(!put(600), "#600 must not be relabelled after its state changed since listing");
+  assert.ok(!comment(600), "#600 must not be commented after its state changed since listing");
+
+  // #54 AC2: #700's written labels come from the write-time re-read — the
+  // non-state label added in the window is preserved; criteria keep it ready.
+  assert.ok(put(700), "#700 must be relabelled");
+  assert.ok(put(700).body.labels.includes("state:ready"), "#700 with criteria must return to ready");
+  assert.ok(put(700).body.labels.includes("needs-design"), "#700 must keep the label added after listing (labels re-read at write time)");
+  assert.ok(put(700).body.labels.includes("priority:low"), "#700 must keep its existing non-state labels");
+
+  assert.equal(result.swept, 2, "#500 and #700 swept; #600 skipped on the state-change guard");
+}
+
+console.log("PASS sweep-stale-claims.test.mjs (52 assertions)");

@@ -5,7 +5,7 @@
 // Zero dependencies. Run:  node scripts/criteria.test.mjs
 
 import assert from "node:assert/strict";
-import { classifyUnblock } from "./criteria.mjs";
+import { classifyUnblock, classifyRequeue } from "./criteria.mjs";
 
 const CLOSED = 42;
 const withCriteria = `Some body.
@@ -81,4 +81,54 @@ const criteriaChecklistInsideSection = `Some body.
   assert.equal(state, "state:ready", `in-section checkbox must make issue ready, got ${state}`);
 }
 
-console.log("PASS criteria.test.mjs (8 assertions)");
+// --- classifyRequeue: the sweep's ready-vs-draft gate (issue #54) ------------
+// A sweep-to-ready decision, as decideSweep produces it. classifyRequeue is the
+// shared gate the sweep runs against the write-time body before applying it.
+const readyDecision = {
+  sweep: true,
+  deleteRef: false,
+  targetState: "state:ready",
+  reason: "Stale rework swept: `agent/issue-99` is `state:changes-requested` with no activity for >2h.",
+  comment: "Stale rework swept: `agent/issue-99` is `state:changes-requested` with no activity for >2h. Issue returned to `state:ready` so it can be re-picked.",
+};
+
+// #54 AC1: a swept issue whose live body still carries acceptance criteria is
+// requeued to state:ready unchanged.
+{
+  const r = classifyRequeue(readyDecision, withCriteria);
+  assert.equal(r.targetState, "state:ready", "criteria present must requeue to ready");
+  assert.equal(r.comment, readyDecision.comment, "a criteria-bearing issue keeps the original ready comment");
+}
+
+// #54 AC1: a swept issue whose body lost its acceptance criteria is held at
+// state:draft, never state:ready, with a comment that explains why and names
+// the plan file (slug from the plan-id marker) to fix.
+{
+  const r = classifyRequeue(readyDecision, withoutCriteria);
+  assert.equal(r.targetState, "state:draft", "lost criteria must be held at draft");
+  assert.notEqual(r.targetState, "state:ready", "a criteria-less issue must never be requeued as ready");
+  assert.match(r.comment, /acceptance criteria/i, "draft comment must mention acceptance criteria");
+  assert.match(r.comment, /state:draft/, "draft comment must state the held outcome");
+  assert.match(r.comment, /plan\/0003-unblock-recheck-criteria\.md/, "draft comment must name the plan file to fix");
+  assert.match(r.comment, /Stale rework swept/, "draft comment keeps the sweep's diagnostic reason");
+}
+
+// #54 AC1 error path (Hard Rule 8): a criteria-less body with no plan-id marker
+// still yields a clear message rather than naming an undefined file.
+{
+  const r = classifyRequeue(readyDecision, "no criteria, no marker");
+  assert.equal(r.targetState, "state:draft");
+  assert.match(r.comment, /no `plan-id` marker found/, "missing marker must be surfaced, not crash");
+}
+
+// #54 AC1: a deliberate non-ready sweep target (state:blocked for merged work
+// awaiting human cleanup) is never re-gated — the criteria check applies only
+// to the state:ready outcome.
+{
+  const blockedDecision = { ...readyDecision, targetState: "state:blocked", comment: "merged work parked for cleanup" };
+  const r = classifyRequeue(blockedDecision, withoutCriteria);
+  assert.equal(r.targetState, "state:blocked", "a non-ready target must pass through untouched");
+  assert.equal(r.comment, blockedDecision.comment, "a non-ready target keeps its comment");
+}
+
+console.log("PASS criteria.test.mjs (16 assertions)");
