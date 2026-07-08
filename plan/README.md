@@ -26,12 +26,20 @@ One or two sentences: what this is and why it exists.
 ## Acceptance criteria
 - [ ] <observable, testable outcome 1>
 - [ ] <observable, testable outcome 2>
+- [ ] <what the user sees when it fails — a clear message, never a raw error>
 - [ ] <a test exists covering the above>
 ```
 
 **Good criteria are observable outcomes, not tasks.** "Returns 401 on bad
 credentials" is testable; "handle errors properly" is not. If a criterion can't
 be checked by reading code or running a test, rewrite it.
+
+**Name the failure modes.** If the change can fail in front of a user, the
+criteria must say what the user sees when it does — "Invalid credentials return
+401 with a generic message", "Network failure shows a retry prompt, not a stack
+trace". Error handling is part of every issue's definition of done (Hard Rule 8
+in `AGENTS.md`), so criteria that spell out the failure behaviour give the
+agent and the reviewer the same target.
 
 ## File naming
 

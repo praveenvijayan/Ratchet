@@ -1,6 +1,6 @@
 # Ratchet — Complete Documentation
 
-Version 3.3.3 · MIT · https://github.com/praveenvijayan/Ratchet
+Version 3.3.4 · MIT · https://github.com/praveenvijayan/Ratchet
 
 Ratchet is a continuous, GitHub-native software-delivery loop run by coding
 agents (Claude Code, GPT Codex, or Google Antigravity) with a human reviewing

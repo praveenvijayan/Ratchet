@@ -147,7 +147,10 @@ human gate is the PR review, not the claim. Do not ask "shall I start?"; start.
 
 ### 3. Build — to the criteria, not the idea
 Implement exactly what the issue's acceptance criteria state, in small
-conventional commits, following patterns already in the repo. If you notice a
+conventional commits, following patterns already in the repo. Error paths are
+in scope by definition (Hard Rule 8): handle every failure mode your change
+introduces or touches, with a clear, user-friendly message wherever a user can
+see the failure — this is part of the criteria, not an addition to them. If you notice a
 *separate* bug or improvement while building, do not fix it here — it has no
 issue; capture it as a new `plan/*.md` and keep your changes scoped to the
 current issue. If scope exceeds the issue (~400 changed lines or ~6 files),
@@ -157,7 +160,10 @@ licence to improvise.
 
 
 ### 4. Verify — locally, fail-fast, before pushing
-Run the **Gates** in order. Stop at the first failure. You get two fix attempts.
+Run the **Gates** in order. Stop at the first failure. Before calling the work
+done, walk your change's error paths (Hard Rule 8) — an unhandled failure mode
+or a raw error leaking to the user is a red gate even when every command
+passes. You get two fix attempts.
 If still red, comment the gate name + error excerpt on the issue, reset to
 `state:ready`, remove `state:in-progress`, and exit. Only push the branch after
 all gates pass — an unpushed branch triggers no CI, so red work costs nothing.
@@ -327,3 +333,12 @@ claim; the labels make state visible to humans.
 6. You never merge, approve, close, or touch `main`. The PR is terminal.
 7. Every exit path leaves the issue in a labelled state with a comment
    explaining why. A loud failure costs minutes; a silent one costs trust.
+8. **Error paths ship with the feature — never after it.** Every error scenario
+   the change can hit (invalid input, failed calls, missing data, timeouts,
+   permission denials) must be handled deliberately, and wherever a failure is
+   visible to a user it must surface as a clear, user-friendly message — no raw
+   stack traces, no bare error codes, no silent failures. This is not scope
+   creep: handling the error paths of the code you touch is part of every
+   issue's definition of done, whether or not the criteria spell it out. A
+   change whose happy path works but whose error paths are unhandled has not
+   met its criteria and must not reach a PR.
