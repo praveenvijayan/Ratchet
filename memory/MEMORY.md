@@ -22,6 +22,10 @@ Rules:
 - `scripts/criteria.mjs` is the single "has acceptance criteria" rule, shared by
   `plan-sync.mjs` and the `unblock-dependents` workflow so promote-vs-hold can
   never diverge from what the compiler decided at creation (#5).
+- Claim leases are renewable: an agent posts a heartbeat comment
+  (`<!-- ratchet-heartbeat -->`) during long builds; `sweep-stale-claims` times
+  freshness from the newest of commit/heartbeat/claim via `scripts/sweep-lease.mjs`,
+  so a live-but-quiet claim outlives `STALE_HOURS` but a crashed one is still swept (#8).
 
 ## Gotchas & fragile areas
 - (e.g.) Payments module has no test harness; integration tests hit the sandbox API (#88).
