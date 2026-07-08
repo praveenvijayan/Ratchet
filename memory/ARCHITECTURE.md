@@ -84,5 +84,6 @@ and an optional Claude Code plugin.
 ## Not yet present
 
 - No lint/format tooling for the scripts or markdown.
-- No tests for the workflow scripts (`sweep-stale-claims`,
-  `unblock-dependents`) — only the plan compiler is tested.
+- No tests for `sweep-stale-claims`. `unblock-dependents`' readiness decision
+  is now covered via the shared `scripts/criteria.mjs` helper
+  (`scripts/criteria.test.mjs`); its GitHub-API glue is still untested.

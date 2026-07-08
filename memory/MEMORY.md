@@ -19,6 +19,9 @@ Rules:
   `GATES.md` table; both local verify and the `pr-gates` CI check call it, so
   they can't drift. TODO rows are skipped, not passed (#9).
 - (e.g.) Auth standardized on JWT after rejecting sessions — see #142.
+- `scripts/criteria.mjs` is the single "has acceptance criteria" rule, shared by
+  `plan-sync.mjs` and the `unblock-dependents` workflow so promote-vs-hold can
+  never diverge from what the compiler decided at creation (#5).
 
 ## Gotchas & fragile areas
 - (e.g.) Payments module has no test harness; integration tests hit the sandbox API (#88).
