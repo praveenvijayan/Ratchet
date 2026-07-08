@@ -38,9 +38,11 @@ and an optional Claude Code plugin.
   example. Plan files compile to GitHub issues.
 - `memory/` — the three durable-memory files (`USER.md`, `MEMORY.md`, this map).
 - `scripts/` — the executable core: `plan-sync.mjs` (plan→issue compiler) with
-  `plan-sync.test.mjs` (its regression test), `ratchet-watch.sh`/`.mjs`
-  (local webhook bridge for the continuous loop), `ratchet-update.sh` and
-  `ratchet-uninstall.sh` (framework lifecycle).
+  `plan-sync.test.mjs` (its regression test), `criteria.mjs` (the shared
+  readiness rule: does a body carry acceptance criteria) with
+  `criteria.test.mjs`, `ratchet-watch.sh`/`.mjs` (local webhook bridge for the
+  continuous loop), `ratchet-update.sh` and `ratchet-uninstall.sh` (framework
+  lifecycle).
 - `.github/workflows/` — the automation edge of the loop: `plan-sync`,
   `unblock-dependents`, `sweep-stale-claims`, and the opt-in `ratchet-run`.
 - `.agents/skills/` — the CANONICAL skill sources (one dir per `ratchet-*`
@@ -80,5 +82,6 @@ and an optional Claude Code plugin.
 
 - No CI that runs the framework's own test (`scripts/plan-sync.test.mjs`).
 - No lint/format tooling for the scripts or markdown.
-- No tests for the workflow scripts (`sweep-stale-claims`,
-  `unblock-dependents`) — only the plan compiler is tested.
+- No tests for `sweep-stale-claims`. `unblock-dependents`' readiness decision
+  is now covered via the shared `scripts/criteria.mjs` helper
+  (`scripts/criteria.test.mjs`); its GitHub-API glue is still untested.
