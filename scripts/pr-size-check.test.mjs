@@ -4,7 +4,7 @@
 //
 // One test per acceptance criterion of issue #11, exercised through the public
 // interface (invoking scripts/pr-size-check.mjs as a subprocess with a fixture
-// GATES.md and the PR counts the workflow passes as env vars):
+// GATES.md and the PR counts/file details the workflow passes as env vars):
 //   1. A PR over the configured limit fails the check (non-zero exit).
 //   2. The failure message quotes the actual line/file counts, the limits, and
 //      the split-and-requeue protocol from AGENTS.md step 3.
@@ -25,24 +25,31 @@ const dir = await mkdtemp(join(tmpdir(), "pr-size-test-"));
 let n = 0;
 // Run the check against a fixture GATES.md with the given PR counts. `gates`
 // is the raw GATES.md body (may omit the size config to exercise defaults).
-async function check({ gates = "", additions, deletions, changedFiles }) {
+async function check({ gates = "", additions, deletions, changedFiles, files }) {
   const gatesFile = join(dir, `GATES-${n++}.md`);
   await writeFile(gatesFile, gates);
+  const env = {
+    ...process.env,
+    GATES_FILE: gatesFile,
+  };
+  if (files) {
+    env.PR_FILES_JSON = JSON.stringify(files);
+  } else {
+    env.PR_ADDITIONS = String(additions);
+    env.PR_DELETIONS = String(deletions);
+    env.PR_CHANGED_FILES = String(changedFiles);
+  }
   const res = spawnSync("node", [SCRIPT], {
     encoding: "utf8",
-    env: {
-      ...process.env,
-      GATES_FILE: gatesFile,
-      PR_ADDITIONS: String(additions),
-      PR_DELETIONS: String(deletions),
-      PR_CHANGED_FILES: String(changedFiles),
-    },
+    env,
   });
   return { code: res.status, out: `${res.stdout}\n${res.stderr}` };
 }
 
 const withLimits = (lines, files) =>
   `# Gates\n\n## PR size limit\n\n- max_changed_lines: ${lines}\n- max_changed_files: ${files}\n`;
+const withLimitsAndExcludes = (lines, files, excludes) =>
+  `${withLimits(lines, files)}- exclude_paths: [${excludes.join(", ")}]\n`;
 
 // --- criterion 1: over-limit PR fails, within-limit PR passes ----------------
 {
@@ -82,4 +89,50 @@ const withLimits = (lines, files) =>
   assert.equal(defaultPass.code, 0, "399 lines / 6 files must pass under the defaults");
 }
 
-console.log("PASS pr-size-check.test.mjs (11 assertions)");
+// --- #59 criterion 1: configured path exclusions remove lines and files -------
+{
+  const files = [
+    { filename: "src/app.js", additions: 5, deletions: 0 },
+    { filename: "generated/client.js", additions: 500, deletions: 0 },
+    { filename: "docs/report.md", additions: 0, deletions: 300 },
+  ];
+  const res = await check({
+    gates: withLimitsAndExcludes(10, 1, ["generated/**", "docs/report.md"]),
+    files,
+  });
+  assert.equal(res.code, 0, `excluded files must not count toward thresholds, got:\n${res.out}`);
+  assert.ok(res.out.includes("5 changed line"), `only the included file should count, got:\n${res.out}`);
+  assert.ok(res.out.includes("1 file"), `only the included file count should remain, got:\n${res.out}`);
+}
+
+// --- #59 criterion 2: common lockfiles are excluded by default ---------------
+{
+  const files = [
+    { filename: "package-lock.json", additions: 500, deletions: 0 },
+    { filename: "packages/web/pnpm-lock.yaml", additions: 500, deletions: 0 },
+    { filename: "frontend/yarn.lock", additions: 500, deletions: 0 },
+    { filename: "Cargo.lock", additions: 500, deletions: 0 },
+    { filename: "poetry.lock", additions: 500, deletions: 0 },
+    { filename: "services/api/go.sum", additions: 500, deletions: 0 },
+    { filename: "src/app.js", additions: 3, deletions: 2 },
+  ];
+  const res = await check({ gates: withLimits(10, 1), files });
+  assert.equal(res.code, 0, `default lockfile exclusions must keep the PR within limits, got:\n${res.out}`);
+  for (const lockfile of ["package-lock.json", "pnpm-lock.yaml", "yarn.lock", "Cargo.lock", "poetry.lock", "go.sum"]) {
+    assert.ok(res.out.includes(lockfile), `output must name default exclusion ${lockfile}, got:\n${res.out}`);
+  }
+}
+
+// --- #59 criterion 3: over-limit failures state applied exclusions -----------
+{
+  const files = [
+    { filename: "src/app.js", additions: 20, deletions: 0 },
+    { filename: "package-lock.json", additions: 500, deletions: 0 },
+  ];
+  const res = await check({ gates: withLimits(10, 6), files });
+  assert.equal(res.code, 1, "included code over the limit must still fail");
+  assert.ok(res.out.includes("Exclusions applied"), `failure must note applied exclusions, got:\n${res.out}`);
+  assert.ok(res.out.includes("package-lock.json"), `failure must name the excluded lockfile, got:\n${res.out}`);
+}
+
+console.log("PASS pr-size-check.test.mjs (23 assertions)");
