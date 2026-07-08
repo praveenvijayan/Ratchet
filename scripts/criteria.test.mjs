@@ -17,6 +17,23 @@ const withCriteria = `Some body.
 const withoutCriteria = `Some body with no criteria block at all.
 
 <!-- plan-id: 0003-unblock-recheck-criteria -->`;
+const emptyCriteriaWithChecklistElsewhere = `Some body.
+
+## Acceptance criteria
+
+## Test notes
+- [ ] this is not an acceptance criterion
+
+<!-- plan-id: 0032-criteria-scope-checkboxes -->`;
+const criteriaChecklistInsideSection = `Some body.
+
+## Acceptance criteria
+- [ ] this is an acceptance criterion
+
+## Test notes
+- [ ] this is extra test guidance
+
+<!-- plan-id: 0032-criteria-scope-checkboxes -->`;
 
 // Criterion 1: an unblocked issue whose body contains at least one `- [ ]`
 // item under `## Acceptance criteria` is promoted to state:ready.
@@ -50,4 +67,18 @@ const withoutCriteria = `Some body with no criteria block at all.
   assert.match(comment, /no `plan-id` marker found/, "missing marker must be surfaced, not crash");
 }
 
-console.log("PASS criteria.test.mjs (6 assertions)");
+// #57 criterion 1: a body whose only `- [ ]` items sit outside the
+// `## Acceptance criteria` section classifies as draft.
+{
+  const { state } = classifyUnblock(emptyCriteriaWithChecklistElsewhere, CLOSED);
+  assert.equal(state, "state:draft", `out-of-section checkbox must not make issue ready, got ${state}`);
+}
+
+// #57 criterion 2: a body with at least one `- [ ]` inside the
+// `## Acceptance criteria` section still classifies as ready.
+{
+  const { state } = classifyUnblock(criteriaChecklistInsideSection, CLOSED);
+  assert.equal(state, "state:ready", `in-section checkbox must make issue ready, got ${state}`);
+}
+
+console.log("PASS criteria.test.mjs (8 assertions)");

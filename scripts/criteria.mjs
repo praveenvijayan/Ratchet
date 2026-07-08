@@ -11,7 +11,13 @@
 // plan/README.md and enforced by plan-sync at creation time.
 export function hasAcceptanceCriteria(body = "") {
   const text = String(body);
-  return /##\s*Acceptance criteria/i.test(text) && /-\s*\[[ x]\]/i.test(text);
+  const section = /^##\s+Acceptance criteria\s*$/gim.exec(text);
+  if (!section) return false;
+
+  const afterHeading = text.slice(section.index + section[0].length);
+  const nextPeerSection = afterHeading.search(/^#{1,2}\s+/m);
+  const criteriaText = nextPeerSection === -1 ? afterHeading : afterHeading.slice(0, nextPeerSection);
+  return /-\s*\[[ x]\]/i.test(criteriaText);
 }
 
 // The plan-file slug from the `<!-- plan-id: <slug> -->` marker, or null when
