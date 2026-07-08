@@ -10,3 +10,6 @@ node_modules/
 
 # Ratchet local runtime state (events, signals)
 .ratchet/
+
+# Per-worktree claim-owner marker (written at claim time; see AGENTS.md step 2)
+.ratchet-owner
