@@ -15,6 +15,15 @@ permissions:
   issues: write
   contents: read
 
+# Serialize syncs: two planning PRs merged in quick succession must not run in
+# parallel, or both list issues before either creates and both create the same
+# new slug — duplicate issues with the same plan-id. A stable group name (no
+# per-run interpolation) puts every sync in one lane; cancel-in-progress: false
+# queues the next run instead of dropping its batch.
+concurrency:
+  group: plan-sync          # stable: every sync shares one lane
+  cancel-in-progress: false # queue, never drop a batch
+
 jobs:
   sync:
     runs-on: ubuntu-latest

@@ -15,6 +15,9 @@ Rules:
 # Project memory
 
 ## Architecture & decisions
+- Gate commands have one source of truth: `scripts/run-gates.mjs` parses the
+  `GATES.md` table; both local verify and the `pr-gates` CI check call it, so
+  they can't drift. TODO rows are skipped, not passed (#9).
 - (e.g.) Auth standardized on JWT after rejecting sessions — see #142.
 - `scripts/criteria.mjs` is the single "has acceptance criteria" rule, shared by
   `plan-sync.mjs` and the `unblock-dependents` workflow so promote-vs-hold can
