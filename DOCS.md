@@ -55,8 +55,13 @@ agent owns the middle; the human owns the gate; GitHub automation owns the edges
 ```
 plan/*.md ─sync→ issue(ready) → claim → build → verify → PR(in-review)
                      ▲                                        │
-                     └──── unblock / next ◀── human merges ───┘
+                     └──── unblock / next ◀── human merges ───┤
+                                                              └→ release (opt-in): tag + changelog
 ```
+
+The dashed branch off `human merges` is the **release lane** (§6, `release`):
+an opt-in, post-merge "ship" stage that tags a version and publishes a changelog
+from the merged PR titles. It is off by default and never blocks the loop.
 
 The seven steps, as defined in `AGENTS.md`:
 
@@ -226,6 +231,7 @@ See §8 — this is the routine that responds to a human's PR decision.
 | `unblock-dependents` | `issues: closed` | Strips the closed issue's own `state:*` label (closed is terminal; a lingering `state:in-review` misleads), then promotes every issue whose blockers are now all closed to `state:ready`. This re-feeds the queue. |
 | `sweep-stale-claims` | every 30 min, or manual | Returns `state:in-progress` issues with no branch commits for >2h to `state:ready` — a poor-man's lease expiry for crashed agents. A pure claim (zero commits, no PR) also has its orphaned `agent/issue-<N>` ref deleted so the issue re-claims cleanly; branches that carry commits are kept for inspection. |
 | `ratchet-run` | PR merged, or manual | OPTIONAL, off by default. Runs an agent in CI to work the next issue. Requires `RATCHET_AUTO=true` and an agent API key. Most users do not enable this — the local loop (§8) is the recommended path. |
+| `release` | manual (`workflow_dispatch`) | OPTIONAL, off by default — the post-merge "ship" stage. Requires `RATCHET_RELEASE=true`. On demand it tags the next semver version (bump chosen at dispatch) and publishes a changelog built from the titles of the PRs merged since the last release. With no merges since the last tag it exits with a "nothing to release" message, not an error. With the variable unset it no-ops. |
 
 All three core workflows read `${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN }}`
 so they work with the default token and upgrade automatically when the PAT is

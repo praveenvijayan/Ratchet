@@ -10,6 +10,12 @@
 //
 // Zero dependencies. Node 20+ (ESM).
 
+// Freshness for the time-based states is the shared lease rule (sweep-lease.mjs,
+// added for the renewable-lease heartbeat): the freshest proof of life among the
+// branch's last commit, a heartbeat comment, and the claim event. Reusing it here
+// keeps "is this claim alive?" defined in exactly one place.
+import { leaseReference, isStale } from "./sweep-lease.mjs";
+
 // The three lifecycle states the sweep patrols. state:in-progress is the
 // original claim lease; in-review and changes-requested close the holes where a
 // vanished agent used to strand an issue in a non-terminal state forever.
@@ -28,6 +34,7 @@ export const SWEPT_STATES = new Set([
 //   input.aheadBy      — commits the claim branch is ahead of main (null if none/absent)
 //   input.lastCommitAt — the branch's last-commit time, or null
 //   input.claimAt      — most recent state:in-progress labeled-event time, or null
+//   input.heartbeatAt  — most recent lease-heartbeat comment time, or null
 //   input.updatedAt    — issue.updated_at
 //   input.hasOpenPr    — an open PR exists from agent/issue-<N> (in-review only)
 // Returns { sweep: false } to leave the issue untouched, or
@@ -41,19 +48,17 @@ export function decideSweep(input) {
   }
 }
 
-// in-progress: the original claim lease. Freshness is the branch's last commit
-// once real work exists, else the claim event — otherwise a quiet main would
-// make every fresh, still-building claim look instantly stale.
-function decideInProgress({ now, staleMs, staleHours, branch, aheadBy, lastCommitAt, claimAt, updatedAt }) {
-  let ref, source;
-  if (aheadBy > 0) {
-    ref = lastCommitAt ?? updatedAt;
-    source = lastCommitAt ? "last commit" : "issue update";
-  } else {
-    ref = claimAt ?? updatedAt;
-    source = claimAt ? "claim event" : "issue update";
-  }
-  if (now - ref < staleMs) return { sweep: false };
+// in-progress: the original claim lease. Freshness is the freshest proof of life
+// — the branch's last commit, a heartbeat comment, or the claim event — via the
+// shared lease rule, otherwise a quiet main would make every fresh, still-
+// building claim look instantly stale. A zero-commit claim (aheadBy === 0) must
+// not time from its tip (which IS main HEAD), so its commit signal is withheld.
+function decideInProgress({ now, staleMs, staleHours, branch, aheadBy, lastCommitAt, claimAt, heartbeatAt, updatedAt }) {
+  const { ref, source } = leaseReference({
+    lastCommitAt: aheadBy > 0 ? lastCommitAt : null,
+    heartbeatAt, claimAt, fallbackAt: updatedAt,
+  });
+  if (!isStale(ref, now, staleMs)) return { sweep: false };
   // A pure claim (zero commits beyond main) is litter — delete the ref so the
   // issue can be cleanly re-claimed. A branch with commits is recoverable work:
   // keep it for a human to inspect.
@@ -80,11 +85,12 @@ function decideInReview({ branch, hasOpenPr }) {
 
 // changes-requested: after a human asked for changes, a vanished agent leaves
 // the issue frozen. Activity is the most recent of the issue's own update
-// (comments, label and review events all bump it) and the branch's last commit
-// (pushed fixes do not bump the issue). Recent activity on either front means
-// the rework is live — never touched. Its branch has commits — never delete it.
-function decideChangesRequested({ now, staleMs, staleHours, branch, lastCommitAt, updatedAt }) {
-  const activity = Math.max(updatedAt, lastCommitAt ?? 0);
+// (comments, label and review events all bump it), the branch's last commit
+// (pushed fixes do not bump the issue), and a heartbeat comment (a long rework
+// renewing its lease without a push). Recent activity on any front means the
+// rework is live — never touched. Its branch has commits — never delete it.
+function decideChangesRequested({ now, staleMs, staleHours, branch, lastCommitAt, heartbeatAt, updatedAt }) {
+  const activity = Math.max(updatedAt, lastCommitAt ?? 0, heartbeatAt ?? 0);
   if (now - activity < staleMs) return { sweep: false };
   return {
     sweep: true,

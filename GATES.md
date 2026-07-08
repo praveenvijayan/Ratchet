@@ -33,8 +33,19 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 | 2     | typecheck   | TODO: typecheck command           | —              |
 | 3     | lint        | TODO: lint command                | —              |
 | 4     | test        | `node scripts/plan-sync.test.mjs` | exit 0         |
-| 4b    | test      | `node scripts/plan-sync-concurrency.test.mjs` | exit 0 |
-| 4c    | test      | `node scripts/sweep-stale-claims.test.mjs` | exit 0 |
+| 4b    | test        | `node scripts/plan-sync-concurrency.test.mjs` | exit 0 |
+| 4c    | test        | `node scripts/release.test.mjs`   | exit 0 |
+| 4d    | test        | `node scripts/sweep-stale-claims.test.mjs` | exit 0 |
 | 5     | build       | TODO: build command               | —              |
 | 6     | audit       | TODO: audit command               | —              |
 | 7     | secret-scan | TODO: secret-scan command         | —              |
+
+## PR size limit (agent PRs)
+
+Enforced server-side by the `pr-gates` workflow (`scripts/pr-size-check.mjs`) on
+every `agent/issue-*` PR — a PR over either threshold fails the check and the
+red message repeats the split-and-requeue protocol from AGENTS.md step 3. Tune
+the numbers here; they default to the manual's ~400 changed lines / ~6 files.
+
+- max_changed_lines: 400
+- max_changed_files: 6

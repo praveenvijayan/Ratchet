@@ -63,7 +63,18 @@ const recent = now - HOUR;          // comfortably inside the window
   assert.equal(working.sweep, false, "a branch with a recent commit must not be swept");
 }
 
+// Renewable-lease heartbeat (from the merged sweep-lease rule): a recent
+// heartbeat comment renews the lease without a push, in both time-based states,
+// even when every other signal is stale.
+{
+  const beat = decideSweep({ ...base, state: "state:in-progress", aheadBy: 0, lastCommitAt: null, claimAt: stale, heartbeatAt: recent, updatedAt: stale });
+  assert.equal(beat.sweep, false, "a recent heartbeat must protect a zero-commit in-progress claim");
+
+  const rework = decideSweep({ ...base, state: "state:changes-requested", updatedAt: stale, lastCommitAt: stale, heartbeatAt: recent });
+  assert.equal(rework.sweep, false, "a recent heartbeat must protect changes-requested rework");
+}
+
 // A state the sweep does not patrol is never touched.
 assert.equal(decideSweep({ ...base, state: "state:blocked" }).sweep, false, "non-swept states are left alone");
 
-console.log("PASS sweep-stale-claims.test.mjs (13 assertions)");
+console.log("PASS sweep-stale-claims.test.mjs (15 assertions)");
