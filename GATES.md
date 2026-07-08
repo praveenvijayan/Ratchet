@@ -51,3 +51,8 @@ the numbers here; they default to the manual's ~400 changed lines / ~6 files.
 
 - max_changed_lines: 400
 - max_changed_files: 6
+- exclude_paths: [package-lock.json, pnpm-lock.yaml, yarn.lock, Cargo.lock, poetry.lock, go.sum]
+
+`exclude_paths` accepts comma-separated path patterns. The lockfiles above are
+excluded by default even if this line is omitted; add generated artifacts here
+when they should not count toward review-size limits.

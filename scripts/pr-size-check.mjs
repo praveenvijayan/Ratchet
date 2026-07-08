@@ -16,6 +16,7 @@
 //
 // Zero dependencies. Requires Node 20+.
 //   Run:  PR_ADDITIONS=.. PR_DELETIONS=.. PR_CHANGED_FILES=.. node scripts/pr-size-check.mjs
+//         PR_FILES_JSON='[{"filename":"src/a.js","additions":1,"deletions":0}]' node scripts/pr-size-check.mjs
 //   Override the config file for testing with GATES_FILE=/path/to/GATES.md.
 
 import { existsSync, readFileSync, appendFileSync } from "node:fs";
@@ -23,6 +24,14 @@ import { existsSync, readFileSync, appendFileSync } from "node:fs";
 const GATES_FILE = process.env.GATES_FILE || "GATES.md";
 const DEFAULT_MAX_LINES = 400; // AGENTS.md step 3
 const DEFAULT_MAX_FILES = 6; //   ~400 changed lines / ~6 files
+const DEFAULT_EXCLUDE_PATTERNS = [
+  "package-lock.json",
+  "pnpm-lock.yaml",
+  "yarn.lock",
+  "Cargo.lock",
+  "poetry.lock",
+  "go.sum",
+];
 
 // Best-effort line into the Actions check summary; decorative, never the
 // signal (that is the exit code), so a summary hiccup must not mask a result.
@@ -39,20 +48,54 @@ function summary(line) {
 const notice = (msg) => console.log(`::notice::${msg}`);
 const errorAnnot = (msg) => console.log(`::error::${msg}`);
 
-// --- read thresholds from GATES.md (criterion 3) ----------------------------
+// --- read size config from GATES.md -----------------------------------------
 // Parse `max_changed_lines:` / `max_changed_files:` anywhere in GATES.md. A
 // missing file or key falls back to the manual's defaults rather than failing
-// — the limit must still be enforced even before a project tunes it.
-function readLimits(text) {
+// — the limit must still be enforced even before a project tunes it. Optional
+// `exclude_paths:` entries add glob-ish path patterns to the default lockfile
+// exclusions.
+function parseList(value) {
+  const raw = value.trim();
+  if (!raw) return [];
+  const body = raw.startsWith("[") && raw.endsWith("]") ? raw.slice(1, -1) : raw;
+  return body
+    .split(",")
+    .map((s) => s.trim().replace(/^["']|["']$/g, ""))
+    .filter(Boolean);
+}
+
+function readConfig(text) {
   const num = (key, fallback) => {
     const m = text.match(new RegExp(`max_changed_${key}\\s*[:=]\\s*(\\d+)`, "i"));
     return m ? Number(m[1]) : fallback;
   };
-  return { maxLines: num("lines", DEFAULT_MAX_LINES), maxFiles: num("files", DEFAULT_MAX_FILES) };
+
+  const configuredExcludes = [];
+  const lines = text.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const inline = line.match(/^\s*-?\s*(?:size_)?exclude_paths\s*[:=]\s*(.*?)\s*$/i);
+    if (!inline) continue;
+
+    configuredExcludes.push(...parseList(inline[1]));
+    if (inline[1].trim()) continue;
+
+    for (let j = i + 1; j < lines.length; j++) {
+      const item = lines[j].match(/^\s+-\s+(.+?)\s*$/);
+      if (!item) break;
+      configuredExcludes.push(...parseList(item[1]));
+    }
+  }
+
+  return {
+    maxLines: num("lines", DEFAULT_MAX_LINES),
+    maxFiles: num("files", DEFAULT_MAX_FILES),
+    excludePatterns: [...new Set([...DEFAULT_EXCLUDE_PATTERNS, ...configuredExcludes])],
+  };
 }
 
 const gatesText = existsSync(GATES_FILE) ? readFileSync(GATES_FILE, "utf8") : "";
-const { maxLines, maxFiles } = readLimits(gatesText);
+const { maxLines, maxFiles, excludePatterns } = readConfig(gatesText);
 
 // --- read the PR's size from the event payload ------------------------------
 // Missing or non-numeric counts mean the workflow wired the check up wrong;
@@ -67,23 +110,131 @@ const additions = intFromEnv("PR_ADDITIONS");
 const deletions = intFromEnv("PR_DELETIONS");
 const changedFiles = intFromEnv("PR_CHANGED_FILES");
 
-if (additions === null || deletions === null || changedFiles === null) {
-  const msg =
-    "PR size check could not determine the PR's size: expected numeric " +
-    "PR_ADDITIONS, PR_DELETIONS and PR_CHANGED_FILES (from the pull_request " +
-    "event payload). Check the pr-gates workflow wiring.";
+function globToRegExp(pattern) {
+  const escaped = pattern
+    .replace(/[|\\{}()[\]^$+?.]/g, "\\$&")
+    .replace(/\*\*/g, "\0")
+    .replace(/\*/g, "[^/]*")
+    .replace(/\0/g, ".*");
+  return new RegExp(`^${escaped}$`);
+}
+
+function matchesPattern(path, pattern) {
+  const normalizedPath = path.replace(/\\/g, "/");
+  const normalizedPattern = pattern.replace(/\\/g, "/").replace(/^\/+/, "");
+  if (!normalizedPattern.includes("/") && !normalizedPattern.includes("*")) {
+    return normalizedPath === normalizedPattern || normalizedPath.endsWith(`/${normalizedPattern}`);
+  }
+  return globToRegExp(normalizedPattern).test(normalizedPath);
+}
+
+function excludedBy(path) {
+  return excludePatterns.find((pattern) => matchesPattern(path, pattern)) || null;
+}
+
+function parseFileEntry(file) {
+  const filename = file.filename || file.path || file.name;
+  const fileAdditions = Number(file.additions);
+  const fileDeletions = Number(file.deletions);
+  if (!filename || !Number.isFinite(fileAdditions) || !Number.isFinite(fileDeletions)) return null;
+  return { filename, additions: fileAdditions, deletions: fileDeletions };
+}
+
+function parseFilesJson(raw) {
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("PR_FILES_JSON was not valid JSON.");
+  }
+  if (!Array.isArray(parsed)) throw new Error("PR_FILES_JSON must be a JSON array.");
+  const files = parsed.map(parseFileEntry);
+  if (files.some((file) => !file)) {
+    throw new Error("PR_FILES_JSON entries must include filename, additions and deletions.");
+  }
+  return files;
+}
+
+async function fetchPrFiles() {
+  if (process.env.PR_FILES_JSON) return parseFilesJson(process.env.PR_FILES_JSON);
+
+  const token = process.env.GITHUB_TOKEN;
+  const repo = process.env.GITHUB_REPOSITORY;
+  const prNumber = process.env.PR_NUMBER;
+  if (!token || !repo || !prNumber) return null;
+
+  const files = [];
+  for (let page = 1; ; page++) {
+    const res = await fetch(`https://api.github.com/repos/${repo}/pulls/${prNumber}/files?per_page=100&page=${page}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+    });
+    if (!res.ok) throw new Error(`GET PR files -> ${res.status} ${await res.text()}`);
+    const batch = await res.json();
+    files.push(...batch.map(parseFileEntry));
+    if (files.some((file) => !file)) throw new Error("GitHub PR file payload was missing filename/additions/deletions.");
+    if (batch.length < 100) break;
+  }
+  return files;
+}
+
+let size;
+try {
+  const files = await fetchPrFiles();
+  if (files) {
+    const included = [];
+    const excluded = [];
+    for (const file of files) {
+      const pattern = excludedBy(file.filename);
+      if (pattern) {
+        excluded.push({ ...file, pattern });
+      } else {
+        included.push(file);
+      }
+    }
+    size = {
+      changedLines: included.reduce((sum, file) => sum + file.additions + file.deletions, 0),
+      changedFiles: included.length,
+      excluded,
+      usedFileDetails: true,
+    };
+  }
+} catch (e) {
+  const msg = `PR size check could not read PR file details: ${e.message}`;
   errorAnnot(msg);
   summary(`### PR size\n\n❌ ${msg}`);
   console.error(msg);
   process.exit(1);
 }
 
-const changedLines = additions + deletions;
+if (!size) {
+  if (additions === null || deletions === null || changedFiles === null) {
+    const msg =
+      "PR size check could not determine the PR's size: expected PR file details " +
+      "(PR_FILES_JSON or GITHUB_TOKEN/GITHUB_REPOSITORY/PR_NUMBER) or numeric " +
+      "PR_ADDITIONS, PR_DELETIONS and PR_CHANGED_FILES from the pull_request " +
+      "event payload. Check the pr-gates workflow wiring.";
+    errorAnnot(msg);
+    summary(`### PR size\n\n❌ ${msg}`);
+    console.error(msg);
+    process.exit(1);
+  }
+  size = { changedLines: additions + deletions, changedFiles, excluded: [], usedFileDetails: false };
+}
+
+const changedLines = size.changedLines;
+const countedFiles = size.changedFiles;
+const exclusionNote = size.usedFileDetails
+  ? ` Exclusions applied: ${excludePatterns.join(", ")}. Excluded ${size.excluded.length} file(s).`
+  : " Path exclusions were not applied because PR file details were unavailable.";
 const overLines = changedLines > maxLines;
-const overFiles = changedFiles > maxFiles;
+const overFiles = countedFiles > maxFiles;
 
 if (!overLines && !overFiles) {
-  const msg = `PR size OK: ${changedLines} changed line(s) ≤ ${maxLines}, ${changedFiles} file(s) ≤ ${maxFiles}.`;
+  const msg = `PR size OK: ${changedLines} changed line(s) ≤ ${maxLines}, ${countedFiles} file(s) ≤ ${maxFiles}.${exclusionNote}`;
   notice(msg);
   summary(`### PR size\n\n✅ ${msg}`);
   console.log(msg);
@@ -93,7 +244,7 @@ if (!overLines && !overFiles) {
 // --- over the limit: fail with the numbers and the protocol (criterion 2) ---
 const breaches = [
   overLines ? `${changedLines} changed lines (limit ${maxLines})` : null,
-  overFiles ? `${changedFiles} files (limit ${maxFiles})` : null,
+  overFiles ? `${countedFiles} files (limit ${maxFiles})` : null,
 ].filter(Boolean);
 
 const message = [
@@ -107,6 +258,8 @@ const message = [
   "  3. exit — the split becomes new plan/*.md files or issues.",
   "",
   `Thresholds are configured in ${GATES_FILE} (max_changed_lines / max_changed_files).`,
+  `Exclusions applied: ${excludePatterns.join(", ")}.`,
+  `Excluded file(s): ${size.excluded.length ? size.excluded.map((file) => `${file.filename} (${file.pattern})`).join(", ") : "none"}.`,
 ].join("\n");
 
 errorAnnot(`PR size limit exceeded: ${breaches.join("; ")}.`);
