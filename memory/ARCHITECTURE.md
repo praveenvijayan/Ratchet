@@ -44,6 +44,8 @@ and an optional Claude Code plugin.
   `sweep-lease.mjs` (shared lease-freshness/heartbeat rule) with their tests,
   `pr-size-check.mjs` (CI-only enforcement of the AGENTS.md step 3 scope cap,
   thresholds read from GATES.md) with `pr-size-check.test.mjs`,
+  `verify-issue-body.mjs` (ratchet-run's injection guard: issue body must still
+  match its reviewed plan file) with `verify-issue-body.test.mjs`,
   `ratchet-watch.sh`/`.mjs` (local webhook bridge for the continuous loop),
   `ratchet-update.sh` and `ratchet-uninstall.sh` (framework lifecycle).
 - `.github/workflows/` — the automation edge of the loop: `plan-sync`,
