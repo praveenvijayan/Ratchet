@@ -10,6 +10,9 @@
 //   3. A failing gate exits non-zero with the gate's name in the check summary.
 //   4. A TODO: row is skipped with a visible notice, never treated as passed.
 // Plus #47 AC3: the summary names each distinct test gate it ran.
+// Plus #49: a `|` inside a backticked command runs in full (AC1); a row the
+// parser cannot interpret unambiguously fails the run naming the row, and the
+// truncated command prefix never runs (AC2).
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -111,4 +114,42 @@ const fail = "`node -e \"process.exit(3)\"`";
   assert.ok(/passed/i.test(summary), "each ran gate is reported as passed under its own name");
 }
 
-console.log("PASS run-gates.test.mjs (5 criteria, 18 assertions)");
+// --- #49 AC1: a `|` inside a backticked command is part of the command, not a
+// column break — the full pipeline runs. The prefix before the pipe (`false`)
+// exits non-zero on its own, so if the command were truncated at the pipe the
+// gate would fail; a clean exit and the post-pipe token prove it ran in full --
+{
+  const piped = "`false | node -e \"console.log('PIPE_HONORED')\"`";
+  const { status, out } = await runGates([
+    { order: 1, gate: "test", command: piped },
+  ]);
+  assert.equal(status, 0, "a command with a pipe inside backticks must run in full and pass");
+  assert.ok(out.includes("PIPE_HONORED"), "the command after the pipe must have run — the pipe was not a column break");
+}
+
+// --- #49 AC2a: an unbalanced backtick makes the column delimiters undecidable;
+// the run must fail naming the row rather than guess at the command ----------
+{
+  const { status, out } = await runGates([
+    { order: 1, gate: "test", command: "`npm test | tee" },
+  ]);
+  assert.notEqual(status, 0, "an unparseable gate row must fail the run");
+  assert.ok(/unterminated/i.test(out), "the failure must explain the row could not be split");
+  assert.ok(out.includes("npm test | tee"), "the failure message must name the offending row");
+}
+
+// --- #49 AC2b: a stray unescaped pipe changes the column count; rather than
+// truncate the command to its prefix and run that, the run fails naming the row.
+// The prefix computes `6*7`, so its output (`42`) differs from its source text
+// (`6*7`, which the row echo contains): a missing `42` proves it never ran ----
+{
+  const command = "node -e \"console.log(6*7)\" | tee log";
+  const { status, out } = await runGates([
+    { order: 1, gate: "test", command },
+  ]);
+  assert.notEqual(status, 0, "a row with an ambiguous column count must fail the run");
+  assert.ok(!out.includes("42"), "the truncated command prefix must never be executed");
+  assert.ok(/column/i.test(out), "the failure must explain the row's column count is ambiguous");
+}
+
+console.log("PASS run-gates.test.mjs (7 criteria, 25 assertions)");
