@@ -165,6 +165,20 @@ current issue. If scope exceeds the issue (~400 changed lines or ~6 files),
 remove `state:in-progress`, and exit. Scope creep is a planning failure, not a
 licence to improvise.
 
+**Renew your lease on long builds — the heartbeat.** `sweep-stale-claims`
+reclaims any `state:in-progress` issue that shows no activity for `STALE_HOURS`,
+so a crashed agent never freezes an issue. But you only push once the gates are
+green (step 4), so a legitimate build can run past `STALE_HOURS` with nothing
+pushed — indistinguishable from a crash unless you signal life. To renew the
+lease **without pushing red code**, post a **heartbeat**: an issue comment whose
+body contains the marker `<!-- ratchet-heartbeat -->`, at least once per
+`STALE_HOURS` while you work. The sweep measures freshness from the newest of
+your commits, your heartbeats, and the claim event, so a fresh heartbeat keeps
+the claim yours no matter how long the original claim has been open. Stop
+heart-beating (a crash) and the sweep still reclaims the issue after
+`STALE_HOURS` — the crash-recovery path is untouched. A commit or push counts as
+activity too; the heartbeat is only for stretches where nothing is pushed.
+
 
 ### 4. Verify — locally, fail-fast, before pushing
 Run the **Gates** in order. Stop at the first failure. Before calling the work
@@ -215,7 +229,10 @@ it becomes a new `plan/*.md` file. Fix what's wrong; queue what's new.
 A human merges. GitHub closes the issue via `Closes #<N>`. Two workflows react:
 `unblock-dependents` flips newly-unblocked issues to `state:ready` (this is what
 makes step 1 fire again), and `sweep-stale-claims` returns abandoned
-`state:in-progress` issues to `state:ready`. Nothing waits on anyone
+`state:in-progress` issues to `state:ready` — measuring activity from the newest
+of the branch's commits, a heartbeat comment (`<!-- ratchet-heartbeat -->`) an
+agent posts during a long build, or the claim event, so a live-but-quiet claim
+is never reclaimed while a crashed one still is. Nothing waits on anyone
 remembering anything.
 
 ---

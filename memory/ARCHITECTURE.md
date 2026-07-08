@@ -40,6 +40,8 @@ and an optional Claude Code plugin.
 - `scripts/` — the executable core: `plan-sync.mjs` (plan→issue compiler) with
   `plan-sync.test.mjs` (its regression test), `run-gates.mjs` (the GATES.md
   gate runner shared by local verify and CI) with `run-gates.test.mjs`,
+  `criteria.mjs` (shared acceptance-criteria readiness rule) and
+  `sweep-lease.mjs` (shared lease-freshness/heartbeat rule) with their tests,
   `pr-size-check.mjs` (CI-only enforcement of the AGENTS.md step 3 scope cap,
   thresholds read from GATES.md) with `pr-size-check.test.mjs`,
   `ratchet-watch.sh`/`.mjs` (local webhook bridge for the continuous loop),
@@ -87,6 +89,6 @@ and an optional Claude Code plugin.
 ## Not yet present
 
 - No lint/format tooling for the scripts or markdown.
-- No tests for `sweep-stale-claims`. `unblock-dependents`' readiness decision
-  is now covered via the shared `scripts/criteria.mjs` helper
-  (`scripts/criteria.test.mjs`); its GitHub-API glue is still untested.
+- The decision logic of both `unblock-dependents` and `sweep-stale-claims` is
+  now covered via shared helpers (`scripts/criteria.mjs`, `scripts/sweep-lease.mjs`)
+  with their tests; the workflows' GitHub-API glue is still untested.

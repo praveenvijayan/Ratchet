@@ -2,9 +2,12 @@ name: sweep-stale-claims
 
 # Poor-man's lease expiry. Every 30 min, find issues stuck in state:in-progress
 # that have shown no activity for STALE_HOURS, and return them to the queue.
-# Freshness is measured from the branch's last commit once work exists, but from
-# the claim event while the branch still sits at main HEAD -- otherwise a quiet
-# main would make every fresh, still-building claim look instantly stale.
+# Freshness is the most recent proof of life: the branch's last commit once work
+# exists, a heartbeat comment an agent posts during a long build (renewing the
+# lease without pushing red code), or the claim event while the branch still
+# sits at main HEAD -- otherwise a quiet main would make every fresh, still-
+# building claim look instantly stale. The ready-vs-keep decision uses the
+# shared scripts/sweep-lease.mjs helper so it stays unit-tested.
 # A crashed agent costs at most STALE_HOURS of delay, no human action.
 
 on:
@@ -23,10 +26,17 @@ jobs:
   sweep:
     runs-on: ubuntu-latest
     steps:
+      # Checkout so the github-script step can import the shared lease helper.
+      - uses: actions/checkout@v4
       - uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN }}
           script: |
+            const { pathToFileURL } = require("node:url");
+            const { isHeartbeat, leaseReference, isStale } = await import(
+              pathToFileURL(`${process.env.GITHUB_WORKSPACE}/scripts/sweep-lease.mjs`).href
+            );
+
             const STALE_MS = Number(process.env.STALE_HOURS) * 3600 * 1000;
             const now = Date.now();
             const stuck = await github.paginate(github.rest.issues.listForRepo, {
@@ -53,41 +63,63 @@ jobs:
                 // branch absent or uncomparable -> nothing to delete, treat as claim-timed
               }
 
-              // Pick the freshness reference and record its source for the comment.
-              // - Commits ahead of main -> the branch's last commit (real work in flight).
-              // - Zero commits (or no branch) -> the claim event: the most recent
-              //   `state:in-progress` labeled event, falling back to issue.updated_at.
-              let ref, source;
+              // Gather every proof of life, then let the shared helper pick the
+              // freshest. The lease survives if ANY of these is recent:
+              //  - the branch's last commit (real work in flight),
+              //  - a heartbeat comment (a long build renewing its lease without
+              //    pushing red code — this is what issue #8 adds),
+              //  - the claim event (a just-claimed, still-building issue).
+
+              // Last commit only counts as work when the branch is ahead of main;
+              // a zero-commit claim's tip IS main HEAD and must not time from it.
+              let lastCommitAt = null;
               if (aheadBy > 0) {
-                let lastCommit = null;
                 try {
                   const c = await github.rest.repos.listCommits({
                     owner: context.repo.owner, repo: context.repo.repo, sha: branch, per_page: 1,
                   });
-                  lastCommit = c.data[0]?.commit?.committer?.date;
+                  const d = c.data[0]?.commit?.committer?.date;
+                  lastCommitAt = d ? new Date(d).getTime() : null;
                 } catch (e) {
-                  // branch vanished between compare and list -> fall back to issue update
+                  // branch vanished between compare and list -> leave null
                 }
-                ref = lastCommit ? new Date(lastCommit).getTime() : new Date(issue.updated_at).getTime();
-                source = lastCommit ? "last commit" : "issue update";
-              } else {
-                let claimAt = null;
-                try {
-                  const events = await github.paginate(github.rest.issues.listEvents, {
-                    owner: context.repo.owner, repo: context.repo.repo,
-                    issue_number: issue.number, per_page: 100,
-                  });
-                  const claims = events.filter(
-                    (e) => e.event === "labeled" && e.label && e.label.name === "state:in-progress",
-                  );
-                  claimAt = claims.length ? claims[claims.length - 1].created_at : null;
-                } catch (e) {
-                  // timeline unreadable -> fall back to issue update
-                }
-                ref = claimAt ? new Date(claimAt).getTime() : new Date(issue.updated_at).getTime();
-                source = claimAt ? "claim event" : "issue update";
               }
-              if (now - ref < STALE_MS) continue;
+
+              // Most recent state:in-progress labeling = the claim event.
+              let claimAt = null;
+              try {
+                const events = await github.paginate(github.rest.issues.listEvents, {
+                  owner: context.repo.owner, repo: context.repo.repo,
+                  issue_number: issue.number, per_page: 100,
+                });
+                const claims = events
+                  .filter((e) => e.event === "labeled" && e.label && e.label.name === "state:in-progress")
+                  .map((e) => new Date(e.created_at).getTime());
+                claimAt = claims.length ? Math.max(...claims) : null;
+              } catch (e) {
+                // timeline unreadable -> leave null
+              }
+
+              // Most recent heartbeat comment renews the lease without a push.
+              let heartbeatAt = null;
+              try {
+                const comments = await github.paginate(github.rest.issues.listComments, {
+                  owner: context.repo.owner, repo: context.repo.repo,
+                  issue_number: issue.number, per_page: 100,
+                });
+                const beats = comments
+                  .filter((c) => isHeartbeat(c.body || ""))
+                  .map((c) => new Date(c.created_at).getTime());
+                heartbeatAt = beats.length ? Math.max(...beats) : null;
+              } catch (e) {
+                // comments unreadable -> leave null
+              }
+
+              const { ref, source } = leaseReference({
+                lastCommitAt, heartbeatAt, claimAt,
+                fallbackAt: new Date(issue.updated_at).getTime(),
+              });
+              if (!isStale(ref, now, STALE_MS)) continue;
 
               const labels = issue.labels.map(l => l.name).filter(l => !l.startsWith("state:"));
               labels.push("state:ready");
