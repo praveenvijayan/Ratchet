@@ -26,6 +26,17 @@ export const SWEPT_STATES = new Set([
   "state:changes-requested",
 ]);
 
+// The prefix every sweep comment starts with, one per swept state. This is the
+// single source of truth for those markers: the comments below are built from
+// it, and ratchet-metrics imports it to count sweeps by exactly the set the
+// sweep emits. Add a fourth swept state here and both the comment it posts and
+// the metric that counts it stay in lockstep — there is no second list to drift.
+export const SWEEP_COMMENT_PREFIXES = {
+  "state:in-progress": "Stale claim swept:",
+  "state:in-review": "Stale review swept:",
+  "state:changes-requested": "Stale rework swept:",
+};
+
 // Decide the sweep's action for one issue. All time inputs are epoch ms.
 //   input.state        — the issue's current state:* label (see SWEPT_STATES)
 //   input.now          — Date.now()
@@ -64,9 +75,10 @@ function decideInProgress({ now, staleMs, staleHours, branch, aheadBy, lastCommi
   // issue can be cleanly re-claimed. A branch with commits is recoverable work:
   // keep it for a human to inspect.
   const deleteRef = aheadBy === 0;
+  const prefix = SWEEP_COMMENT_PREFIXES["state:in-progress"];
   const comment = deleteRef
-    ? `Stale claim swept: \`${branch}\` had no work for >${staleHours}h (measured from ${source}). Orphaned claim ref deleted; issue returned to \`state:ready\`.`
-    : `Stale claim swept: no activity on \`${branch}\` for >${staleHours}h (measured from ${source}). Branch kept (has commits); issue returned to \`state:ready\`.`;
+    ? `${prefix} \`${branch}\` had no work for >${staleHours}h (measured from ${source}). Orphaned claim ref deleted; issue returned to \`state:ready\`.`
+    : `${prefix} no activity on \`${branch}\` for >${staleHours}h (measured from ${source}). Branch kept (has commits); issue returned to \`state:ready\`.`;
   return { sweep: true, deleteRef, comment };
 }
 
@@ -80,7 +92,7 @@ function decideInReview({ branch, hasOpenPr }) {
   return {
     sweep: true,
     deleteRef: false,
-    comment: `Stale review swept: \`${branch}\` is \`state:in-review\` but has no open PR (closed or abandoned without merge). Issue returned to \`state:ready\` so it can be re-picked.`,
+    comment: `${SWEEP_COMMENT_PREFIXES["state:in-review"]} \`${branch}\` is \`state:in-review\` but has no open PR (closed or abandoned without merge). Issue returned to \`state:ready\` so it can be re-picked.`,
   };
 }
 
@@ -96,7 +108,7 @@ function decideChangesRequested({ now, staleMs, staleHours, branch, lastCommitAt
   return {
     sweep: true,
     deleteRef: false,
-    comment: `Stale rework swept: \`${branch}\` is \`state:changes-requested\` with no activity for >${staleHours}h. Issue returned to \`state:ready\` so it can be re-picked.`,
+    comment: `${SWEEP_COMMENT_PREFIXES["state:changes-requested"]} \`${branch}\` is \`state:changes-requested\` with no activity for >${staleHours}h. Issue returned to \`state:ready\` so it can be re-picked.`,
   };
 }
 

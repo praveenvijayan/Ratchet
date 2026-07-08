@@ -10,8 +10,8 @@
 //   - Cycle time: first `state:ready` → issue closed as completed (merged)
 //   - Rework rate: share of completed issues that passed through
 //     `state:changes-requested`
-//   - Stale-claim sweeps: the `Stale claim swept:` comments sweep-stale-claims
-//     posts when it requeues an abandoned claim
+//   - Stale-claim sweeps: the marker comments sweep-stale-claims posts when it
+//     requeues abandoned work — claim, review, and rework sweeps all counted
 //
 // A young repo with no completed issues yet gets a clear "not enough data"
 // line per metric — never an error, never a misleading zero.
@@ -23,8 +23,15 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+import { SWEEP_COMMENT_PREFIXES } from "./sweep-stale-claims.mjs";
 
 const API = "https://api.github.com";
+
+// Count a comment as a sweep if it starts with any prefix the sweep emits.
+// The list is imported from the sweep script itself (not re-declared here), so
+// a new sweep type can never be silently undercounted: whatever prefixes the
+// sweep can post are exactly the prefixes this metric matches.
+export const SWEEP_PREFIXES = Object.values(SWEEP_COMMENT_PREFIXES);
 export const STATES = [
   "ready", "in-progress", "in-review", "changes-requested", "blocked", "draft",
 ];
@@ -88,10 +95,11 @@ export async function computeMetrics({ fetchImpl, token, repo, limit = 200 }) {
       fetchImpl, token, `/repos/${repo}/issues/${issue.number}/timeline`, 300,
     );
 
-    // Sweeps can land on any issue, open or closed: count the automated marker.
+    // Sweeps can land on any issue, open or closed: count every automated
+    // marker the sweep emits (claim, review, and rework sweeps alike).
     for (const ev of timeline) {
       if (ev.event === "commented" && typeof ev.body === "string" &&
-          ev.body.startsWith("Stale claim swept:")) sweepCount++;
+          SWEEP_PREFIXES.some((p) => ev.body.startsWith(p))) sweepCount++;
     }
 
     // Cycle time and rework are only meaningful for issues that actually
