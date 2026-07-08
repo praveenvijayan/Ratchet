@@ -127,4 +127,41 @@ Blocked by #3
   assert.equal(isSafeSlug("0030-runner-title-comment-trust-boundary"), true, "a real kebab slug must pass");
 }
 
-console.log("PASS verify-issue-body.test.mjs (24 assertions)");
+// #86 Criterion 1: the agent works from the exact body bytes that passed
+// verification. The workflow must capture the verified body as a step output,
+// embed that snapshot in the prompt, and forbid re-fetching live issue text for
+// instructions.
+{
+  const wf = readFileSync(new URL("../.github/workflows/ratchet-run.yml", import.meta.url), "utf8");
+  assert.match(wf, /issue_body<<\$delimiter/, "ratchet-run must expose the verified body snapshot as an output");
+  assert.match(wf, /\$\{\{\s*steps\.verify\.outputs\.issue_body\s*\}\}/, "ratchet-run must embed the verified body output in the agent prompt");
+  assert.match(wf, /exact content captured before verification/i, "the trust contract must identify the embedded body as the verified snapshot");
+  assert.match(wf, /do not\s+re-fetch the issue body/i, "the agent must be told not to re-fetch live issue body instructions");
+  assert.doesNotMatch(wf, /issue body\s+—\s+which has already been verified/i, "the prompt must not bless a later live issue fetch as verified");
+}
+
+// #86 Criterion 2: copying another plan's marker and reviewed content onto a
+// different issue fails verification because the slug is not uniquely bound to
+// the picked issue.
+{
+  const copied = verify(compiledBody, planText, planTitleText, {
+    issueNumber: 101,
+    issues: [
+      { number: 99, body: compiledBody },
+      { number: 101, body: compiledBody },
+    ],
+  });
+  assert.equal(copied.verified, false, "a copied plan marker/content on another issue must not verify");
+  assert.match(copied.reason, /issue\/plan mismatch/i, "the reason must name the issue/plan mismatch");
+  assert.match(copied.reason, /#99[\s\S]*#101/, "the mismatch reason must name the conflicting issue numbers");
+}
+
+// #86 Criterion 3: DOCS.md threat model names both new controls — the verified
+// body snapshot handed to the agent and the issue-number binding for plan slugs.
+{
+  const docs = readFileSync(new URL("../DOCS.md", import.meta.url), "utf8");
+  assert.match(docs, /verified issue body snapshot|exact content captured before verification/i, "DOCS.md must describe the verified bytes handoff");
+  assert.match(docs, /binds? the `plan-id` slug to the picked issue|issue-number binding/i, "DOCS.md must describe the issue/plan binding control");
+}
+
+console.log("PASS verify-issue-body.test.mjs");
