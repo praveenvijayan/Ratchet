@@ -230,12 +230,43 @@ See §8 — this is the routine that responds to a human's PR decision.
 | `plan-sync` | push to `plan/**` on `main` (i.e. planning-PR merge), or manual | Compiles `plan/*.md` into issues, idempotently (dedup via a `<!-- plan-id -->` marker). Scoped to `main` so the planning branch doesn't create issues early. |
 | `unblock-dependents` | `issues: closed` | Strips the closed issue's own `state:*` label (closed is terminal; a lingering `state:in-review` misleads), then promotes every issue whose blockers are now all closed to `state:ready`. This re-feeds the queue. |
 | `sweep-stale-claims` | every 30 min, or manual | Returns `state:in-progress` issues with no branch commits for >2h to `state:ready` — a poor-man's lease expiry for crashed agents. A pure claim (zero commits, no PR) also has its orphaned `agent/issue-<N>` ref deleted so the issue re-claims cleanly; branches that carry commits are kept for inspection. |
-| `ratchet-run` | PR merged, or manual | OPTIONAL, off by default. Runs an agent in CI to work the next issue. Requires `RATCHET_AUTO=true` and an agent API key. Most users do not enable this — the local loop (§8) is the recommended path. |
+| `ratchet-run` | PR merged, or manual | OPTIONAL, off by default. Runs an agent in CI to work the next issue. Requires `RATCHET_AUTO=true` and an agent API key. Before handing an issue to the agent it verifies the body still matches its reviewed plan file (see *Security* below); most users do not enable this — the local loop (§8) is the recommended path. |
 | `release` | manual (`workflow_dispatch`) | OPTIONAL, off by default — the post-merge "ship" stage. Requires `RATCHET_RELEASE=true`. On demand it tags the next semver version (bump chosen at dispatch) and publishes a changelog built from the titles of the PRs merged since the last release. With no merges since the last tag it exits with a "nothing to release" message, not an error. With the variable unset it no-ops. |
 
 All three core workflows read `${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN }}`
 so they work with the default token and upgrade automatically when the PAT is
 set (see §10).
+
+### Security: the unattended runner's trust boundary
+
+The three core workflows (`plan-sync`, `unblock-dependents`, `sweep-stale-claims`)
+only move labels and refs — they never execute issue content. `ratchet-run` is
+different: it feeds an **issue body** to an agent that holds a **write-scoped
+PAT** (contents + pull-requests + issues write). That makes the issue body a
+trust boundary, and it is why the runner is **opt-in** (off unless
+`RATCHET_AUTO=true`).
+
+- **Threat — issue-body prompt injection.** Issue bodies are compiled from
+  plan files that a human reviewed and merged. But anyone with issue-write
+  access can edit a body *after* compilation, and GitHub issue edits are not
+  code-reviewed. Without a guard, that edited text becomes instructions to an
+  agent that can push branches and open PRs — a privilege-escalation path from
+  "can edit an issue" to "can run code with the PAT".
+- **Control — verify against the reviewed plan before acting.** On each run,
+  after picking the next issue, `ratchet-run` requires the body to (1) carry a
+  `<!-- plan-id: <slug> -->` marker and (2) still match `plan/<slug>.md` on
+  `main` (the reviewed source of truth), using `scripts/verify-issue-body.mjs`.
+  On any mismatch — missing marker, missing plan file, or edited body — it
+  comments the specific discrepancy on the issue and **skips it without creating
+  a branch or changing code**. Restoring the body to its plan (or re-syncing
+  from the plan file) re-enables automation. The bound-changing content lives in
+  reviewed, version-controlled files, never in a mutable issue body.
+- **Required PAT scopes.** `FACTORY_PAT` is a fine-grained token scoped to this
+  repository with **Contents: write** (push branches), **Pull requests: write**
+  (open PRs), and **Issues: write** (labels, comments, assignment). Grant no
+  more than these, and only to a repo you trust the automation in. The local
+  loop (§8) needs no CI secret at all — it runs under your own `gh` auth, which
+  is the recommended path for exactly this reason.
 
 ---
 
