@@ -14,7 +14,8 @@
 // added for the renewable-lease heartbeat): the freshest proof of life among the
 // branch's last commit, a heartbeat comment, and the claim event. Reusing it here
 // keeps "is this claim alive?" defined in exactly one place.
-import { leaseReference, isStale } from "./sweep-lease.mjs";
+import { leaseReference, isStale, isHeartbeat } from "./sweep-lease.mjs";
+import { fileURLToPath } from "node:url";
 
 // The three lifecycle states the sweep patrols. state:in-progress is the
 // original claim lease; in-review and changes-requested close the holes where a
@@ -97,4 +98,151 @@ function decideChangesRequested({ now, staleMs, staleHours, branch, lastCommitAt
     deleteRef: false,
     comment: `Stale rework swept: \`${branch}\` is \`state:changes-requested\` with no activity for >${staleHours}h. Issue returned to \`state:ready\` so it can be re-picked.`,
   };
+}
+
+// --- orchestration: the sweep the workflow runs ------------------------------
+// Everything above is the pure decision core (unit-tested without the network).
+// Below is the thin driver that used to live inline in the workflow YAML: it
+// gathers each issue's freshness signals from the GitHub REST API, calls
+// decideSweep, and applies the sweep. Moving it here makes the workflow a single
+// `node scripts/sweep-stale-claims.mjs` and lets the orchestration be regression-
+// tested against an in-memory API (see sweep-stale-claims.test.mjs).
+
+const API = "https://api.github.com";
+
+// One GitHub REST call; throws (with .status) on any non-2xx so callers can
+// distinguish an expected 404 (absent branch) from a real failure.
+function ghClient(token) {
+  return async function gh(method, path, body) {
+    const res = await fetch(`${API}${path}`, {
+      method,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    if (!res.ok) {
+      const err = new Error(`${method} ${path} -> ${res.status} ${await res.text()}`);
+      err.status = res.status;
+      throw err;
+    }
+    return res.status === 204 ? null : res.json();
+  };
+}
+
+async function paginate(gh, path) {
+  const out = [];
+  for (let page = 1; ; page++) {
+    const sep = path.includes("?") ? "&" : "?";
+    const batch = await gh("GET", `${path}${sep}per_page=100&page=${page}`);
+    out.push(...batch);
+    if (batch.length < 100) break;
+  }
+  return out;
+}
+
+const labelNames = (labels) => labels.map((l) => (typeof l === "string" ? l : l.name));
+
+export async function main() {
+  const token = process.env.GITHUB_TOKEN || process.env.GITHUB_PAT;
+  const repo = process.env.GITHUB_REPOSITORY;
+  if (!token || !repo) {
+    throw new Error("Missing token or repo. Set GITHUB_TOKEN (or GITHUB_PAT) and GITHUB_REPOSITORY.");
+  }
+  const owner = repo.split("/")[0];
+  const staleHours = process.env.STALE_HOURS || "2";
+  const staleMs = Number(staleHours) * 3600 * 1000;
+  // SWEEP_NOW pins the clock for the test; production uses the wall clock.
+  const now = Number(process.env.SWEEP_NOW) || Date.now();
+  const gh = ghClient(token);
+
+  const open = await paginate(gh, `/repos/${repo}/issues?state=open`);
+  let swept = 0;
+  for (const issue of open) {
+    if (issue.pull_request) continue;
+    const state = labelNames(issue.labels).find((l) => SWEPT_STATES.has(l));
+    if (!state) continue;
+    const branch = `agent/issue-${issue.number}`;
+
+    // Signals are fetched only where a state weighs them; every fetch degrades
+    // to the helper's documented fallback rather than failing the whole sweep.
+    let aheadBy = null, lastCommitAt = null, claimAt = null, heartbeatAt = null, hasOpenPr = false;
+
+    if (state === "state:in-progress" || state === "state:changes-requested") {
+      try {
+        const cmp = await gh("GET", `/repos/${repo}/compare/main...${branch}`);
+        aheadBy = cmp.ahead_by;
+      } catch {
+        // branch absent or uncomparable -> no commit signal
+      }
+      if (aheadBy > 0) {
+        try {
+          const commits = await gh("GET", `/repos/${repo}/commits?sha=${branch}&per_page=1`);
+          const d = commits[0]?.commit?.committer?.date;
+          lastCommitAt = d ? new Date(d).getTime() : null;
+        } catch {
+          // branch vanished between compare and list -> fall back in the helper
+        }
+      }
+      try {
+        const comments = await paginate(gh, `/repos/${repo}/issues/${issue.number}/comments`);
+        const beats = comments.filter((c) => isHeartbeat(c.body || "")).map((c) => new Date(c.created_at).getTime());
+        heartbeatAt = beats.length ? Math.max(...beats) : null;
+      } catch {
+        // comments unreadable -> leave null
+      }
+    }
+
+    if (state === "state:in-progress") {
+      try {
+        const events = await paginate(gh, `/repos/${repo}/issues/${issue.number}/events`);
+        const claims = events.filter((e) => e.event === "labeled" && e.label && e.label.name === "state:in-progress");
+        claimAt = claims.length ? new Date(claims[claims.length - 1].created_at).getTime() : null;
+      } catch {
+        // timeline unreadable -> fall back to issue update inside the helper
+      }
+    }
+
+    if (state === "state:in-review") {
+      try {
+        const prs = await gh("GET", `/repos/${repo}/pulls?state=open&head=${owner}:${branch}&per_page=1`);
+        hasOpenPr = prs.length > 0;
+      } catch {
+        hasOpenPr = true; // PR list unreadable -> never sweep on doubt
+      }
+    }
+
+    const decision = decideSweep({
+      state, now, staleMs, staleHours, branch, aheadBy, lastCommitAt, claimAt, heartbeatAt,
+      updatedAt: new Date(issue.updated_at).getTime(), hasOpenPr,
+    });
+    if (!decision.sweep) continue;
+
+    const labels = labelNames(issue.labels).filter((l) => !l.startsWith("state:"));
+    labels.push("state:ready");
+    await gh("PUT", `/repos/${repo}/issues/${issue.number}/labels`, { labels });
+    if (issue.assignees?.length) {
+      await gh("DELETE", `/repos/${repo}/issues/${issue.number}/assignees`, {
+        assignees: issue.assignees.map((a) => a.login),
+      }).catch(() => {});
+    }
+    if (decision.deleteRef) {
+      await gh("DELETE", `/repos/${repo}/git/refs/heads/${branch}`).catch(() => {});
+    }
+    await gh("POST", `/repos/${repo}/issues/${issue.number}/comments`, { body: decision.comment });
+    console.log(`swept #${issue.number} (${state}) -> state:ready${decision.deleteRef ? " (claim ref deleted)" : ""}`);
+    swept++;
+  }
+  console.log(`sweep complete: ${swept} issue(s) returned to state:ready.`);
+  return { swept };
+}
+
+// Auto-run only when executed directly, never on import (the test drives main()).
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  main().catch((e) => {
+    console.error(e.message);
+    process.exit(1);
+  });
 }

@@ -10,6 +10,9 @@ name: unblock-dependents
 #    an issue with no test plan). The ready-vs-draft decision is made by the
 #    SAME shared helper the plan compiler uses (scripts/criteria.mjs), so the
 #    two can never disagree.
+# All of this lives in scripts/unblock-dependents.mjs so it can be regression-
+# tested off the network; this workflow is only its trigger. The closed issue is
+# read from the event payload at GITHUB_EVENT_PATH.
 
 on:
   issues:
@@ -22,51 +25,13 @@ jobs:
   unblock:
     runs-on: ubuntu-latest
     steps:
-      # Checkout so the github-script step can import the shared readiness
-      # helper (scripts/criteria.mjs) — the single source of truth for the
-      # ready-vs-draft decision, reused from the plan compiler.
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-      - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
+          node-version: "20"
+      - run: node scripts/unblock-dependents.mjs
+        env:
           # Prefer a PAT so this workflow can trigger further workflows.
           # Falls back to the default token (fine for pure human-merge flows).
-          github-token: ${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN }}
-          script: |
-            const { pathToFileURL } = require("node:url");
-            const { classifyUnblock } = await import(
-              pathToFileURL(`${process.env.GITHUB_WORKSPACE}/scripts/criteria.mjs`).href
-            );
-
-            const closed = context.payload.issue.number;
-
-            // The state machine only applies to open issues: closed means done
-            // (or discarded), so the lifecycle label comes off.
-            const ownLabels = (context.payload.issue.labels || []).map(l => l.name);
-            const kept = ownLabels.filter(l => !l.startsWith("state:"));
-            if (kept.length !== ownLabels.length) {
-              await github.rest.issues.setLabels({ owner: context.repo.owner, repo: context.repo.repo, issue_number: closed, labels: kept });
-            }
-
-            const all = await github.paginate(github.rest.issues.listForRepo, {
-              owner: context.repo.owner, repo: context.repo.repo, state: "open", per_page: 100,
-            });
-            for (const issue of all) {
-              if (issue.pull_request) continue;
-              const blockers = [...(issue.body || "").matchAll(/Blocked by #(\d+)/g)].map(m => Number(m[1]));
-              if (!blockers.includes(closed)) continue;
-
-              // Are ALL blockers now closed?
-              let allClosed = true;
-              for (const n of blockers) {
-                const b = await github.rest.issues.get({ owner: context.repo.owner, repo: context.repo.repo, issue_number: n });
-                if (b.data.state !== "closed") { allClosed = false; break; }
-              }
-              if (!allClosed) continue;
-
-              // Only promote to ready if criteria survive; else hold as draft.
-              const { state, comment } = classifyUnblock(issue.body || "", closed);
-              const labels = issue.labels.map(l => l.name).filter(l => !l.startsWith("state:"));
-              labels.push(state);
-              await github.rest.issues.setLabels({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number, labels });
-              await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number, body: comment });
-            }
+          GITHUB_TOKEN: ${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
