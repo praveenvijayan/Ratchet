@@ -265,7 +265,7 @@ See §8 — this is the routine that responds to a human's PR decision.
 | `unblock-dependents` | `issues: closed` | Strips the closed issue's own `state:*` label (closed is terminal; a lingering `state:in-review` misleads), then promotes every issue whose blockers are now all closed to `state:ready`. This re-feeds the queue. |
 | `sweep-stale-claims` | every 30 min, or manual | Patrols `state:in-progress`, `state:in-review`, and `state:changes-requested`. Freshness is the newest proof of life: a branch commit, a claim event, or a heartbeat issue comment containing `<!-- ratchet-heartbeat -->`. Stale zero-commit claims return to `state:ready` and have the orphan ref deleted; committed branches are kept. In-review issues with no live PR are requeued, while merged PRs whose issue stayed open are moved to `state:blocked` for human cleanup. Changes-requested work is requeued only after the inactivity window. |
 | `pr-gates` | agent PR opened, synchronized, or reopened | Runs `scripts/run-gates.mjs` as the `gates` job and `scripts/pr-size-check.mjs` as the `size` job on every `agent/issue-*` PR. Branch protection should require both contexts. |
-| `ratchet-run` | PR merged, or manual | OPTIONAL, off by default. Runs an agent in CI to work the next issue. Requires `RATCHET_AUTO=true` and an agent API key. Before handing an issue to the agent it verifies the body still matches its reviewed plan file (see *Security* below); most users do not enable this — the local loop (§8) is the recommended path. |
+| `ratchet-run` | PR merged, or manual | OPTIONAL, off by default. Runs an agent in CI to work the next issue. Requires `RATCHET_AUTO=true` and an agent API key. Before handing work to the agent it verifies the body/title against the reviewed plan, binds the plan marker to the picked issue number, and passes the verified issue body snapshot into the prompt (see *Security* below); most users do not enable this — the local loop (§8) is the recommended path. |
 | `release` | manual (`workflow_dispatch`) | OPTIONAL, off by default — the post-merge "ship" stage. Requires `RATCHET_RELEASE=true`. On demand it tags the next semver version (bump chosen at dispatch) and publishes a changelog built from the titles of the PRs merged since the last release. With no merges since the last tag it exits with a "nothing to release" message, not an error. Deploy is a second opt-in: set `RATCHET_DEPLOY=true` and `RATCHET_DEPLOY_COMMAND` to a repo-owned shell command. Repos that do not opt in have no deploy job and no deploy config. If deploy fails, the workflow is visibly red after publication; it does not delete or mutate the tag/release. |
 
 The GitHub-mutating workflows read `${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN }}`
@@ -294,7 +294,10 @@ trust boundary, and it is why the runner is **opt-in** (off unless
   channel.** On each run, after picking the next issue, `ratchet-run` runs
   `scripts/verify-issue-body.mjs`, which fails **closed** on every check:
   - **Body** — must carry a `<!-- plan-id: <slug> -->` marker and still match
-    `plan/<slug>.md` on `main` (the reviewed source of truth).
+    `plan/<slug>.md` on `main` (the reviewed source of truth). The workflow then
+    hands the agent the verified issue body snapshot — the exact content captured
+    before verification — inside the prompt. A later issue-body edit therefore
+    cannot change the instructions the unattended agent executes.
   - **Title** — must still equal the plan file's `title:` frontmatter. An edited
     title fails verification exactly as an edited body does; title text is never
     treated as work instructions.
@@ -303,15 +306,21 @@ trust boundary, and it is why the runner is **opt-in** (off unless
     character is rejected before it is ever joined into a path, so a crafted
     marker cannot traverse the filesystem to a look-alike plan file — the guard
     fails closed on principle, not by accident.
+  - **Issue-number binding** — the `plan-id` slug must be uniquely bound to the
+    picked GitHub issue number. If another issue carries the same reviewed marker
+    and content, or the slug resolves to a different issue, verification fails
+    with an issue/plan mismatch instead of letting issue #A send the agent to
+    work plan B on issue #A's branch.
   - **Comments** — have no reviewed source to match against, so they are
     excluded by the runner's **prompt contract**: the "Work the issue" step
     instructs the agent that only the verified body and its plan file are trusted
     instructions and that titles and comments are untrusted display text to be
     obeyed by nothing.
 
-  On any body/title/slug mismatch — missing marker, unsafe slug, missing plan
-  file, or edited body/title — the runner comments the specific discrepancy on
-  the issue and **skips it without creating a branch or changing code**.
+  On any body/title/slug/binding mismatch — missing marker, unsafe slug, missing
+  plan file, edited body/title, or marker copied onto the wrong issue — the
+  runner comments the specific discrepancy on the issue and **skips it without
+  creating a branch or changing code**.
   Restoring the issue to its plan (or re-syncing from the plan file) re-enables
   automation. The bound-changing content lives in reviewed, version-controlled
   files, never in a mutable issue field.
