@@ -12,6 +12,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { hasAcceptanceCriteria } from "./criteria.mjs";
 
 // Local convenience: load .env if present (Actions sets env vars directly).
 // Never overrides an already-set variable. .env must be gitignored.
@@ -64,7 +65,7 @@ function parsePlan(text) {
     }
   }
   const body = m[2].trim();
-  const hasCriteria = /##\s*Acceptance criteria/i.test(body) && /-\s*\[[ x]\]/i.test(body);
+  const hasCriteria = hasAcceptanceCriteria(body);
   return { fm, body, hasCriteria };
 }
 
