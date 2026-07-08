@@ -274,21 +274,40 @@ PAT** (contents + pull-requests + issues write). That makes the issue body a
 trust boundary, and it is why the runner is **opt-in** (off unless
 `RATCHET_AUTO=true`).
 
-- **Threat — issue-body prompt injection.** Issue bodies are compiled from
-  plan files that a human reviewed and merged. But anyone with issue-write
-  access can edit a body *after* compilation, and GitHub issue edits are not
-  code-reviewed. Without a guard, that edited text becomes instructions to an
-  agent that can push branches and open PRs — a privilege-escalation path from
-  "can edit an issue" to "can run code with the PAT".
-- **Control — verify against the reviewed plan before acting.** On each run,
-  after picking the next issue, `ratchet-run` requires the body to (1) carry a
-  `<!-- plan-id: <slug> -->` marker and (2) still match `plan/<slug>.md` on
-  `main` (the reviewed source of truth), using `scripts/verify-issue-body.mjs`.
-  On any mismatch — missing marker, missing plan file, or edited body — it
-  comments the specific discrepancy on the issue and **skips it without creating
-  a branch or changing code**. Restoring the body to its plan (or re-syncing
-  from the plan file) re-enables automation. The bound-changing content lives in
-  reviewed, version-controlled files, never in a mutable issue body.
+- **Threat — issue prompt injection, on every mutable channel.** Issue bodies
+  are compiled from plan files that a human reviewed and merged. But anyone with
+  issue-write access can edit a body, edit the **title**, or add a **comment**
+  *after* compilation, and GitHub issue edits are not code-reviewed. The agent
+  the runner launches reads the whole issue — title and comments included — so
+  any of these channels can become instructions to an agent that can push
+  branches and open PRs: a privilege-escalation path from "can edit an issue" to
+  "can run code with the PAT". A fourth channel is the `plan-id` **slug** itself:
+  it is attacker-influenced text that flows into a filesystem path.
+- **Control — verify against the reviewed plan before acting; neutralise each
+  channel.** On each run, after picking the next issue, `ratchet-run` runs
+  `scripts/verify-issue-body.mjs`, which fails **closed** on every check:
+  - **Body** — must carry a `<!-- plan-id: <slug> -->` marker and still match
+    `plan/<slug>.md` on `main` (the reviewed source of truth).
+  - **Title** — must still equal the plan file's `title:` frontmatter. An edited
+    title fails verification exactly as an edited body does; title text is never
+    treated as work instructions.
+  - **Slug** — must match the safe slug charset (lowercase letters, digits, and
+    hyphen-joined segments). A slug carrying a dot, a slash, `..`, or any other
+    character is rejected before it is ever joined into a path, so a crafted
+    marker cannot traverse the filesystem to a look-alike plan file — the guard
+    fails closed on principle, not by accident.
+  - **Comments** — have no reviewed source to match against, so they are
+    excluded by the runner's **prompt contract**: the "Work the issue" step
+    instructs the agent that only the verified body and its plan file are trusted
+    instructions and that titles and comments are untrusted display text to be
+    obeyed by nothing.
+
+  On any body/title/slug mismatch — missing marker, unsafe slug, missing plan
+  file, or edited body/title — the runner comments the specific discrepancy on
+  the issue and **skips it without creating a branch or changing code**.
+  Restoring the issue to its plan (or re-syncing from the plan file) re-enables
+  automation. The bound-changing content lives in reviewed, version-controlled
+  files, never in a mutable issue field.
 - **Required PAT scopes.** `FACTORY_PAT` is a fine-grained token scoped to this
   repository with **Contents: write** (push branches), **Pull requests: write**
   (open PRs), and **Issues: write** (labels, comments, assignment). Grant no
