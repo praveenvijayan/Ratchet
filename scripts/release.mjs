@@ -11,7 +11,7 @@
 // level (gated on the RATCHET_RELEASE repo variable) and only ever runs on
 // demand, so no project pays for it unless it opts in.
 
-import { existsSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 // Local convenience: load .env if present (Actions sets env vars directly).
@@ -25,6 +25,12 @@ if (existsSync(".env")) {
 
 const API = "https://api.github.com";
 const VALID_BUMPS = new Set(["major", "minor", "patch"]);
+
+function setOutput(name, value) {
+  const f = process.env.GITHUB_OUTPUT;
+  if (!f) return;
+  appendFileSync(f, `${name}=${String(value).replace(/\n/g, "%0A")}\n`);
+}
 
 // One API call. `allow404` lets the caller treat "not found" as a normal,
 // expected outcome (a repo with no releases yet) rather than a hard error.
@@ -143,6 +149,7 @@ export async function main() {
   const prs = await mergedPRsSince(token, repo, since);
   if (prs.length === 0) {
     console.log(`Nothing to release — no PRs merged since ${lastTag || "the start of the project"}.`);
+    setOutput("released", "false");
     return { released: false };
   }
 
@@ -160,6 +167,7 @@ export async function main() {
   const clash = await gh(token, "GET", `/repos/${repo}/git/ref/tags/${version}`, { allow404: true });
   if (clash) {
     console.log(`Tag ${version} already exists — nothing released. Remove the tag or choose a different bump, then re-run.`);
+    setOutput("released", "false");
     return { released: false, reason: "tag-exists" };
   }
 
@@ -189,6 +197,7 @@ export async function main() {
     // release was created, so nothing is left half-done.
     if (/ -> 422\b/.test(e.message)) {
       console.log(`Tag ${version} already exists — another run beat us to it; nothing released, nothing partial created.`);
+      setOutput("released", "false");
       return { released: false, reason: "tag-exists" };
     }
     throw e;
@@ -197,6 +206,9 @@ export async function main() {
   console.log(`Released ${version} from ${prs.length} merged PR(s).`);
   console.log(changelog);
   if (release?.html_url) console.log(release.html_url);
+  setOutput("released", "true");
+  setOutput("version", version);
+  setOutput("release_url", release?.html_url || "");
   return { released: true, version, count: prs.length };
 }
 

@@ -1,8 +1,9 @@
 name: release
 
-# The opt-in release lane: the post-merge "ship" stage. Tags a version and
+# The opt-in release lane: the post-merge "ship" stage. Tags a version,
 # publishes a changelog built from the titles of the PRs merged since the last
-# release.
+# release, and can optionally run a repo-owned deploy command after the tag and
+# release exist.
 #
 # OPT-IN and SAFE BY DEFAULT: the job is skipped unless the repo variable
 # RATCHET_RELEASE is set to "true". With it unset (the default) this workflow
@@ -14,6 +15,11 @@ name: release
 # ON DEMAND: run it from the Actions tab (or `gh workflow run release.yml`)
 # after merging a batch. It is deliberately not tied to every merge, so a
 # release happens exactly when you decide to ship, not on every PR.
+#
+# OPTIONAL DEPLOY: set RATCHET_DEPLOY=true and RATCHET_DEPLOY_COMMAND to a
+# repo-specific shell command. Without RATCHET_DEPLOY=true, no deploy step is
+# added and no deploy config is required. A deploy failure fails the workflow
+# visibly after publication; it never deletes or mutates the tag/release.
 
 on:
   workflow_dispatch:
@@ -43,8 +49,21 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "20"
-      - run: node scripts/release.mjs
+      - id: publish
+        run: node scripts/release.mjs
         env:
           GITHUB_TOKEN: ${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           RELEASE_BUMP: ${{ inputs.bump }}
+      - name: Deploy
+        if: ${{ vars.RATCHET_DEPLOY == 'true' && steps.publish.outputs.released == 'true' }}
+        run: |
+          if [ -z "${RATCHET_DEPLOY_COMMAND}" ]; then
+            echo "::error::RATCHET_DEPLOY=true but RATCHET_DEPLOY_COMMAND is empty. Set a repo-specific deploy command or disable RATCHET_DEPLOY."
+            exit 1
+          fi
+          eval "$RATCHET_DEPLOY_COMMAND"
+        env:
+          RATCHET_DEPLOY_COMMAND: ${{ vars.RATCHET_DEPLOY_COMMAND }}
+          RELEASE_VERSION: ${{ steps.publish.outputs.version }}
+          RELEASE_URL: ${{ steps.publish.outputs.release_url }}
