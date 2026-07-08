@@ -13,10 +13,14 @@ command for your project should read `TODO: <gate> command`, not a guess.
 Run in order, fail-fast. Replace the commands with your stack's equivalents
 (or let `/ratchet-init` detect them).
 
-| Order | Gate      | Command                | Pass condition |
-|-------|-----------|------------------------|----------------|
-| 1     | format    | `npm run format:check` | no diff        |
-| 2     | typecheck | `npm run typecheck`    | exit 0         |
-| 3     | lint      | `npm run lint`         | exit 0         |
-| 4     | test      | `npm test`             | exit 0         |
-| 5     | build     | `npm run build`        | exit 0         |
+<!-- auto-detected by /ratchet-init on 2026-07-08; verify before first run.
+     This repo is the Ratchet framework itself: markdown + zero-dependency
+     Node scripts, no package manifest — only the compiler test is evidenced. -->
+
+| Order | Gate      | Command                          | Pass condition |
+|-------|-----------|----------------------------------|----------------|
+| 1     | format    | TODO: format command             | —              |
+| 2     | typecheck | TODO: typecheck command          | —              |
+| 3     | lint      | TODO: lint command               | —              |
+| 4     | test      | `node scripts/plan-sync.test.mjs` | exit 0        |
+| 5     | build     | TODO: build command              | —              |
