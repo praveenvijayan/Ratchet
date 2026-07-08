@@ -33,8 +33,8 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 | 2     | typecheck   | TODO: typecheck command           | —              |
 | 3     | lint        | TODO: lint command                | —              |
 | 4     | test        | `node scripts/plan-sync.test.mjs` | exit 0         |
-| 4b    | test      | `node scripts/plan-sync-concurrency.test.mjs` | exit 0 |
-| 4c    | test      | `node scripts/pr-size-check.test.mjs` | exit 0 |
+| 4b    | test        | `node scripts/plan-sync-concurrency.test.mjs` | exit 0 |
+| 4c    | test        | `node scripts/release.test.mjs`   | exit 0 |
 | 5     | build       | TODO: build command               | —              |
 | 6     | audit       | TODO: audit command               | —              |
 | 7     | secret-scan | TODO: secret-scan command         | —              |

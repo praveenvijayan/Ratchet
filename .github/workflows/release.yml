@@ -1,0 +1,50 @@
+name: release
+
+# The opt-in release lane: the post-merge "ship" stage. Tags a version and
+# publishes a changelog built from the titles of the PRs merged since the last
+# release.
+#
+# OPT-IN and SAFE BY DEFAULT: the job is skipped unless the repo variable
+# RATCHET_RELEASE is set to "true". With it unset (the default) this workflow
+# exists but does nothing — no tag, no release, no failure. To enable:
+#   gh variable set RATCHET_RELEASE --body true
+# Disable any time by setting RATCHET_RELEASE=false — the workflow stays but
+# no-ops.
+#
+# ON DEMAND: run it from the Actions tab (or `gh workflow run release.yml`)
+# after merging a batch. It is deliberately not tied to every merge, so a
+# release happens exactly when you decide to ship, not on every PR.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Semver part to bump for the new tag"
+        type: choice
+        default: patch
+        options: [patch, minor, major]
+
+permissions:
+  contents: write        # create the tag and the GitHub release
+
+concurrency:
+  group: release           # never two releases racing on the same tag sequence
+  cancel-in-progress: false # queue, don't cancel
+
+jobs:
+  release:
+    if: ${{ vars.RATCHET_RELEASE == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: node scripts/release.mjs
+        env:
+          GITHUB_TOKEN: ${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          RELEASE_BUMP: ${{ inputs.bump }}
