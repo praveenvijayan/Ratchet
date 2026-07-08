@@ -162,11 +162,14 @@ memory/
   ARCHITECTURE.md               Coarse codebase map (generated; agent scopes reads with it)
   MEMORY.md                     Distilled knowledge cache (agent proposes via PR)
 scripts/
+  archive-closed-plans-workflow.test.mjs Regression test for the archive workflow
   archive-closed-plans.mjs      Move closed issue plans into plan/done/
   archive-closed-plans.test.mjs Regression test for the archive sweep
   criteria.mjs                  Shared acceptance-criteria readiness rule
   criteria.test.mjs             Regression test for the readiness rule
   docs-refresh.test.mjs         Regression test for documentation inventory
+  gates-coverage.mjs            Guard: every *.test.mjs runs in a GATES.md row
+  gates-coverage.test.mjs       Regression test for the coverage guard
   plan-sync-concurrency.test.mjs Workflow concurrency regression test
   plan-sync.mjs                 Deterministic plan→issue compiler
   plan-sync.test.mjs            Regression test for the compiler
@@ -177,6 +180,7 @@ scripts/
   ratchet-metrics.test.mjs      Regression test for loop metrics
   ratchet-uninstall.sh          Remove framework files on a review branch
   ratchet-update.sh             Pull framework updates, preserve project files
+  ratchet-update.test.mjs       Regression test for the updater
   ratchet-watch.mjs             Webhook receiver / event classifier
   ratchet-watch.sh              Real-time GitHub→local bridge
   release.mjs                   Opt-in release tag + changelog publisher
@@ -192,6 +196,7 @@ scripts/
   verify-issue-body.mjs         Trust-boundary check for ratchet-run
   verify-issue-body.test.mjs    Regression test for issue-body verification
 .github/workflows/
+  archive-closed-plans.yml      Archive closed-issue plans via an automatic PR
   plan-sync.yml                 Compile plan/*.md → issues on push
   pr-gates.yml                  Run GATES.md gates and PR size check on agent PRs
   ratchet-run.yml               OPTIONAL CI runner (off by default)
