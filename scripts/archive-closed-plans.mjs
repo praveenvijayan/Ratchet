@@ -75,13 +75,25 @@ async function main() {
   // Map each plan-id slug to its issue state via the marker. state=all so closed
   // issues are visible; a slug with no issue (never synced) is simply unknown.
   const issues = await listAllIssues();
-  const stateBySlug = new Map();
+  // A slug can appear on more than one issue (a split, a reopen-and-refile, a
+  // hand-authored duplicate). A file is only safe to archive when the work it
+  // describes is *entirely* done: at least one issue carries the marker and
+  // every issue that carries it is closed. So track open and closed markers
+  // separately — a single open issue vetoes the archive regardless of how many
+  // closed ones share the slug — instead of letting a last-writer-wins Map hand
+  // the decision to whichever issue happened to be listed last.
+  const openSlugs = new Set();
+  const closedSlugs = new Set();
   for (const issue of issues) {
     const m = (issue.body || "").match(/<!-- plan-id: (.+?) -->/);
-    if (m) stateBySlug.set(m[1], issue.state);
+    if (!m) continue;
+    (issue.state === "closed" ? closedSlugs : openSlugs).add(m[1]);
   }
 
-  const toArchive = planFiles.filter((f) => stateBySlug.get(f.replace(/\.md$/, "")) === "closed");
+  const toArchive = planFiles.filter((f) => {
+    const slug = f.replace(/\.md$/, "");
+    return closedSlugs.has(slug) && !openSlugs.has(slug);
+  });
   if (!toArchive.length) {
     console.log("Nothing to archive: no active plan file maps to a closed issue.");
     return;
@@ -91,12 +103,23 @@ async function main() {
   await mkdir(doneDir, { recursive: true });
   let failed = 0;
   for (const f of toArchive) {
+    const src = join(PLAN_DIR, f);
+    const dest = join(doneDir, f);
+    // rename() silently overwrites its destination on POSIX, so a name clash in
+    // plan/done/ would replace already-archived history without a trace. Guard
+    // it explicitly: refuse the move, name both paths, and leave the source in
+    // place. The run keeps going and exits non-zero.
+    if (existsSync(dest)) {
+      failed++;
+      console.error(`ERROR: could not archive ${f}: destination ${dest} already exists — refusing to overwrite archived history. Source ${src} left in place.`);
+      continue;
+    }
     try {
-      await rename(join(PLAN_DIR, f), join(doneDir, f));
+      await rename(src, dest);
       console.log(`ARCHIVE ${f} -> done/${f}`);
     } catch (e) {
-      // One unmovable file (permissions, a name clash in done/) must not abort
-      // the rest — report it loudly and keep going; the run exits non-zero.
+      // Any other unmovable file (permissions, cross-device) must not abort the
+      // rest — report it loudly and keep going; the run exits non-zero.
       failed++;
       console.error(`ERROR: could not archive ${f}: ${e.message}`);
     }
