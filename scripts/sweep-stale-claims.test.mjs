@@ -7,7 +7,7 @@
 // decision is exercised through its public interface with no network or mocks.
 
 import assert from "node:assert/strict";
-import { decideSweep } from "./sweep-stale-claims.mjs";
+import { decideSweep, main } from "./sweep-stale-claims.mjs";
 
 const HOUR = 3600 * 1000;
 const now = 1_700_000_000_000; // fixed clock (no Date.now dependence)
@@ -77,4 +77,70 @@ const recent = now - HOUR;          // comfortably inside the window
 // A state the sweep does not patrol is never touched.
 assert.equal(decideSweep({ ...base, state: "state:blocked" }).sweep, false, "non-swept states are left alone");
 
-console.log("PASS sweep-stale-claims.test.mjs (15 assertions)");
+// --- orchestration (main): the extracted driver applies the decision ---------
+// Drives main() against an in-memory GitHub API. Behaviour must match what the
+// workflow YAML did: sweep an in-review claim with no PR, delete a stale zero-
+// commit claim's ref, and leave a freshly-committed claim alone.
+{
+  const staleIso = new Date(now - 3 * HOUR).toISOString();  // outside the 2h window
+  const recentIso = new Date(now - 0.5 * HOUR).toISOString(); // inside it
+  const label = (name) => ({ name });
+  const openIssues = [
+    { number: 100, pull_request: undefined, updated_at: recentIso, assignees: [{ login: "alice" }], labels: [label("state:in-review"), label("priority:low")] },
+    { number: 200, pull_request: undefined, updated_at: staleIso, assignees: [], labels: [label("state:in-progress")] },
+    { number: 300, pull_request: undefined, updated_at: staleIso, assignees: [], labels: [label("state:in-progress")] },
+  ];
+  const calls = [];
+  const respond = (data, status = 200) => ({ ok: true, status, json: async () => data, text: async () => JSON.stringify(data) });
+  globalThis.fetch = async (url, opts = {}) => {
+    const { pathname, searchParams } = new URL(url);
+    const method = opts.method || "GET";
+    const body = opts.body ? JSON.parse(opts.body) : null;
+    calls.push({ method, pathname, body });
+    if (method === "GET" && pathname === "/repos/o/r/issues") {
+      return respond(Number(searchParams.get("page")) === 1 ? openIssues : []);
+    }
+    if (method === "GET" && pathname === "/repos/o/r/pulls") return respond([]); // no open PR for #100
+    if (method === "GET" && pathname === "/repos/o/r/compare/main...agent/issue-200") return respond({ ahead_by: 0 });
+    if (method === "GET" && pathname === "/repos/o/r/compare/main...agent/issue-300") return respond({ ahead_by: 3 });
+    if (method === "GET" && pathname === "/repos/o/r/commits") return respond([{ commit: { committer: { date: recentIso } } }]);
+    if (method === "GET" && /\/issues\/\d+\/comments$/.test(pathname)) return respond([]);
+    if (method === "GET" && /\/issues\/\d+\/events$/.test(pathname)) {
+      return respond([{ event: "labeled", label: { name: "state:in-progress" }, created_at: staleIso }]);
+    }
+    if (method !== "GET") return respond({}, 200); // PUT labels / DELETE assignees / DELETE ref / POST comment
+    throw new Error(`unexpected request: ${method} ${pathname}`);
+  };
+
+  process.env.GITHUB_TOKEN = "test-token";
+  process.env.GITHUB_REPOSITORY = "o/r";
+  process.env.STALE_HOURS = "2";
+  process.env.SWEEP_NOW = String(now);
+  const logs = [];
+  const realLog = console.log;
+  console.log = (...a) => logs.push(a.join(" "));
+  let result;
+  try {
+    result = await main();
+  } finally {
+    console.log = realLog;
+  }
+
+  const put = (n) => calls.find((c) => c.method === "PUT" && c.pathname === `/repos/o/r/issues/${n}/labels`);
+  // #100 in-review, no PR: requeued to ready, its state label dropped, others kept.
+  assert.ok(put(100), "in-review claim with no PR must be relabelled");
+  assert.ok(put(100).body.labels.includes("state:ready"), "#100 must become state:ready");
+  assert.ok(!put(100).body.labels.includes("state:in-review"), "#100 must lose its old state label");
+  assert.ok(put(100).body.labels.includes("priority:low"), "#100 must keep its non-state labels");
+  assert.ok(calls.some((c) => c.method === "DELETE" && c.pathname === "/repos/o/r/issues/100/assignees"), "#100 assignees must be cleared");
+  assert.ok(calls.some((c) => c.method === "POST" && c.pathname === "/repos/o/r/issues/100/comments" && /in-review/.test(c.body.body)), "#100 must get an explanatory comment");
+  assert.ok(!calls.some((c) => c.method === "DELETE" && c.pathname === "/repos/o/r/git/refs/heads/agent/issue-100"), "a reviewed branch must never be deleted");
+  // #200 stale zero-commit claim: requeued AND its orphan ref deleted.
+  assert.ok(put(200)?.body.labels.includes("state:ready"), "#200 stale zero-commit claim must be swept to ready");
+  assert.ok(calls.some((c) => c.method === "DELETE" && c.pathname === "/repos/o/r/git/refs/heads/agent/issue-200"), "#200 orphan claim ref must be deleted");
+  // #300 freshly-committed claim: untouched.
+  assert.ok(!put(300), "a claim with a recent commit must not be swept");
+  assert.equal(result.swept, 2, "exactly two issues were swept");
+}
+
+console.log("PASS sweep-stale-claims.test.mjs (25 assertions)");
