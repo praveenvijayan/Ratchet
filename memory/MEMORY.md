@@ -38,6 +38,11 @@ Rules:
 
 ## Gotchas & fragile areas
 - (e.g.) Payments module has no test harness; integration tests hit the sandbox API (#88).
+- `archive-closed-plans` archives a slug only when it has ≥1 issue and *every*
+  issue bearing that `plan-id` marker is closed — one open issue vetoes the move
+  (a duplicate/split marker must not let a closed twin archive live work). It
+  also refuses to `rename` over an existing `plan/done/` file (POSIX rename
+  overwrites silently), naming both paths and exiting non-zero (#50).
 
 ## Environment & operational facts
 - (e.g.) CI requires Node 20; the build OOMs under 4 GB runners (PR #210).
