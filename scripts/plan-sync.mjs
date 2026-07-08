@@ -27,6 +27,10 @@ const REPO = process.env.GITHUB_REPOSITORY;
 const PLAN_DIR = process.env.PLAN_DIR || "plan";
 const API = "https://api.github.com";
 const EDITABLE_STATES = new Set(["state:ready", "state:draft"]);
+const VALID_PRIORITIES = new Set(["high", "medium", "low"]);
+// The documented frontmatter surface (see plan/README.md). Anything else is a
+// typo or an unsupported field: warned about, never silently honoured.
+const KNOWN_KEYS = new Set(["title", "priority", "labels", "blocked_by"]);
 
 if (!TOKEN || !REPO) {
   console.error("Missing token or repo. Set GITHUB_PAT in .env (local) or GITHUB_TOKEN/GITHUB_REPOSITORY in the environment.");
@@ -106,6 +110,25 @@ async function main() {
     if (!parsed || !parsed.fm.title || !parsed.fm.priority) {
       console.log(`SKIP ${file} (missing title or priority)`);
       continue;
+    }
+    // A bad priority sorts as lowest and silently corrupts triage order, so it
+    // is a hard skip, not a warning-and-continue — the file must be fixed.
+    if (!VALID_PRIORITIES.has(parsed.fm.priority)) {
+      console.log(`SKIP ${file} — WARNING: invalid priority '${parsed.fm.priority}' (must be high, medium, or low)`);
+      continue;
+    }
+    // Unknown keys and a missing blocked_by are warnings, not skips: the file
+    // is still compiled. Warn once per unknown key, naming file and key.
+    for (const key of Object.keys(parsed.fm)) {
+      if (!KNOWN_KEYS.has(key)) {
+        console.log(`WARNING: ${file} has unknown frontmatter key '${key}' — ignored, sync continues`);
+      }
+    }
+    // Absent (undefined) is distinct from an empty list: the field is
+    // documented as required, so its absence is worth flagging even though we
+    // proceed as if it were [].
+    if (parsed.fm.blocked_by === undefined) {
+      console.log(`WARNING: ${file} is missing 'blocked_by' (documented as required) — treating as no blockers`);
     }
     plans.set(slug, parsed);
   }

@@ -1,8 +1,11 @@
 name: sweep-stale-claims
 
 # Poor-man's lease expiry. Every 30 min, find issues stuck in state:in-progress
-# whose agent branch has had no commit for STALE_HOURS, and return them to the
-# queue. A crashed agent costs at most STALE_HOURS of delay, no human action.
+# that have shown no activity for STALE_HOURS, and return them to the queue.
+# Freshness is measured from the branch's last commit once work exists, but from
+# the claim event while the branch still sits at main HEAD -- otherwise a quiet
+# main would make every fresh, still-building claim look instantly stale.
+# A crashed agent costs at most STALE_HOURS of delay, no human action.
 
 on:
   schedule:
@@ -33,19 +36,12 @@ jobs:
             for (const issue of stuck) {
               if (issue.pull_request) continue;
               const branch = `agent/issue-${issue.number}`;
-              let lastCommit = null;
-              try {
-                const c = await github.rest.repos.listCommits({
-                  owner: context.repo.owner, repo: context.repo.repo, sha: branch, per_page: 1,
-                });
-                lastCommit = c.data[0]?.commit?.committer?.date;
-              } catch (e) {
-                // no branch at all -> claim never really happened; treat as stale
-              }
-              const ref = lastCommit ? new Date(lastCommit).getTime() : new Date(issue.updated_at).getTime();
-              if (now - ref < STALE_MS) continue;
 
-              // Does the claim branch carry real work, or is it a pure abandoned claim?
+              // Does the claim branch carry real work, or is it a pure claim ref
+              // still pointing at main HEAD? This decides how we measure freshness:
+              // a zero-commit claim's branch tip IS main's last commit, so timing it
+              // from the commit date would make every fresh claim look stale the
+              // moment main goes quiet for >STALE_HOURS. Compare first, then time.
               let aheadBy = null;
               try {
                 const cmp = await github.rest.repos.compareCommitsWithBasehead({
@@ -54,8 +50,44 @@ jobs:
                 });
                 aheadBy = cmp.data.ahead_by;
               } catch (e) {
-                // branch absent or uncomparable -> nothing to delete
+                // branch absent or uncomparable -> nothing to delete, treat as claim-timed
               }
+
+              // Pick the freshness reference and record its source for the comment.
+              // - Commits ahead of main -> the branch's last commit (real work in flight).
+              // - Zero commits (or no branch) -> the claim event: the most recent
+              //   `state:in-progress` labeled event, falling back to issue.updated_at.
+              let ref, source;
+              if (aheadBy > 0) {
+                let lastCommit = null;
+                try {
+                  const c = await github.rest.repos.listCommits({
+                    owner: context.repo.owner, repo: context.repo.repo, sha: branch, per_page: 1,
+                  });
+                  lastCommit = c.data[0]?.commit?.committer?.date;
+                } catch (e) {
+                  // branch vanished between compare and list -> fall back to issue update
+                }
+                ref = lastCommit ? new Date(lastCommit).getTime() : new Date(issue.updated_at).getTime();
+                source = lastCommit ? "last commit" : "issue update";
+              } else {
+                let claimAt = null;
+                try {
+                  const events = await github.paginate(github.rest.issues.listEvents, {
+                    owner: context.repo.owner, repo: context.repo.repo,
+                    issue_number: issue.number, per_page: 100,
+                  });
+                  const claims = events.filter(
+                    (e) => e.event === "labeled" && e.label && e.label.name === "state:in-progress",
+                  );
+                  claimAt = claims.length ? claims[claims.length - 1].created_at : null;
+                } catch (e) {
+                  // timeline unreadable -> fall back to issue update
+                }
+                ref = claimAt ? new Date(claimAt).getTime() : new Date(issue.updated_at).getTime();
+                source = claimAt ? "claim event" : "issue update";
+              }
+              if (now - ref < STALE_MS) continue;
 
               const labels = issue.labels.map(l => l.name).filter(l => !l.startsWith("state:"));
               labels.push("state:ready");
@@ -78,7 +110,7 @@ jobs:
               await github.rest.issues.createComment({
                 owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number,
                 body: deleted
-                  ? `Stale claim swept: \`${branch}\` had no work for >${process.env.STALE_HOURS}h. Orphaned claim ref deleted; issue returned to \`state:ready\`.`
-                  : `Stale claim swept: no activity on \`${branch}\` for >${process.env.STALE_HOURS}h. Branch kept (has commits); issue returned to \`state:ready\`.`,
+                  ? `Stale claim swept: \`${branch}\` had no work for >${process.env.STALE_HOURS}h (measured from ${source}). Orphaned claim ref deleted; issue returned to \`state:ready\`.`
+                  : `Stale claim swept: no activity on \`${branch}\` for >${process.env.STALE_HOURS}h (measured from ${source}). Branch kept (has commits); issue returned to \`state:ready\`.`,
               });
             }
