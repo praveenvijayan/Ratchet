@@ -487,17 +487,17 @@ files (`GATES.md` plus everything under `memory/`) live outside it.
 /ratchet-update v1.2.0    # or a specific release tag
 ```
 
-It pulls only framework paths (skills, workflows, scripts, `AGENTS.md`,
-pointers, `.env.example`), re-syncs the skill mirrors, bumps `.ratchet-version`,
-and stops for you to review the diff and open a PR. It never touches the
-project-owned set:
+It pulls only framework paths (skills, workflows, the whole `scripts/` tree,
+`AGENTS.md`/`DOCS.md`, pointers, `setup.sh`, `plan/README.md`, `.env.example`),
+re-syncs the skill mirrors, bumps `.ratchet-version`, and stops for you to
+review the diff and open a PR. It never touches the project-owned set:
 
 | Framework (pulled, overwrite-safe) | Project-owned (never touched) |
 |------------------------------------|-------------------------------|
 | `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `DOCS.md` | `GATES.md` (config) |
 | `.agents/`, `.claude/`, `plugin/`, `.claude-plugin/` | `memory/` (`USER.md`, `ARCHITECTURE.md`, `MEMORY.md`) |
-| `.github/workflows/`, `scripts/*` | your `plan/*.md` issue files |
-| `.env.example` | `.env`, `README.md`, `LICENSE`, `.gitignore`, your code |
+| `.github/workflows/`, `scripts/*`, `setup.sh` | your `plan/*.md` issue files |
+| `plan/README.md`, `.env.example` | `.env`, `README.md`, `LICENSE`, `.gitignore`, your code |
 
 `.ratchet-version` records the installed version. Tag releases upstream
 (`git tag v1.2.0 && git push --tags`) so consumers can pin to a known version.
