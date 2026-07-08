@@ -171,6 +171,7 @@ scripts/
   docs-refresh.test.mjs         Regression test for documentation inventory
   gates-coverage.mjs            Guard: every *.test.mjs runs in a GATES.md row
   gates-coverage.test.mjs       Regression test for the coverage guard
+  gates-table.mjs               Shared parser for the GATES.md markdown table
   plan-sync-concurrency.test.mjs Workflow concurrency regression test
   plan-sync.mjs                 Deterministic plan→issue compiler
   plan-sync.test.mjs            Regression test for the compiler

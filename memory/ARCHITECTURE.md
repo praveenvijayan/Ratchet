@@ -40,6 +40,7 @@ and an optional Claude Code plugin.
 - `scripts/` — the executable core: `plan-sync.mjs` (plan→issue compiler) with
   `plan-sync.test.mjs` (its regression test), `run-gates.mjs` (the GATES.md
   gate runner shared by local verify and CI) with `run-gates.test.mjs`,
+  `gates-table.mjs` (shared GATES.md table parser),
   `criteria.mjs` (shared acceptance-criteria readiness rule) and
   `sweep-lease.mjs` (shared lease-freshness/heartbeat rule) with their tests,
   `pr-size-check.mjs` (CI-only enforcement of the AGENTS.md step 3 scope cap,
