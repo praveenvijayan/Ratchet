@@ -1,0 +1,68 @@
+name: archive-closed-plans
+
+# Runs the archive sweep on a recurring schedule so plan/ hygiene never depends
+# on someone remembering to run `node scripts/archive-closed-plans.mjs` by hand.
+# The script only MOVES plan/*.md of closed issues into plan/done/; this workflow
+# turns those moves into a reviewable PR. It NEVER pushes to main — the human
+# merge gate is preserved exactly as for agent work. When nothing maps to a
+# closed issue the tree stays clean and no PR is opened, so a quiet day is a
+# quiet run. The archive decision itself lives in (and is unit-tested through)
+# scripts/archive-closed-plans.mjs; this workflow is only its trigger and the
+# branch/PR plumbing around it.
+
+on:
+  schedule:
+    - cron: "23 4 * * *" # daily, off the top of the hour
+  workflow_dispatch: {} # allow an on-demand sweep
+
+permissions:
+  contents: write # push the archive branch (never main)
+  pull-requests: write # open the archive PR
+  issues: read # the script reads issue states to decide what is closed
+
+# One archive run at a time: two overlapping sweeps must not both force-push the
+# shared archive branch and race the PR check.
+concurrency:
+  group: archive-closed-plans
+  cancel-in-progress: false
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          token: ${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+      - name: Archive plan files of closed issues
+        run: node scripts/archive-closed-plans.mjs
+        env:
+          GITHUB_TOKEN: ${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+      - name: Open a PR for the archived files
+        env:
+          GH_TOKEN: ${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Nothing archived -> working tree clean -> exit quietly, open no PR.
+          if [ -z "$(git status --porcelain plan)" ]; then
+            echo "Nothing to archive — working tree clean, no PR opened."
+            exit 0
+          fi
+          BRANCH="chore/archive-closed-plans"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A plan
+          git commit -m "chore: archive plan files of closed issues"
+          # Publish to a feature branch and open a PR — main is never pushed to.
+          git push --force origin "HEAD:refs/heads/${BRANCH}"
+          if [ "$(gh pr list --head "$BRANCH" --base main --state open --json number --jq 'length')" = "0" ]; then
+            gh pr create --base main --head "$BRANCH" \
+              --title "chore: archive closed plans" \
+              --body "Automated by the archive-closed-plans workflow: moves each plan/*.md whose issue is closed into plan/done/. Git shows the changes as renames — review and merge to keep plan/ a map of live work."
+          else
+            echo "An archive PR is already open for ${BRANCH}; updated it with a fresh push."
+          fi

@@ -39,6 +39,7 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 | 4e    | test        | `node scripts/archive-closed-plans.test.mjs` | exit 0 |
 | 4f    | test        | `node scripts/unblock-dependents.test.mjs` | exit 0 |
 | 4g    | test        | `node scripts/ratchet-update.test.mjs` | exit 0 |
+| 4h    | test        | `node scripts/archive-closed-plans-workflow.test.mjs` | exit 0 |
 | 5     | build       | TODO: build command               | —              |
 | 6     | audit       | TODO: audit command               | —              |
 | 7     | secret-scan | TODO: secret-scan command         | —              |
