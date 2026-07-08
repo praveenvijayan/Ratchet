@@ -15,6 +15,7 @@
 // branch's last commit, a heartbeat comment, and the claim event. Reusing it here
 // keeps "is this claim alive?" defined in exactly one place.
 import { leaseReference, isStale, isHeartbeat } from "./sweep-lease.mjs";
+import { classifyRequeue } from "./criteria.mjs";
 import { fileURLToPath } from "node:url";
 
 // The three lifecycle states the sweep patrols. state:in-progress is the
@@ -44,7 +45,13 @@ export const SWEPT_STATES = new Set([
 //   input.reworkGraceMs — configurable grace before closed feedback is requeued
 //   input.reworkGraceHours — same window as a string, for comment text
 // Returns { sweep: false } to leave the issue untouched, or
-// { sweep: true, deleteRef, targetState, comment } to move it to targetState.
+// { sweep: true, deleteRef, targetState, reason, comment } to move it to
+// targetState. `reason` is the diagnostic sentence (why the claim was
+// reclaimed); `comment` is the full note, reason plus the outcome sentence.
+// The orchestration re-reads the issue at write time and runs the decision
+// through classifyRequeue, which rebuilds the comment from `reason` and
+// downgrades a state:ready outcome to state:draft when the live body has lost
+// its acceptance criteria.
 export function decideSweep(input) {
   switch (input.state) {
     case "state:in-progress": return decideInProgress(input);
@@ -69,15 +76,15 @@ function decideInProgress({ now, staleMs, staleHours, branch, branchExists = tru
   // issue can be cleanly re-claimed. A branch with commits is recoverable work:
   // keep it for a human to inspect.
   const deleteRef = aheadBy === 0;
-  let comment;
+  let reason;
   if (branchExists === false) {
-    comment = `Stale claim swept: branch no longer exists for \`${branch}\` and no activity was found for >${staleHours}h (measured from ${source}). Issue returned to \`state:ready\`.`;
+    reason = `Stale claim swept: branch no longer exists for \`${branch}\` and no activity was found for >${staleHours}h (measured from ${source}).`;
   } else {
-    comment = deleteRef
-      ? `Stale claim swept: \`${branch}\` had no work for >${staleHours}h (measured from ${source}). Orphaned claim ref deleted; issue returned to \`state:ready\`.`
-      : `Stale claim swept: no activity on \`${branch}\` for >${staleHours}h (measured from ${source}). Branch kept (has commits); issue returned to \`state:ready\`.`;
+    reason = deleteRef
+      ? `Stale claim swept: \`${branch}\` had no work for >${staleHours}h (measured from ${source}). Orphaned claim ref deleted.`
+      : `Stale claim swept: no activity on \`${branch}\` for >${staleHours}h (measured from ${source}). Branch kept (has commits).`;
   }
-  return { sweep: true, deleteRef, targetState: "state:ready", comment };
+  return { sweep: true, deleteRef, targetState: "state:ready", reason, comment: `${reason} Issue returned to \`state:ready\`.` };
 }
 
 // in-review: use the actual PR state from the agent branch. A still-open PR is
@@ -88,29 +95,35 @@ function decideInProgress({ now, staleMs, staleHours, branch, branchExists = tru
 function decideInReview({ now, branch, prState = "closed", prNumber = null, prClosedAt = null, reworkGraceMs = 0, reworkGraceHours = "0" }) {
   if (prState === "open" || prState === "unknown") return { sweep: false };
   if (prState === "merged") {
+    const reason = `Stale review swept: \`${branch}\` is \`state:in-review\`, but PR #${prNumber} was merged while this issue stayed open.`;
     return {
       sweep: true,
       deleteRef: false,
       targetState: "state:blocked",
-      comment: `Stale review swept: \`${branch}\` is \`state:in-review\`, but PR #${prNumber} was merged while this issue stayed open. Issue moved to \`state:blocked\` for human cleanup instead of \`state:ready\`, so merged work is not re-picked.`,
+      reason,
+      comment: `${reason} Issue moved to \`state:blocked\` for human cleanup instead of \`state:ready\`, so merged work is not re-picked.`,
     };
   }
   if (prState === "closed-with-feedback" && (!prClosedAt || now - prClosedAt < reworkGraceMs)) {
     return { sweep: false };
   }
   if (prState === "closed-with-feedback") {
+    const reason = `Stale review swept: \`${branch}\` is \`state:in-review\`, and PR #${prNumber} was closed with review feedback more than ${reworkGraceHours}h ago.`;
     return {
       sweep: true,
       deleteRef: false,
       targetState: "state:ready",
-      comment: `Stale review swept: \`${branch}\` is \`state:in-review\`, and PR #${prNumber} was closed with review feedback more than ${reworkGraceHours}h ago. Issue returned to \`state:ready\` so it can be re-picked.`,
+      reason,
+      comment: `${reason} Issue returned to \`state:ready\` so it can be re-picked.`,
     };
   }
+  const reason = `Stale review swept: \`${branch}\` is \`state:in-review\` but has no open PR from the agent branch.`;
   return {
     sweep: true,
     deleteRef: false,
     targetState: "state:ready",
-    comment: `Stale review swept: \`${branch}\` is \`state:in-review\` but has no open PR from the agent branch. Issue returned to \`state:ready\` so it can be re-picked.`,
+    reason,
+    comment: `${reason} Issue returned to \`state:ready\` so it can be re-picked.`,
   };
 }
 
@@ -123,11 +136,13 @@ function decideInReview({ now, branch, prState = "closed", prNumber = null, prCl
 function decideChangesRequested({ now, staleMs, staleHours, branch, lastCommitAt, heartbeatAt, updatedAt }) {
   const activity = Math.max(updatedAt, lastCommitAt ?? 0, heartbeatAt ?? 0);
   if (now - activity < staleMs) return { sweep: false };
+  const reason = `Stale rework swept: \`${branch}\` is \`state:changes-requested\` with no activity for >${staleHours}h.`;
   return {
     sweep: true,
     deleteRef: false,
     targetState: "state:ready",
-    comment: `Stale rework swept: \`${branch}\` is \`state:changes-requested\` with no activity for >${staleHours}h. Issue returned to \`state:ready\` so it can be re-picked.`,
+    reason,
+    comment: `${reason} Issue returned to \`state:ready\` so it can be re-picked.`,
   };
 }
 
@@ -286,22 +301,46 @@ export async function main() {
     });
     if (!decision.sweep) continue;
 
-    const labels = labelNames(issue.labels).filter((l) => !l.startsWith("state:"));
-    labels.push(decision.targetState || "state:ready");
+    // Re-read at write time. The listing that produced `issue` may be minutes
+    // and many API calls old, so writing labels from that stale snapshot can
+    // clobber a state change an agent made in the window (e.g. it opened a PR
+    // and moved the issue to state:in-review). Re-read the issue now: if its
+    // state label no longer matches the one this decision was made on, someone
+    // moved it — leave it alone. Otherwise recompute the labels from the fresh
+    // snapshot, and gate the requeue on the fresh body so an issue that lost
+    // its acceptance criteria after promotion is held at state:draft, not
+    // re-exposed as state:ready.
+    let fresh;
+    try {
+      fresh = await gh("GET", `/repos/${repo}/issues/${issue.number}`);
+    } catch {
+      console.log(`skipped #${issue.number}: could not re-read issue before write`);
+      continue; // never overwrite on doubt
+    }
+    const freshLabels = labelNames(fresh.labels || []);
+    const freshState = freshLabels.find((l) => SWEPT_STATES.has(l));
+    if (freshState !== state) {
+      console.log(`skipped #${issue.number}: state changed ${state} -> ${freshState ?? "(none)"} since listing`);
+      continue;
+    }
+
+    const final = classifyRequeue(decision, fresh.body || "");
+    const labels = freshLabels.filter((l) => !l.startsWith("state:"));
+    labels.push(final.targetState || "state:ready");
     await gh("PUT", `/repos/${repo}/issues/${issue.number}/labels`, { labels });
-    if (issue.assignees?.length) {
+    if (fresh.assignees?.length) {
       await gh("DELETE", `/repos/${repo}/issues/${issue.number}/assignees`, {
-        assignees: issue.assignees.map((a) => a.login),
+        assignees: fresh.assignees.map((a) => a.login),
       }).catch(() => {});
     }
-    if (decision.deleteRef) {
+    if (final.deleteRef) {
       await gh("DELETE", `/repos/${repo}/git/refs/heads/${branch}`).catch(() => {});
     }
-    await gh("POST", `/repos/${repo}/issues/${issue.number}/comments`, { body: decision.comment });
-    console.log(`swept #${issue.number} (${state}) -> state:ready${decision.deleteRef ? " (claim ref deleted)" : ""}`);
+    await gh("POST", `/repos/${repo}/issues/${issue.number}/comments`, { body: final.comment });
+    console.log(`swept #${issue.number} (${state}) -> ${final.targetState}${final.deleteRef ? " (claim ref deleted)" : ""}`);
     swept++;
   }
-  console.log(`sweep complete: ${swept} issue(s) returned to state:ready.`);
+  console.log(`sweep complete: ${swept} issue(s) requeued.`);
   return { swept };
 }
 

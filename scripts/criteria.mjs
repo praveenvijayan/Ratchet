@@ -49,3 +49,31 @@ export function classifyUnblock(body = "", closedNumber) {
       `least one \`- [ ]\` item to ${where}, then re-sync.`,
   };
 }
+
+// Gate a sweep decision on the issue's live acceptance criteria before it is
+// applied. sweep-stale-claims decides to requeue an abandoned claim, but an
+// issue whose body lost its criteria (hand-edited after promotion) must not
+// re-enter the pickable queue as state:ready — the same guard classifyUnblock
+// applies on unblock, reused here so requeue-vs-hold can never diverge from
+// what the compiler decided. `decision` is decideSweep's
+// { targetState, reason, comment, ... }; `body` is the issue body re-read at
+// write time. Only a state:ready outcome is gated — a deliberate non-ready
+// target (e.g. state:blocked for merged work awaiting human cleanup) passes
+// through untouched. Returns the decision unchanged, or a copy downgraded to
+// state:draft with an explanatory comment built from the sweep's diagnostic.
+export function classifyRequeue(decision, body = "") {
+  if (decision.targetState !== "state:ready" || hasAcceptanceCriteria(body)) {
+    return decision;
+  }
+  const slug = planSlug(body);
+  const where = slug ? `\`plan/${slug}.md\`` : "its plan file (no `plan-id` marker found)";
+  return {
+    ...decision,
+    targetState: "state:draft",
+    comment:
+      `${decision.reason} Its body no longer carries acceptance criteria, so it is ` +
+      `held at \`state:draft\` rather than \`state:ready\` — an agent must never pick ` +
+      `an issue with no test plan. Restore a \`## Acceptance criteria\` block with at ` +
+      `least one \`- [ ]\` item to ${where}, then re-sync.`,
+  };
+}
