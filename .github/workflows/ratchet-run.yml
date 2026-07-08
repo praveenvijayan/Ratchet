@@ -33,7 +33,7 @@ jobs:
     if: ${{ vars.RATCHET_AUTO == 'true' && (github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true) }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           ref: main
           fetch-depth: 0
@@ -97,7 +97,7 @@ jobs:
       # --- Agent step: Claude Code. Swap this block for OpenAI Codex if preferred. ---
       - name: Work the issue
         if: steps.pick.outputs.has_issue == 'true' && steps.verify.outputs.verified == 'true'
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@ba0aafd4308cbba7165f9f2cdb0cfbed5a3c99ce # v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ secrets.FACTORY_PAT }}
@@ -111,7 +111,12 @@ jobs:
             - Open a PR whose first line is "Closes #${{ steps.pick.outputs.number }}",
               with a summary and the gate results. Then STOP.
             Do not merge. Do not pick or touch any other issue.
+          # Model is user-configurable: swap claude-sonnet-5 below for another
+          # current id (e.g. claude-opus-4-8 for harder issues, claude-haiku-4-5
+          # for cheap ones), or an alias like `sonnet` to always track the latest.
+          # Keep notes here in YAML comments — claude_args is a literal block, so a
+          # `#` on an arg line would be passed to the agent, not read as a comment.
           claude_args: |
-            --model claude-sonnet-4-6
+            --model claude-sonnet-5
             --max-turns 60
             --allowedTools Bash,Edit,Write,Read,Glob,Grep

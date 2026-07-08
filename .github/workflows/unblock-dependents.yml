@@ -25,8 +25,8 @@ jobs:
       # Checkout so the github-script step can import the shared readiness
       # helper (scripts/criteria.mjs) — the single source of truth for the
       # ready-vs-draft decision, reused from the plan compiler.
-      - uses: actions/checkout@v4
-      - uses: actions/github-script@v7
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         with:
           # Prefer a PAT so this workflow can trigger further workflows.
           # Falls back to the default token (fine for pure human-merge flows).
