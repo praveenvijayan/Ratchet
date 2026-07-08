@@ -22,6 +22,14 @@
 import { existsSync, readFileSync, appendFileSync } from "node:fs";
 
 const GATES_FILE = process.env.GATES_FILE || "GATES.md";
+// The pr-gates workflow extracts the base branch's GATES.md and points
+// BASE_GATES_FILE at it, so a PR is judged by size thresholds / exclusions it
+// cannot edit in the same diff (issue #84 — a PR could otherwise raise its own
+// max_changed_lines or add an exclude_paths covering its files and go green).
+// When set, that base copy is the authoritative config; unset (local runs,
+// tests), the working-tree GATES.md is used exactly as before.
+const BASE_GATES_FILE = process.env.BASE_GATES_FILE || "";
+const CONFIG_FILE = BASE_GATES_FILE || GATES_FILE;
 const DEFAULT_MAX_LINES = 400; // AGENTS.md step 3
 const DEFAULT_MAX_FILES = 6; //   ~400 changed lines / ~6 files
 const DEFAULT_EXCLUDE_PATTERNS = [
@@ -94,8 +102,26 @@ function readConfig(text) {
   };
 }
 
-const gatesText = existsSync(GATES_FILE) ? readFileSync(GATES_FILE, "utf8") : "";
+const gatesText = existsSync(CONFIG_FILE) ? readFileSync(CONFIG_FILE, "utf8") : "";
 const { maxLines, maxFiles, excludePatterns } = readConfig(gatesText);
+
+// Criterion 2 (#84): when thresholds/exclusions came from a base copy, a PR that
+// also edits its own GATES.md must be flagged — the change is deferred to the
+// reviewer and takes effect only after merge, never lowering the bar for the PR
+// that introduced it.
+if (BASE_GATES_FILE) {
+  let headText = "";
+  try {
+    headText = existsSync(GATES_FILE) ? readFileSync(GATES_FILE, "utf8") : "";
+  } catch {
+    headText = "";
+  }
+  if (headText !== gatesText) {
+    const msg = `This PR modifies ${GATES_FILE}. Size thresholds and exclusions were read from the base branch's config, so the change only takes effect after merge — review the ${GATES_FILE} diff.`;
+    console.log(`::warning::${msg}`);
+    summary(`### PR size\n\n> ⚠️ ${msg}\n`);
+  }
+}
 
 // --- read the PR's size from the event payload ------------------------------
 // Missing or non-numeric counts mean the workflow wired the check up wrong;
