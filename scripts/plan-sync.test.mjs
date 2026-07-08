@@ -51,6 +51,38 @@ Body of 0077.
 ## Acceptance criteria
 - [ ] never created
 `);
+// Issue #18: a plan carrying the optional ## Non-functional and ## Test notes
+// sections (in addition to acceptance criteria) must compile to state:ready and
+// carry both sections into the issue body verbatim.
+await writeFile(join(planDir, "0080-with-sections.md"), `---
+title: Has non-functional and test notes
+priority: medium
+blocked_by: []
+---
+Body of 0080.
+
+## Acceptance criteria
+- [ ] core behaviour works
+
+## Non-functional
+- p95 latency under 200 ms
+
+## Test notes
+- exercise the retry path under simulated network loss
+`);
+// Issue #18 regression: the new sections are inert to the readiness rule. A
+// plan whose only checkboxes sit under ## Test notes, with NO ## Acceptance
+// criteria block, must still land as state:draft — exactly as before.
+await writeFile(join(planDir, "0081-testnotes-only.md"), `---
+title: Test notes but no criteria
+priority: low
+blocked_by: []
+---
+Body of 0081.
+
+## Test notes
+- [ ] this checkbox is not an acceptance criterion
+`);
 
 // --- in-memory GitHub API ----------------------------------------------
 const label = (name) => ({ name });
@@ -131,6 +163,24 @@ assert.ok(
   "unknown frontmatter key must be warned about, naming the file and key",
 );
 
+// Issue #18: optional ## Non-functional and ## Test notes sections compile to a
+// ready issue and are carried into the body verbatim (no compiler change).
+const withSections = [...issues.values()].find((i) => i.body.includes("plan-id: 0080-with-sections"));
+assert.ok(withSections, "0080-with-sections issue was created");
+assert.ok(names(withSections).includes("state:ready"), `0080 should be ready, got: ${names(withSections)}`);
+assert.ok(withSections.body.includes("## Non-functional"), "0080 body must carry the ## Non-functional section verbatim");
+assert.ok(withSections.body.includes("## Test notes"), "0080 body must carry the ## Test notes section verbatim");
+
+// Issue #18 regression: the sections are inert to the readiness rule. Checkboxes
+// living only under ## Test notes (no ## Acceptance criteria block) must NOT make
+// the issue pickable — it stays state:draft, exactly as before the sections existed.
+const notesOnly = [...issues.values()].find((i) => i.body.includes("plan-id: 0081-testnotes-only"));
+assert.ok(notesOnly, "0081-testnotes-only issue was created");
+assert.ok(
+  names(notesOnly).includes("state:draft"),
+  `0081 must stay draft: ## Test notes checkboxes must not fake acceptance criteria, got: ${names(notesOnly)}`,
+);
+
 // --- blocked_by cycle gate ----------------------------------------------
 // A two-file cycle (each blocked_by the other) is a deadlock: sync must fail
 // loudly, naming every slug, and change nothing. Run as a subprocess because
@@ -174,4 +224,4 @@ assert.ok(cycleExit !== 0, "plan-sync must exit non-zero on a blocked_by cycle")
 assert.ok(/cycle/i.test(cycleErr), `cycle error must say so loudly, got: ${cycleErr}`);
 assert.ok(/0005-a/.test(cycleErr) && /0006-b/.test(cycleErr), `cycle error must name every slug, got: ${cycleErr}`);
 
-console.log("PASS plan-sync.test.mjs (13 assertions)");
+console.log("PASS plan-sync.test.mjs (19 assertions)");
