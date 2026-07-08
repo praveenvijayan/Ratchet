@@ -38,11 +38,13 @@ and an optional Claude Code plugin.
   example. Plan files compile to GitHub issues.
 - `memory/` — the three durable-memory files (`USER.md`, `MEMORY.md`, this map).
 - `scripts/` — the executable core: `plan-sync.mjs` (plan→issue compiler) with
-  `plan-sync.test.mjs` (its regression test), `ratchet-watch.sh`/`.mjs`
-  (local webhook bridge for the continuous loop), `ratchet-update.sh` and
-  `ratchet-uninstall.sh` (framework lifecycle).
+  `plan-sync.test.mjs` (its regression test), `run-gates.mjs` (the GATES.md
+  gate runner shared by local verify and CI) with `run-gates.test.mjs`,
+  `ratchet-watch.sh`/`.mjs` (local webhook bridge for the continuous loop),
+  `ratchet-update.sh` and `ratchet-uninstall.sh` (framework lifecycle).
 - `.github/workflows/` — the automation edge of the loop: `plan-sync`,
-  `unblock-dependents`, `sweep-stale-claims`, and the opt-in `ratchet-run`.
+  `unblock-dependents`, `sweep-stale-claims`, `pr-gates` (runs the GATES.md
+  gates server-side on every agent PR), and the opt-in `ratchet-run`.
 - `.agents/skills/` — the CANONICAL skill sources (one dir per `ratchet-*`
   skill: `SKILL.md` body + `agents/openai.yaml` Codex policy).
 - `.claude/skills/` and `plugin/skills/` — generated mirrors of the canonical
@@ -61,6 +63,9 @@ and an optional Claude Code plugin.
   in CI.
 - **Local loop bridge** (`scripts/ratchet-watch.*`) — forwards PR/review
   events to the local agent via `gh webhook forward`.
+- **Gate runner** (`scripts/run-gates.mjs`) — parses the `GATES.md` table and
+  runs the gates in order, fail-fast, skipping `TODO:` rows. Single source of
+  truth invoked by both local verify and the `pr-gates` CI check.
 - **Skills** (nine `ratchet-*` dirs) — slash-command ergonomics: init, plan,
   sync, next, status, memory, map, update, uninstall.
 
@@ -78,7 +83,7 @@ and an optional Claude Code plugin.
 
 ## Not yet present
 
-- No CI that runs the framework's own test (`scripts/plan-sync.test.mjs`).
 - No lint/format tooling for the scripts or markdown.
-- No tests for the workflow scripts (`sweep-stale-claims`,
-  `unblock-dependents`) — only the plan compiler is tested.
+- No tests for `sweep-stale-claims`. `unblock-dependents`' readiness decision
+  is now covered via the shared `scripts/criteria.mjs` helper
+  (`scripts/criteria.test.mjs`); its GitHub-API glue is still untested.
