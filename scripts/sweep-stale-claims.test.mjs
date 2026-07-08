@@ -13,19 +13,58 @@ const HOUR = 3600 * 1000;
 const now = 1_700_000_000_000; // fixed clock (no Date.now dependence)
 const staleHours = "2";
 const staleMs = Number(staleHours) * HOUR;
-const base = { now, staleMs, staleHours, branch: "agent/issue-12" };
+const reworkGraceHours = "2";
+const reworkGraceMs = Number(reworkGraceHours) * HOUR;
+const base = { now, staleMs, staleHours, reworkGraceMs, reworkGraceHours, branch: "agent/issue-12" };
 const stale = now - staleMs - HOUR; // comfortably outside the window
 const recent = now - HOUR;          // comfortably inside the window
 
 // AC1: a state:in-review issue with no open PR from its agent/issue-<N> branch
 // returns to state:ready with a comment explaining why.
 {
-  const r = decideSweep({ ...base, state: "state:in-review", hasOpenPr: false });
+  const r = decideSweep({ ...base, state: "state:in-review", prState: "closed" });
   assert.equal(r.sweep, true, "in-review with no open PR must be swept");
   assert.equal(r.deleteRef, false, "a reviewed branch has commits — never deleted");
   assert.match(r.comment, /in-review/, "comment must name the state");
   assert.match(r.comment, /no open PR/, "comment must explain the reason");
   assert.match(r.comment, /state:ready/, "comment must state the outcome");
+}
+
+// #53 AC1: an in-review issue whose agent PR was merged must not be returned to
+// the ready queue with the old "abandoned without merge" story; the comment
+// states that the PR merged while the issue stayed open.
+{
+  const r = decideSweep({ ...base, state: "state:in-review", prState: "merged", prNumber: 44 });
+  assert.equal(r.sweep, true, "merged review work must be handled");
+  assert.equal(r.targetState, "state:blocked", "merged work must not be requeued for another agent");
+  assert.doesNotMatch(r.comment, /abandoned without merge/, "merged PRs must not get the abandoned wording");
+  assert.match(r.comment, /PR #44 was merged/, "comment must state what actually happened");
+  assert.match(r.comment, /state:blocked/, "comment must state the non-ready outcome");
+}
+
+// #53 AC2: a closed PR that carries review feedback gets a configurable grace
+// window before the sweep may requeue it, so the original agent can rework the
+// same branch/PR path described in AGENTS.md step 6.
+{
+  const freshClose = decideSweep({
+    ...base,
+    state: "state:in-review",
+    prState: "closed-with-feedback",
+    prNumber: 45,
+    prClosedAt: recent,
+  });
+  assert.equal(freshClose.sweep, false, "closed review feedback inside the grace window must not be swept");
+
+  const staleClose = decideSweep({
+    ...base,
+    state: "state:in-review",
+    prState: "closed-with-feedback",
+    prNumber: 45,
+    prClosedAt: stale,
+  });
+  assert.equal(staleClose.sweep, true, "closed review feedback past the grace window can be requeued");
+  assert.equal(staleClose.targetState, "state:ready", "expired rework grace returns the issue to ready");
+  assert.match(staleClose.comment, /closed with review feedback/, "comment must explain the rework-specific reason");
 }
 
 // AC2: a state:changes-requested issue with no activity beyond the configurable
@@ -41,7 +80,7 @@ const recent = now - HOUR;          // comfortably inside the window
 // AC3: an in-review issue with an open PR, and a changes-requested issue with
 // recent activity, are never touched by the sweep.
 {
-  const openPr = decideSweep({ ...base, state: "state:in-review", hasOpenPr: true });
+  const openPr = decideSweep({ ...base, state: "state:in-review", prState: "open" });
   assert.equal(openPr.sweep, false, "in-review with an open PR must never be swept");
 
   // Activity is the most recent of issue update and last commit: a fresh pushed
@@ -61,6 +100,16 @@ const recent = now - HOUR;          // comfortably inside the window
 
   const working = decideSweep({ ...base, state: "state:in-progress", aheadBy: 3, lastCommitAt: recent, claimAt: null, updatedAt: stale });
   assert.equal(working.sweep, false, "a branch with a recent commit must not be swept");
+}
+
+// #53 AC3: a stale issue whose branch has vanished gets an accurate comment; it
+// must not claim the branch was kept because it had commits.
+{
+  const vanished = decideSweep({ ...base, state: "state:in-progress", branchExists: false, aheadBy: null, lastCommitAt: null, claimAt: stale, updatedAt: stale });
+  assert.equal(vanished.sweep, true, "a stale claim with a vanished branch must be swept");
+  assert.equal(vanished.deleteRef, false, "there is no vanished ref to delete");
+  assert.match(vanished.comment, /branch no longer exists/, "comment must say the branch vanished");
+  assert.doesNotMatch(vanished.comment, /Branch kept \(has commits\)/, "vanished branch comment must not claim the branch was kept");
 }
 
 // Renewable-lease heartbeat (from the merged sweep-lease rule): a recent
@@ -87,6 +136,7 @@ assert.equal(decideSweep({ ...base, state: "state:blocked" }).sweep, false, "non
   const label = (name) => ({ name });
   const openIssues = [
     { number: 100, pull_request: undefined, updated_at: recentIso, assignees: [{ login: "alice" }], labels: [label("state:in-review"), label("priority:low")] },
+    { number: 150, pull_request: undefined, updated_at: recentIso, assignees: [{ login: "alice" }], labels: [label("state:in-review"), label("priority:medium")] },
     { number: 200, pull_request: undefined, updated_at: staleIso, assignees: [], labels: [label("state:in-progress")] },
     { number: 300, pull_request: undefined, updated_at: staleIso, assignees: [], labels: [label("state:in-progress")] },
   ];
@@ -100,7 +150,11 @@ assert.equal(decideSweep({ ...base, state: "state:blocked" }).sweep, false, "non
     if (method === "GET" && pathname === "/repos/o/r/issues") {
       return respond(Number(searchParams.get("page")) === 1 ? openIssues : []);
     }
-    if (method === "GET" && pathname === "/repos/o/r/pulls") return respond([]); // no open PR for #100
+    if (method === "GET" && pathname === "/repos/o/r/pulls") {
+      if (searchParams.get("head") === "o:agent/issue-150") return respond([{ number: 15, state: "closed", merged_at: "2026-01-01T00:00:00Z", closed_at: staleIso }]);
+      return respond([]); // no PR for #100, no PR signals for in-progress issues
+    }
+    if (method === "GET" && pathname === "/repos/o/r/pulls/15") return respond({ number: 15, state: "closed", merged_at: "2026-01-01T00:00:00Z", closed_at: staleIso, comments: 0, review_comments: 0 });
     if (method === "GET" && pathname === "/repos/o/r/compare/main...agent/issue-200") return respond({ ahead_by: 0 });
     if (method === "GET" && pathname === "/repos/o/r/compare/main...agent/issue-300") return respond({ ahead_by: 3 });
     if (method === "GET" && pathname === "/repos/o/r/commits") return respond([{ commit: { committer: { date: recentIso } } }]);
@@ -135,12 +189,16 @@ assert.equal(decideSweep({ ...base, state: "state:blocked" }).sweep, false, "non
   assert.ok(calls.some((c) => c.method === "DELETE" && c.pathname === "/repos/o/r/issues/100/assignees"), "#100 assignees must be cleared");
   assert.ok(calls.some((c) => c.method === "POST" && c.pathname === "/repos/o/r/issues/100/comments" && /in-review/.test(c.body.body)), "#100 must get an explanatory comment");
   assert.ok(!calls.some((c) => c.method === "DELETE" && c.pathname === "/repos/o/r/git/refs/heads/agent/issue-100"), "a reviewed branch must never be deleted");
+  // #150 merged PR, issue still open: moved out of the pick queue, not requeued.
+  assert.ok(put(150)?.body.labels.includes("state:blocked"), "#150 merged work must become blocked, not ready");
+  assert.ok(!put(150).body.labels.includes("state:ready"), "#150 merged work must not be requeued");
+  assert.ok(calls.some((c) => c.method === "POST" && c.pathname === "/repos/o/r/issues/150/comments" && /PR #15 was merged/.test(c.body.body)), "#150 must get an accurate merged-PR comment");
   // #200 stale zero-commit claim: requeued AND its orphan ref deleted.
   assert.ok(put(200)?.body.labels.includes("state:ready"), "#200 stale zero-commit claim must be swept to ready");
   assert.ok(calls.some((c) => c.method === "DELETE" && c.pathname === "/repos/o/r/git/refs/heads/agent/issue-200"), "#200 orphan claim ref must be deleted");
   // #300 freshly-committed claim: untouched.
   assert.ok(!put(300), "a claim with a recent commit must not be swept");
-  assert.equal(result.swept, 2, "exactly two issues were swept");
+  assert.equal(result.swept, 3, "exactly three issues were swept");
 }
 
-console.log("PASS sweep-stale-claims.test.mjs (25 assertions)");
+console.log("PASS sweep-stale-claims.test.mjs (39 assertions)");

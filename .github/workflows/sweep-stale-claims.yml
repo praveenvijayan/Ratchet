@@ -30,6 +30,7 @@ permissions:
 
 env:
   STALE_HOURS: "2"
+  REWORK_GRACE_HOURS: "2"
 
 jobs:
   sweep:
@@ -44,3 +45,4 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           STALE_HOURS: ${{ env.STALE_HOURS }}
+          REWORK_GRACE_HOURS: ${{ env.REWORK_GRACE_HOURS }}
