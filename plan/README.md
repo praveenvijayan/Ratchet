@@ -132,6 +132,13 @@ One or two sentences: what this is and why it exists.
 ### Rules the sync enforces
 
 - **`title` + `priority` required.** Without them the file is skipped and logged.
+- **Priority is a closed set.** `priority` must be exactly `high`, `medium`, or
+  `low`. Any other value is a hard skip for that file, logged as an invalid
+  priority, because silently sorting a bad value would corrupt triage order.
+- **Unknown frontmatter keys are ignored with a warning.** `title`, `priority`,
+  `labels`, and `blocked_by` are the only keys the compiler understands. Any
+  other key is logged as `WARNING: <file> has unknown frontmatter key '<key>'`
+  and the sync continues.
 - **Acceptance criteria decide readiness.** A file with at least one `- [ ]`
   item under `## Acceptance criteria` becomes `state:ready`. Without criteria it
   becomes `state:draft` and no agent will pick it. If you cannot write the
@@ -146,6 +153,10 @@ One or two sentences: what this is and why it exists.
   since removed still resolves through its issue's marker. A slug that matches
   no plan file and no issue is a loud `WARNING` in the sync log, never a silent
   drop — check it for typos.
+- **Blocked-by cycles are a hard gate.** A dependency cycle is a deadlock: no
+  issue in the cycle can ever unblock. The sync detects cycles before mutating
+  GitHub, prints every slug in each cycle, and exits non-zero. Break the
+  `blocked_by` edge and re-sync.
 - **The file owns content; GitHub owns state.** Edit a file and push: the sync
   updates the matching issue's title, body, and labels — *but only while the
   issue is still `state:ready` or `state:draft`*. Once work starts, the file is

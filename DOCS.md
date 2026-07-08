@@ -162,16 +162,42 @@ memory/
   ARCHITECTURE.md               Coarse codebase map (generated; agent scopes reads with it)
   MEMORY.md                     Distilled knowledge cache (agent proposes via PR)
 scripts/
-  plan-sync.mjs                 Deterministic plan→issue compiler (zero-dep, Node 20+)
-  plan-sync.test.mjs            Regression test for the compiler (zero-dep, run with node)
+  archive-closed-plans.mjs      Move closed issue plans into plan/done/
+  archive-closed-plans.test.mjs Regression test for the archive sweep
+  criteria.mjs                  Shared acceptance-criteria readiness rule
+  criteria.test.mjs             Regression test for the readiness rule
+  docs-refresh.test.mjs         Regression test for documentation inventory
+  plan-sync-concurrency.test.mjs Workflow concurrency regression test
+  plan-sync.mjs                 Deterministic plan→issue compiler
+  plan-sync.test.mjs            Regression test for the compiler
+  pr-size-check.mjs             Enforce the agent PR size limit in CI
+  pr-size-check.test.mjs        Regression test for the size gate
+  ratchet-init-skill.test.mjs   Regression test for the init skill contract
+  ratchet-metrics.mjs           Read-only loop health metrics
+  ratchet-metrics.test.mjs      Regression test for loop metrics
+  ratchet-uninstall.sh          Remove framework files on a review branch
   ratchet-update.sh             Pull framework updates, preserve project files
-  ratchet-watch.sh              Real-time GitHub→local bridge (gh webhook forward)
-  ratchet-watch.mjs             Zero-dep webhook receiver / event classifier
+  ratchet-watch.mjs             Webhook receiver / event classifier
+  ratchet-watch.sh              Real-time GitHub→local bridge
+  release.mjs                   Opt-in release tag + changelog publisher
+  release.test.mjs              Regression test for releases
+  run-gates.mjs                 Run GATES.md locally and in CI
+  run-gates.test.mjs            Regression test for the gate runner
+  sweep-lease.mjs               Shared claim lease freshness rule
+  sweep-lease.test.mjs          Regression test for renewable leases
+  sweep-stale-claims.mjs        Return abandoned work to the queue
+  sweep-stale-claims.test.mjs   Regression test for stale-claim decisions
+  unblock-dependents.mjs        Promote issues after blockers close
+  unblock-dependents.test.mjs   Regression test for unblock logic
+  verify-issue-body.mjs         Trust-boundary check for ratchet-run
+  verify-issue-body.test.mjs    Regression test for issue-body verification
 .github/workflows/
   plan-sync.yml                 Compile plan/*.md → issues on push
-  unblock-dependents.yml        On issue close, promote unblocked dependents
-  sweep-stale-claims.yml        Return abandoned in-progress issues to ready
+  pr-gates.yml                  Run GATES.md gates and PR size check on agent PRs
   ratchet-run.yml               OPTIONAL CI runner (off by default)
+  release.yml                   OPTIONAL release tag + changelog lane
+  unblock-dependents.yml        On issue close, promote unblocked dependents
+  sweep-stale-claims.yml        Return abandoned work to the queue
 .agents/skills/<name>/          Canonical skills (Codex + Antigravity)
 .claude/skills/<name>/          Mirror for Claude Code
 plugin/                         Optional Claude Code plugin packaging
@@ -193,6 +219,7 @@ side effects. Invoke as `/name` in Claude Code or Antigravity, or `/skills` /
 | `/ratchet-sync` | Only without the PR flow | Local/no-PR escape hatch: compiles working-tree `plan/*.md` into issues now. Normally unused — merging the planning PR does this. |
 | `/ratchet-next` | After a merge or review | Advances (sync main + next issue) on approval, or reworks the same PR on rejection. The heart of the continuous local loop. |
 | `/ratchet-status` | When nothing seems ready | Read-only diagnosis of the queue: why nothing is pickable (drafts without criteria, blocked chains, unmerged planning PR) and the next action to unblock. |
+| `/ratchet-metrics` | To inspect loop health | Read-only report from GitHub data: cycle time, rework rate, stale-claim sweeps, and queue depth by state. |
 | `/ratchet-memory` | Periodically (e.g. quarterly) | Prunes and dedupes `memory/MEMORY.md`, verifies issue/PR links, stops for review. |
 | `/ratchet-map` | When structure drifts | Regenerates the coarse codebase map `memory/ARCHITECTURE.md` (language-agnostic), stops for review. |
 | `/ratchet-update` | To upgrade | Pulls newer framework files onto a review branch; never touches project-owned files. |
@@ -229,11 +256,12 @@ See §8 — this is the routine that responds to a human's PR decision.
 |----------|---------|--------|
 | `plan-sync` | push to `plan/**` on `main` (i.e. planning-PR merge), or manual | Compiles `plan/*.md` into issues, idempotently (dedup via a `<!-- plan-id -->` marker). Scoped to `main` so the planning branch doesn't create issues early. |
 | `unblock-dependents` | `issues: closed` | Strips the closed issue's own `state:*` label (closed is terminal; a lingering `state:in-review` misleads), then promotes every issue whose blockers are now all closed to `state:ready`. This re-feeds the queue. |
-| `sweep-stale-claims` | every 30 min, or manual | Returns `state:in-progress` issues with no branch commits for >2h to `state:ready` — a poor-man's lease expiry for crashed agents. A pure claim (zero commits, no PR) also has its orphaned `agent/issue-<N>` ref deleted so the issue re-claims cleanly; branches that carry commits are kept for inspection. |
+| `sweep-stale-claims` | every 30 min, or manual | Patrols `state:in-progress`, `state:in-review`, and `state:changes-requested`. Freshness is the newest proof of life: a branch commit, a claim event, or a heartbeat issue comment containing `<!-- ratchet-heartbeat -->`. Stale zero-commit claims return to `state:ready` and have the orphan ref deleted; committed branches are kept. In-review issues with no live PR are requeued, while merged PRs whose issue stayed open are moved to `state:blocked` for human cleanup. Changes-requested work is requeued only after the inactivity window. |
+| `pr-gates` | agent PR opened, synchronized, or reopened | Runs `scripts/run-gates.mjs` as the `gates` job and `scripts/pr-size-check.mjs` as the `size` job on every `agent/issue-*` PR. Branch protection should require both contexts. |
 | `ratchet-run` | PR merged, or manual | OPTIONAL, off by default. Runs an agent in CI to work the next issue. Requires `RATCHET_AUTO=true` and an agent API key. Before handing an issue to the agent it verifies the body still matches its reviewed plan file (see *Security* below); most users do not enable this — the local loop (§8) is the recommended path. |
 | `release` | manual (`workflow_dispatch`) | OPTIONAL, off by default — the post-merge "ship" stage. Requires `RATCHET_RELEASE=true`. On demand it tags the next semver version (bump chosen at dispatch) and publishes a changelog built from the titles of the PRs merged since the last release. With no merges since the last tag it exits with a "nothing to release" message, not an error. With the variable unset it no-ops. |
 
-All three core workflows read `${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN }}`
+The GitHub-mutating workflows read `${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN }}`
 so they work with the default token and upgrade automatically when the PAT is
 set (see §10).
 
@@ -290,6 +318,12 @@ Short description of what and why.
 ## Acceptance criteria
 - [ ] User submits email + password and receives a session token
 - [ ] Invalid credentials return 401 with a generic message
+
+## Non-functional
+- Login response p95 stays under 200 ms in the existing load harness
+
+## Test notes
+- Regression-test the lockout path after five failed attempts
 ```
 
 `title` and `priority` are required. A file with at least one `- [ ]` acceptance
@@ -301,6 +335,11 @@ body, so a blocker on a brand-new file resolves on the first run, and a slug
 that matches nothing is a loud `WARNING`, never a silent drop. The file owns issue *content*;
 once an issue leaves `ready`/`draft`, sync stops touching it so live work is
 never clobbered.
+
+Optional `## Non-functional` and `## Test notes` sections are copied into the
+issue body. They let a plan require performance, accessibility, migration, edge
+case, regression, or integration coverage beyond the acceptance-criteria
+checkboxes without making those extra checks look like readiness criteria.
 
 ### Reporting something you found (bug, improvement, follow-up)
 

@@ -194,6 +194,9 @@ passes. You get two fix attempts.
 If still red, comment the gate name + error excerpt on the issue, reset to
 `state:ready`, remove `state:in-progress`, and exit. Only push the branch after
 all gates pass — an unpushed branch triggers no CI, so red work costs nothing.
+After push, the `pr-gates` workflow backstops the handoff on every
+`agent/issue-*` PR: its `gates` job runs `scripts/run-gates.mjs`, and its
+`size` job runs `scripts/pr-size-check.mjs`.
 
 > Never open a PR with red checks. Human attention is the bottleneck resource.
 
@@ -235,11 +238,12 @@ it becomes a new `plan/*.md` file. Fix what's wrong; queue what's new.
 A human merges. GitHub closes the issue via `Closes #<N>`. Two workflows react:
 `unblock-dependents` flips newly-unblocked issues to `state:ready` (this is what
 makes step 1 fire again), and `sweep-stale-claims` returns abandoned
-`state:in-progress` issues to `state:ready` — measuring activity from the newest
-of the branch's commits, a heartbeat comment (`<!-- ratchet-heartbeat -->`) an
-agent posts during a long build, or the claim event, so a live-but-quiet claim
-is never reclaimed while a crashed one still is. Nothing waits on anyone
-remembering anything.
+work to the queue across `state:in-progress`, `state:in-review`, and
+`state:changes-requested`. For time-based claims and rework, it measures
+activity from the newest of the branch's commits, a heartbeat comment
+(`<!-- ratchet-heartbeat -->`) an agent posts during a long build, or the claim
+event, so a live-but-quiet claim is never reclaimed while a crashed one still
+is. Nothing waits on anyone remembering anything.
 
 ---
 
