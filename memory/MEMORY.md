@@ -30,6 +30,11 @@ Rules:
   (`<!-- ratchet-heartbeat -->`) during long builds; `sweep-stale-claims` times
   freshness from the newest of commit/heartbeat/claim via `scripts/sweep-lease.mjs`,
   so a live-but-quiet claim outlives `STALE_HOURS` but a crashed one is still swept (#8).
+- `ratchet-metrics` derives loop health read-only from issue timelines: "merged"
+  = issue closed with `state_reason: completed`; cycle time = first `state:ready`
+  label → that close; sweeps are counted from `sweep-stale-claims`'
+  `Stale claim swept:` comment marker. Engine `scripts/ratchet-metrics.mjs` (#40),
+  skill (#20).
 
 ## Gotchas & fragile areas
 - (e.g.) Payments module has no test harness; integration tests hit the sandbox API (#88).

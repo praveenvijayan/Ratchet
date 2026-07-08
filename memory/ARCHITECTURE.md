@@ -46,6 +46,8 @@ and an optional Claude Code plugin.
   thresholds read from GATES.md) with `pr-size-check.test.mjs`,
   `verify-issue-body.mjs` (ratchet-run's injection guard: issue body must still
   match its reviewed plan file) with `verify-issue-body.test.mjs`,
+  `ratchet-metrics.mjs` (read-only loop-health metrics from GitHub data) with
+  `ratchet-metrics.test.mjs`,
   `ratchet-watch.sh`/`.mjs` (local webhook bridge for the continuous loop),
   `ratchet-update.sh` and `ratchet-uninstall.sh` (framework lifecycle).
 - `.github/workflows/` — the automation edge of the loop: `plan-sync`,
@@ -73,8 +75,8 @@ and an optional Claude Code plugin.
 - **Gate runner** (`scripts/run-gates.mjs`) — parses the `GATES.md` table and
   runs the gates in order, fail-fast, skipping `TODO:` rows. Single source of
   truth invoked by both local verify and the `pr-gates` CI check.
-- **Skills** (nine `ratchet-*` dirs) — slash-command ergonomics: init, plan,
-  sync, next, status, memory, map, update, uninstall.
+- **Skills** (ten `ratchet-*` dirs) — slash-command ergonomics: init, plan,
+  sync, next, status, metrics, memory, map, update, uninstall.
 
 ## Conventions
 
