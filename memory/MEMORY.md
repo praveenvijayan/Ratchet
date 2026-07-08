@@ -28,10 +28,14 @@ Rules:
   clobbers a concurrent transition), and it gates the requeue on the freshly
   read body — a claim that lost its criteria is held at `state:draft`, not
   re-exposed as `state:ready` (#54).
-- `ratchet-run` treats the issue body as a trust boundary: it only works issues
-  whose body carries a `plan-id` marker and still matches `plan/<slug>.md`
-  (`scripts/verify-issue-body.mjs`); an edited body is commented + skipped with
-  no code changes. Threat model documented in DOCS.md §6 Security (#17).
+- `ratchet-run` treats the whole issue as a trust boundary, not just the body:
+  `scripts/verify-issue-body.mjs` fails closed on an edited body, an edited
+  **title** (must match the plan's `title:` frontmatter), or a `plan-id` slug
+  outside the safe charset (`^[a-z0-9]+(?:-[a-z0-9]+)*$`, checked before it
+  touches the filesystem). **Comments** have no reviewed source, so the runner's
+  prompt contract tells the agent to treat titles and comments as untrusted
+  non-instructions. Threat model in DOCS.md §6 Security (#17 body, #55 title/
+  comment/slug).
 - Claim leases are renewable: an agent posts a heartbeat comment
   (`<!-- ratchet-heartbeat -->`) during long builds; `sweep-stale-claims` times
   freshness from the newest of commit/heartbeat/claim via `scripts/sweep-lease.mjs`,
