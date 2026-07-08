@@ -112,6 +112,20 @@ Body of 0082.
 ## Acceptance criteria
 - [ ] reserved labels are ignored
 `);
+// #85: GitHub label names are case-insensitive, so reserved state:/priority:
+// prefixes must be filtered in any letter case. Ordinary custom labels are
+// still applied exactly as authored.
+await writeFile(join(planDir, "0083-case-reserved-labels.md"), `---
+title: Case reserved labels are filtered
+priority: medium
+labels: [State:blocked, PRIORITY:P1, Team:Ops]
+blocked_by: []
+---
+Body of 0083.
+
+## Acceptance criteria
+- [ ] mixed-case reserved labels are ignored
+`);
 
 // --- in-memory GitHub API ----------------------------------------------
 const label = (name) => ({ name });
@@ -232,6 +246,25 @@ assert.ok(
   logs.some((l) => l.includes("WARNING") && l.includes("0082-reserved-labels.md") && l.includes("priority:P1")),
   "reserved priority labels must warn, naming the file",
 );
+
+// #85 AC1: frontmatter labels matching a reserved prefix in any letter case are
+// dropped with the warning naming the file.
+const caseReservedLabels = [...issues.values()].find((i) => i.body.includes("plan-id: 0083-case-reserved-labels"));
+assert.ok(caseReservedLabels, "0083-case-reserved-labels issue was created");
+assert.ok(names(caseReservedLabels).includes("state:ready"), `0083 should keep its computed state, got: ${names(caseReservedLabels)}`);
+assert.ok(!names(caseReservedLabels).includes("State:blocked"), `0083 must drop mixed-case frontmatter state labels, got: ${names(caseReservedLabels)}`);
+assert.ok(!names(caseReservedLabels).includes("PRIORITY:P1"), `0083 must drop mixed-case frontmatter priority labels, got: ${names(caseReservedLabels)}`);
+assert.ok(
+  logs.some((l) => l.includes("WARNING") && l.includes("0083-case-reserved-labels.md") && l.includes("State:blocked")),
+  "mixed-case reserved state labels must warn, naming the file",
+);
+assert.ok(
+  logs.some((l) => l.includes("WARNING") && l.includes("0083-case-reserved-labels.md") && l.includes("PRIORITY:P1")),
+  "mixed-case reserved priority labels must warn, naming the file",
+);
+
+// #85 AC2: non-reserved labels keep their original case when applied.
+assert.ok(names(caseReservedLabels).includes("Team:Ops"), `0083 should preserve ordinary custom label case, got: ${names(caseReservedLabels)}`);
 
 // #56 AC1: a sync that skipped any plan file for invalid frontmatter finishes
 // as a visible failure, not a green run.

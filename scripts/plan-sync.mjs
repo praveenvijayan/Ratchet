@@ -106,7 +106,8 @@ function issueState(issue) {
 function usableLabels(file, labels = []) {
   const kept = [];
   for (const label of labels) {
-    if (label.startsWith("state:") || label.startsWith("priority:")) {
+    const normalized = label.toLowerCase();
+    if (normalized.startsWith("state:") || normalized.startsWith("priority:")) {
       console.log(`WARNING: ${file} has reserved label '${label}' — ignored`);
     } else {
       kept.push(label);
