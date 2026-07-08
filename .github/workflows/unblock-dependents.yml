@@ -4,8 +4,12 @@ name: unblock-dependents
 # 1. Strip the closed issue's own state:* label — the lifecycle labels describe
 #    open work, and a lingering state:in-review on a closed issue misleads.
 # 2. Find every issue blocked only by it and, if all their blockers are now
-#    closed, mark them ready. This is what re-feeds the queue and makes the
-#    loop continuous.
+#    closed, re-feed it into the queue. Promotion is NOT unconditional: an
+#    unblocked issue only goes to state:ready if it still carries acceptance
+#    criteria; without them it is held at state:draft (an agent must never pick
+#    an issue with no test plan). The ready-vs-draft decision is made by the
+#    SAME shared helper the plan compiler uses (scripts/criteria.mjs), so the
+#    two can never disagree.
 
 on:
   issues:
@@ -18,12 +22,21 @@ jobs:
   unblock:
     runs-on: ubuntu-latest
     steps:
+      # Checkout so the github-script step can import the shared readiness
+      # helper (scripts/criteria.mjs) — the single source of truth for the
+      # ready-vs-draft decision, reused from the plan compiler.
+      - uses: actions/checkout@v4
       - uses: actions/github-script@v7
         with:
           # Prefer a PAT so this workflow can trigger further workflows.
           # Falls back to the default token (fine for pure human-merge flows).
           github-token: ${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN }}
           script: |
+            const { pathToFileURL } = require("node:url");
+            const { classifyUnblock } = await import(
+              pathToFileURL(`${process.env.GITHUB_WORKSPACE}/scripts/criteria.mjs`).href
+            );
+
             const closed = context.payload.issue.number;
 
             // The state machine only applies to open issues: closed means done
@@ -50,8 +63,10 @@ jobs:
               }
               if (!allClosed) continue;
 
+              // Only promote to ready if criteria survive; else hold as draft.
+              const { state, comment } = classifyUnblock(issue.body || "", closed);
               const labels = issue.labels.map(l => l.name).filter(l => !l.startsWith("state:"));
-              labels.push("state:ready");
+              labels.push(state);
               await github.rest.issues.setLabels({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number, labels });
-              await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number, body: `Unblocked: all blockers closed (#${closed}). Now \`state:ready\`.` });
+              await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number, body: comment });
             }
