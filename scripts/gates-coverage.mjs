@@ -12,24 +12,15 @@
 import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseGates } from "./gates-table.mjs";
 
-// The gate commands declared in a GATES.md table — the third cell of every
-// data row. Mirrors run-gates.mjs' table parser (surrounding prose and HTML
-// comments never start with `|`, so they are ignored) and returns just the
-// command strings, backticks stripped.
+// Runnable gate commands declared in a GATES.md table. TODO rows are skipped
+// here for the same reason run-gates skips them: they are placeholders, not
+// verification that can cover a test suite.
 export function gateCommands(gatesText = "") {
-  const commands = [];
-  for (const raw of String(gatesText).split("\n")) {
-    const line = raw.trim();
-    if (!line.startsWith("|")) continue;
-    const cells = line.split("|").slice(1, -1).map((c) => c.trim());
-    if (cells.length < 3) continue;
-    if (cells.every((c) => /^:?-+:?$/.test(c))) continue; // separator row
-    if (cells[0].toLowerCase() === "order" || cells[1].toLowerCase() === "gate") continue; // header
-    const command = cells[2].replace(/^`+|`+$/g, "").trim();
-    if (command) commands.push(command);
-  }
-  return commands;
+  return parseGates(String(gatesText))
+    .map((row) => row.command)
+    .filter((command) => !/^TODO:/i.test(command));
 }
 
 // Every `*.test.mjs` suite in a scripts directory, sorted for stable output.

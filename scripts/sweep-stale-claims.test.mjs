@@ -164,6 +164,7 @@ assert.equal(decideSweep({ ...base, state: "state:blocked" }).sweep, false, "non
       return respond([]); // no PR for #100, no PR signals for in-progress issues
     }
     if (method === "GET" && pathname === "/repos/o/r/pulls/15") return respond({ number: 15, state: "closed", merged_at: "2026-01-01T00:00:00Z", closed_at: staleIso, comments: 0, review_comments: 0 });
+    if (method === "GET" && pathname === "/repos/o/r/pulls/15/reviews") return respond([]);
     if (method === "GET" && pathname === "/repos/o/r/compare/main...agent/issue-200") return respond({ ahead_by: 0 });
     if (method === "GET" && pathname === "/repos/o/r/compare/main...agent/issue-300") return respond({ ahead_by: 3 });
     if (method === "GET" && pathname === "/repos/o/r/commits") return respond([{ commit: { committer: { date: recentIso } } }]);
@@ -296,4 +297,115 @@ assert.equal(decideSweep({ ...base, state: "state:blocked" }).sweep, false, "non
   assert.equal(result.swept, 2, "#500 and #700 swept; #600 skipped on the state-change guard");
 }
 
-console.log("PASS sweep-stale-claims.test.mjs (52 assertions)");
+// --- #87 orchestration: PR disposition robustness + config validation --------
+// AC1: a closed PR whose only feedback is a Request Changes review body gets
+// the rework grace window. AC2: multiple PRs on one branch are judged by the
+// newest PR, and the sweep comment names that PR. AC3: PR lookup paginates, so
+// an open PR is found even after many old branch PRs. AC4: invalid hour config
+// fails loudly before the sweep can silently disable itself.
+{
+  const staleIso = new Date(now - 5 * HOUR).toISOString();
+  const recentIso = new Date(now - 0.5 * HOUR).toISOString();
+  const label = (name) => ({ name });
+  const withCriteria = "Body.\n\n## Acceptance criteria\n- [ ] does the thing\n";
+  const openIssues = [
+    { number: 810, pull_request: undefined, updated_at: staleIso, assignees: [], labels: [label("state:in-review"), label("priority:medium")] },
+    { number: 820, pull_request: undefined, updated_at: staleIso, assignees: [], labels: [label("state:in-review"), label("priority:medium")] },
+    { number: 830, pull_request: undefined, updated_at: staleIso, assignees: [], labels: [label("state:in-review"), label("priority:medium")] },
+  ];
+  const oldClosed = Array.from({ length: 100 }, (_, i) => ({
+    number: 900 + i,
+    state: "closed",
+    merged_at: null,
+    closed_at: staleIso,
+    updated_at: staleIso,
+    created_at: staleIso,
+  }));
+  const calls = [];
+  const respond = (data, status = 200) => ({ ok: true, status, json: async () => data, text: async () => JSON.stringify(data) });
+  globalThis.fetch = async (url, opts = {}) => {
+    const { pathname, searchParams } = new URL(url);
+    const method = opts.method || "GET";
+    const body = opts.body ? JSON.parse(opts.body) : null;
+    calls.push({ method, pathname, body, search: Object.fromEntries(searchParams.entries()) });
+    if (method === "GET" && pathname === "/repos/o/r/issues") {
+      return respond(Number(searchParams.get("page")) === 1 ? openIssues : []);
+    }
+    if (method === "GET" && /^\/repos\/o\/r\/issues\/\d+$/.test(pathname)) {
+      const n = Number(pathname.split("/").pop());
+      const src = openIssues.find((i) => i.number === n);
+      return respond({ ...src, body: withCriteria });
+    }
+    if (method === "GET" && pathname === "/repos/o/r/pulls") {
+      const head = searchParams.get("head");
+      const page = Number(searchParams.get("page"));
+      if (head === "o:agent/issue-810") {
+        return respond(page === 1 ? [{ number: 810, state: "closed", merged_at: null, closed_at: recentIso, updated_at: recentIso, created_at: staleIso }] : []);
+      }
+      if (head === "o:agent/issue-820") {
+        return respond(page === 1 ? [
+          { number: 81, state: "closed", merged_at: "2026-01-01T00:00:00Z", closed_at: staleIso, updated_at: staleIso, created_at: staleIso },
+          { number: 82, state: "closed", merged_at: null, closed_at: recentIso, updated_at: recentIso, created_at: staleIso },
+        ] : []);
+      }
+      if (head === "o:agent/issue-830") {
+        return respond(page === 1 ? oldClosed : [{ number: 830, state: "open", merged_at: null, closed_at: null, updated_at: recentIso, created_at: recentIso }]);
+      }
+      return respond([]);
+    }
+    if (method === "GET" && pathname === "/repos/o/r/pulls/810") return respond({ number: 810, state: "closed", comments: 0, review_comments: 0 });
+    if (method === "GET" && pathname === "/repos/o/r/pulls/810/reviews") return respond([{ state: "CHANGES_REQUESTED", body: "Please tighten the edge case." }]);
+    if (method === "GET" && pathname === "/repos/o/r/pulls/82") return respond({ number: 82, state: "closed", comments: 0, review_comments: 0 });
+    if (method === "GET" && pathname === "/repos/o/r/pulls/82/reviews") return respond([]);
+    if (method !== "GET") return respond({}, 200);
+    throw new Error(`unexpected request: ${method} ${pathname}`);
+  };
+
+  process.env.GITHUB_TOKEN = "test-token";
+  process.env.GITHUB_REPOSITORY = "o/r";
+  process.env.STALE_HOURS = "2";
+  process.env.REWORK_GRACE_HOURS = "2";
+  process.env.SWEEP_NOW = String(now);
+  const realLog = console.log;
+  console.log = () => {};
+  let result;
+  try {
+    result = await main();
+  } finally {
+    console.log = realLog;
+  }
+
+  const put = (n) => calls.find((c) => c.method === "PUT" && c.pathname === `/repos/o/r/issues/${n}/labels`);
+  const comment = (n) => calls.find((c) => c.method === "POST" && c.pathname === `/repos/o/r/issues/${n}/comments`);
+
+  assert.ok(!put(810), "a PR closed recently with only review-body feedback must stay in grace");
+  assert.ok(put(820)?.body.labels.includes("state:ready"), "the newest closed PR with no feedback must be requeued");
+  assert.match(comment(820).body.body, /PR #82/, "the sweep comment must name the newest PR it acted on");
+  assert.doesNotMatch(comment(820).body.body, /PR #81/, "the sweep must not act on an older merged PR");
+  assert.ok(!put(830), "an open PR found on a later page must protect in-review work");
+  assert.ok(calls.some((c) => c.method === "GET" && c.pathname === "/repos/o/r/pulls" && c.search.head === "o:agent/issue-830" && c.search.page === "2"), "PR lookup must paginate past the first page");
+  assert.equal(result.swept, 1, "only #820 should be swept in the PR-disposition regression set");
+}
+
+{
+  process.env.GITHUB_TOKEN = "test-token";
+  process.env.GITHUB_REPOSITORY = "o/r";
+  process.env.SWEEP_NOW = String(now);
+  let called = false;
+  globalThis.fetch = async () => {
+    called = true;
+    throw new Error("fetch should not run with invalid sweep configuration");
+  };
+
+  process.env.STALE_HOURS = "not-a-number";
+  process.env.REWORK_GRACE_HOURS = "2";
+  await assert.rejects(() => main(), /STALE_HOURS.*not-a-number/, "invalid STALE_HOURS must fail loudly");
+  assert.equal(called, false, "invalid STALE_HOURS must fail before any API call");
+
+  process.env.STALE_HOURS = "2";
+  process.env.REWORK_GRACE_HOURS = "later";
+  await assert.rejects(() => main(), /REWORK_GRACE_HOURS.*later/, "invalid REWORK_GRACE_HOURS must fail loudly");
+  assert.equal(called, false, "invalid REWORK_GRACE_HOURS must fail before any API call");
+}
+
+console.log("PASS sweep-stale-claims.test.mjs (issue #87 robustness covered)");

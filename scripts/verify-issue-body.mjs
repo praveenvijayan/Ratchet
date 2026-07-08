@@ -7,7 +7,7 @@
 // supplies the plan text and acts on the verdict. Zero dependencies.
 //
 // CLI mode (used by .github/workflows/ratchet-run.yml):
-//   ISSUE_BODY_FILE=body.md ISSUE_TITLE_FILE=title.txt PLAN_DIR=plan node scripts/verify-issue-body.mjs
+//   ISSUE_BODY_FILE=body.md ISSUE_TITLE_FILE=title.txt ISSUE_NUMBER=12 ISSUES_FILE=issues.json PLAN_DIR=plan node scripts/verify-issue-body.mjs
 //   exit 0 + "VERIFIED ..." when safe to run; exit 1 + reason when it must skip.
 
 import { existsSync, readFileSync } from "node:fs";
@@ -80,11 +80,36 @@ export function titleMatchesPlan(issueTitle, planText) {
   return normalize(planTitle(planText)) === normalize(issueTitle);
 }
 
+// Bind a plan slug to the issue that plan-sync created for it. The issue body is
+// mutable, so a different issue can copy a reviewed plan's marker and content.
+// Given the GitHub issue index, exactly one issue may carry the slug and it must
+// be the picked issue.
+export function issueMatchesPlanSlug(issueNumber, issueBody, issues = []) {
+  const current = Number(issueNumber);
+  if (!Number.isInteger(current) || current <= 0) {
+    return { ok: false, reason: "ISSUE_NUMBER is required to bind the reviewed plan slug to the picked issue" };
+  }
+  const slug = planSlug(issueBody);
+  const matches = issues
+    .filter((issue) => planSlug(issue.body || "") === slug)
+    .map((issue) => Number(issue.number))
+    .filter((n) => Number.isInteger(n) && n > 0)
+    .sort((a, b) => a - b);
+  if (!matches.includes(current)) {
+    const where = matches.length ? `issue #${matches.join(", #")}` : "no issue in the provided GitHub issue index";
+    return { ok: false, reason: `plan-id slug \`${slug}\` is bound to ${where}, not picked issue #${current}; refusing this issue/plan mismatch` };
+  }
+  if (matches.length !== 1) {
+    return { ok: false, reason: `plan-id slug \`${slug}\` appears on multiple issues (#${matches.join(", #")}); refusing this issue/plan mismatch` };
+  }
+  return { ok: true };
+}
+
 // The full verdict the runner acts on. `planText` is null when no plan file
 // exists for the slug; `issueTitle` is the issue's current title. Returns
 // { verified, reason, slug? }. Every path fails closed — an unverifiable or
 // edited body, title, or slug refuses the run rather than trusting it.
-export function verify(issueBody, planText, issueTitle) {
+export function verify(issueBody, planText, issueTitle, options = {}) {
   const slug = planSlug(issueBody);
   if (!slug) {
     return { verified: false, reason: "issue body carries no `plan-id` marker; the runner only works issues compiled from a reviewed plan file" };
@@ -94,6 +119,12 @@ export function verify(issueBody, planText, issueTitle) {
   }
   if (planText == null) {
     return { verified: false, reason: `no plan file \`plan/${slug}.md\` found on main to verify against; refusing to run on an unverifiable issue`, slug };
+  }
+  if (options.issueNumber != null || options.issues != null) {
+    const binding = issueMatchesPlanSlug(options.issueNumber, issueBody, options.issues || []);
+    if (!binding.ok) {
+      return { verified: false, reason: binding.reason, slug };
+    }
   }
   if (!bodyMatchesPlan(issueBody, planText)) {
     return { verified: false, reason: `issue body no longer matches \`plan/${slug}.md\` — it was edited after compilation. Re-sync from the plan file, or revert the edit, to re-enable automation`, slug };
@@ -108,6 +139,8 @@ export function verify(issueBody, planText, issueTitle) {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const bodyFile = process.env.ISSUE_BODY_FILE;
   const titleFile = process.env.ISSUE_TITLE_FILE;
+  const issueNumber = process.env.ISSUE_NUMBER;
+  const issuesFile = process.env.ISSUES_FILE;
   const planDir = process.env.PLAN_DIR || "plan";
   if (!bodyFile || !existsSync(bodyFile)) {
     console.error(`ISSUE_BODY_FILE not found: ${bodyFile || "(unset)"}`);
@@ -122,7 +155,20 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   // happened to exist at a traversed path.
   const planPath = isSafeSlug(slug) ? join(planDir, `${slug}.md`) : null;
   const planText = planPath && existsSync(planPath) ? readFileSync(planPath, "utf8") : null;
-  const { verified, reason } = verify(issueBody, planText, issueTitle);
+  let issues;
+  if (issuesFile) {
+    if (!existsSync(issuesFile)) {
+      console.error(`ISSUES_FILE not found: ${issuesFile}`);
+      process.exit(1);
+    }
+    try {
+      issues = JSON.parse(readFileSync(issuesFile, "utf8"));
+    } catch (err) {
+      console.error(`ISSUES_FILE is not valid JSON: ${err.message}`);
+      process.exit(1);
+    }
+  }
+  const { verified, reason } = verify(issueBody, planText, issueTitle, { issueNumber, issues });
   console.log(verified ? `VERIFIED: ${reason}` : `SKIP: ${reason}`);
   process.exit(verified ? 0 : 1);
 }

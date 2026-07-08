@@ -130,7 +130,9 @@ function decideInReview({ now, branch, prState = "closed", prNumber = null, prCl
       comment: `${reason} Issue returned to \`state:ready\` so it can be re-picked.`,
     };
   }
-  const reason = `${prefix} \`${branch}\` is \`state:in-review\` but has no open PR from the agent branch.`;
+  const reason = prNumber
+    ? `${prefix} \`${branch}\` is \`state:in-review\`, and newest PR #${prNumber} is closed with no review feedback.`
+    : `${prefix} \`${branch}\` is \`state:in-review\` but has no open PR from the agent branch.`;
   return {
     sweep: true,
     deleteRef: false,
@@ -205,34 +207,44 @@ async function paginate(gh, path) {
 const labelNames = (labels) => labels.map((l) => (typeof l === "string" ? l : l.name));
 
 async function prStateForBranch(gh, repo, owner, branch) {
-  const prs = await gh("GET", `/repos/${repo}/pulls?state=all&head=${owner}:${branch}&per_page=10`);
+  const prs = await paginate(gh, `/repos/${repo}/pulls?state=all&head=${owner}:${branch}`);
   if (prs.some((pr) => pr.state === "open")) return { prState: "open" };
-  const merged = prs.find((pr) => pr.merged_at);
-  if (merged) {
+  const latest = prs
+    .filter((pr) => pr.state === "closed")
+    .sort((a, b) => new Date(b.closed_at || b.updated_at || b.created_at || 0) - new Date(a.closed_at || a.updated_at || a.created_at || 0))[0];
+  if (!latest) return { prState: "closed" };
+
+  if (latest.merged_at) {
     return {
       prState: "merged",
-      prNumber: merged.number,
-      prClosedAt: new Date(merged.closed_at || merged.merged_at).getTime(),
+      prNumber: latest.number,
+      prClosedAt: new Date(latest.closed_at || latest.merged_at).getTime(),
     };
   }
-  const closed = prs
-    .filter((pr) => pr.state === "closed")
-    .sort((a, b) => new Date(b.closed_at || 0) - new Date(a.closed_at || 0))[0];
-  if (!closed) return { prState: "closed" };
 
-  let detail = closed;
+  let detail = latest;
   try {
-    detail = await gh("GET", `/repos/${repo}/pulls/${closed.number}`);
+    detail = await gh("GET", `/repos/${repo}/pulls/${latest.number}`);
   } catch {
     // The list response is enough to know the PR is closed; only feedback counts
     // degrade when the detail read fails.
   }
-  const hasFeedback = (detail.comments || 0) > 0 || (detail.review_comments || 0) > 0;
+  const reviews = await paginate(gh, `/repos/${repo}/pulls/${latest.number}/reviews`);
+  const hasReviewBody = reviews.some((r) => (r.body || "").trim() || r.state === "CHANGES_REQUESTED");
+  const hasFeedback = (detail.comments || 0) > 0 || (detail.review_comments || 0) > 0 || hasReviewBody;
   return {
     prState: hasFeedback ? "closed-with-feedback" : "closed",
-    prNumber: closed.number,
-    prClosedAt: closed.closed_at ? new Date(closed.closed_at).getTime() : null,
+    prNumber: latest.number,
+    prClosedAt: latest.closed_at ? new Date(latest.closed_at).getTime() : null,
   };
+}
+
+function hoursToMs(name, value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) {
+    throw new Error(`${name} must be a non-negative number of hours, got ${JSON.stringify(value)}.`);
+  }
+  return n * 3600 * 1000;
 }
 
 export async function main() {
@@ -243,9 +255,9 @@ export async function main() {
   }
   const owner = repo.split("/")[0];
   const staleHours = process.env.STALE_HOURS || "2";
-  const staleMs = Number(staleHours) * 3600 * 1000;
+  const staleMs = hoursToMs("STALE_HOURS", staleHours);
   const reworkGraceHours = process.env.REWORK_GRACE_HOURS || staleHours;
-  const reworkGraceMs = Number(reworkGraceHours) * 3600 * 1000;
+  const reworkGraceMs = hoursToMs("REWORK_GRACE_HOURS", reworkGraceHours);
   // SWEEP_NOW pins the clock for the test; production uses the wall clock.
   const now = Number(process.env.SWEEP_NOW) || Date.now();
   const gh = ghClient(token);
