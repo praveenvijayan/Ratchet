@@ -40,11 +40,14 @@ and an optional Claude Code plugin.
 - `scripts/` — the executable core: `plan-sync.mjs` (plan→issue compiler) with
   `plan-sync.test.mjs` (its regression test), `run-gates.mjs` (the GATES.md
   gate runner shared by local verify and CI) with `run-gates.test.mjs`,
+  `pr-size-check.mjs` (CI-only enforcement of the AGENTS.md step 3 scope cap,
+  thresholds read from GATES.md) with `pr-size-check.test.mjs`,
   `ratchet-watch.sh`/`.mjs` (local webhook bridge for the continuous loop),
   `ratchet-update.sh` and `ratchet-uninstall.sh` (framework lifecycle).
 - `.github/workflows/` — the automation edge of the loop: `plan-sync`,
   `unblock-dependents`, `sweep-stale-claims`, `pr-gates` (runs the GATES.md
-  gates server-side on every agent PR), and the opt-in `ratchet-run`.
+  gates server-side on every agent PR, plus a `size` job enforcing the scope
+  cap), and the opt-in `ratchet-run`.
 - `.agents/skills/` — the CANONICAL skill sources (one dir per `ratchet-*`
   skill: `SKILL.md` body + `agents/openai.yaml` Codex policy).
 - `.claude/skills/` and `plugin/skills/` — generated mirrors of the canonical
