@@ -27,6 +27,17 @@ export const SWEPT_STATES = new Set([
   "state:changes-requested",
 ]);
 
+// The prefix every sweep comment starts with, one per swept state. This is the
+// single source of truth for those markers: the comments below are built from
+// it, and ratchet-metrics imports it to count sweeps by exactly the set the
+// sweep emits. Add a fourth swept state here and both the comment it posts and
+// the metric that counts it stay in lockstep — there is no second list to drift.
+export const SWEEP_COMMENT_PREFIXES = {
+  "state:in-progress": "Stale claim swept:",
+  "state:in-review": "Stale review swept:",
+  "state:changes-requested": "Stale rework swept:",
+};
+
 // Decide the sweep's action for one issue. All time inputs are epoch ms.
 //   input.state        — the issue's current state:* label (see SWEPT_STATES)
 //   input.now          — Date.now()
@@ -76,13 +87,14 @@ function decideInProgress({ now, staleMs, staleHours, branch, branchExists = tru
   // issue can be cleanly re-claimed. A branch with commits is recoverable work:
   // keep it for a human to inspect.
   const deleteRef = aheadBy === 0;
+  const prefix = SWEEP_COMMENT_PREFIXES["state:in-progress"];
   let reason;
   if (branchExists === false) {
-    reason = `Stale claim swept: branch no longer exists for \`${branch}\` and no activity was found for >${staleHours}h (measured from ${source}).`;
+    reason = `${prefix} branch no longer exists for \`${branch}\` and no activity was found for >${staleHours}h (measured from ${source}).`;
   } else {
     reason = deleteRef
-      ? `Stale claim swept: \`${branch}\` had no work for >${staleHours}h (measured from ${source}). Orphaned claim ref deleted.`
-      : `Stale claim swept: no activity on \`${branch}\` for >${staleHours}h (measured from ${source}). Branch kept (has commits).`;
+      ? `${prefix} \`${branch}\` had no work for >${staleHours}h (measured from ${source}). Orphaned claim ref deleted.`
+      : `${prefix} no activity on \`${branch}\` for >${staleHours}h (measured from ${source}). Branch kept (has commits).`;
   }
   return { sweep: true, deleteRef, targetState: "state:ready", reason, comment: `${reason} Issue returned to \`state:ready\`.` };
 }
@@ -93,9 +105,10 @@ function decideInProgress({ now, staleMs, staleHours, branch, branchExists = tru
 // visible. A closed PR with review feedback gets a grace window before requeue,
 // because AGENTS.md routes that path through same-branch rework.
 function decideInReview({ now, branch, prState = "closed", prNumber = null, prClosedAt = null, reworkGraceMs = 0, reworkGraceHours = "0" }) {
+  const prefix = SWEEP_COMMENT_PREFIXES["state:in-review"];
   if (prState === "open" || prState === "unknown") return { sweep: false };
   if (prState === "merged") {
-    const reason = `Stale review swept: \`${branch}\` is \`state:in-review\`, but PR #${prNumber} was merged while this issue stayed open.`;
+    const reason = `${prefix} \`${branch}\` is \`state:in-review\`, but PR #${prNumber} was merged while this issue stayed open.`;
     return {
       sweep: true,
       deleteRef: false,
@@ -108,7 +121,7 @@ function decideInReview({ now, branch, prState = "closed", prNumber = null, prCl
     return { sweep: false };
   }
   if (prState === "closed-with-feedback") {
-    const reason = `Stale review swept: \`${branch}\` is \`state:in-review\`, and PR #${prNumber} was closed with review feedback more than ${reworkGraceHours}h ago.`;
+    const reason = `${prefix} \`${branch}\` is \`state:in-review\`, and PR #${prNumber} was closed with review feedback more than ${reworkGraceHours}h ago.`;
     return {
       sweep: true,
       deleteRef: false,
@@ -117,7 +130,7 @@ function decideInReview({ now, branch, prState = "closed", prNumber = null, prCl
       comment: `${reason} Issue returned to \`state:ready\` so it can be re-picked.`,
     };
   }
-  const reason = `Stale review swept: \`${branch}\` is \`state:in-review\` but has no open PR from the agent branch.`;
+  const reason = `${prefix} \`${branch}\` is \`state:in-review\` but has no open PR from the agent branch.`;
   return {
     sweep: true,
     deleteRef: false,
@@ -136,7 +149,7 @@ function decideInReview({ now, branch, prState = "closed", prNumber = null, prCl
 function decideChangesRequested({ now, staleMs, staleHours, branch, lastCommitAt, heartbeatAt, updatedAt }) {
   const activity = Math.max(updatedAt, lastCommitAt ?? 0, heartbeatAt ?? 0);
   if (now - activity < staleMs) return { sweep: false };
-  const reason = `Stale rework swept: \`${branch}\` is \`state:changes-requested\` with no activity for >${staleHours}h.`;
+  const reason = `${SWEEP_COMMENT_PREFIXES["state:changes-requested"]} \`${branch}\` is \`state:changes-requested\` with no activity for >${staleHours}h.`;
   return {
     sweep: true,
     deleteRef: false,

@@ -92,3 +92,61 @@ const swept = (day) => ({ event: "commented", body: "Stale claim swept: no activ
 }
 
 console.log("PASS ratchet-metrics.test.mjs (3 criteria, 20 assertions)");
+
+// --- issue #52: count all three sweep types, tied to the sweep script -------
+import { decideSweep, SWEPT_STATES, SWEEP_COMMENT_PREFIXES } from "./sweep-stale-claims.mjs";
+import { SWEEP_PREFIXES } from "./ratchet-metrics.mjs";
+
+// #52 AC1: each of the three sweep comment prefixes emitted by
+// sweep-stale-claims.mjs is counted as a sweep event (the old code matched only
+// `Stale claim swept:` and silently dropped the review and rework sweeps).
+{
+  const day = (n) => ({ event: "commented", created_at: iso(n) });
+  const issues = [{ number: 501, state: "open", labels: [{ name: "state:blocked" }] }];
+  const timelines = {
+    501: [
+      { ...day(1), body: `${SWEEP_COMMENT_PREFIXES["state:in-progress"]} \`agent/issue-1\` had no work...` },
+      { ...day(2), body: `${SWEEP_COMMENT_PREFIXES["state:in-review"]} \`agent/issue-1\` is state:in-review but has no open PR...` },
+      { ...day(3), body: `${SWEEP_COMMENT_PREFIXES["state:changes-requested"]} \`agent/issue-1\` is state:changes-requested with no activity...` },
+    ],
+  };
+  const { fetchImpl } = makeFetch(issues, timelines);
+  const m = await computeMetrics({ fetchImpl, token: "t", repo: "o/r" });
+  assert.equal(m.sweepCount, 3, "all three sweep types (claim, review, rework) are counted");
+}
+
+// #52 AC2: a drift test ties the metric's prefixes to the sweep script's — the
+// metric matches whatever prefix decideSweep can actually post for every swept
+// state, so adding a fourth sweep type cannot silently undercount again.
+{
+  // The metric's match set is derived from the sweep's own definition, not a
+  // hand-copied list — that shared definition is what prevents drift.
+  assert.deepEqual(
+    SWEEP_PREFIXES, Object.values(SWEEP_COMMENT_PREFIXES),
+    "the metric matches exactly the prefixes the sweep script defines",
+  );
+  // Every swept state must have a prefix, or its comment could not be built.
+  for (const state of SWEPT_STATES) {
+    assert.ok(SWEEP_COMMENT_PREFIXES[state], `every swept state defines a prefix (missing: ${state})`);
+  }
+  // Drive decideSweep to a real sweep for each swept state, then assert the
+  // metric would count the exact comment it produces. Inputs are stale enough
+  // to trip every time-based state.
+  const HOUR = 3600 * 1000, nowMs = 1_700_000_000_000, staleMs = 2 * HOUR;
+  const past = nowMs - staleMs - HOUR;
+  const inputs = {
+    "state:in-progress": { aheadBy: 0, lastCommitAt: null, claimAt: past, heartbeatAt: null, updatedAt: past },
+    "state:in-review": { hasOpenPr: false },
+    "state:changes-requested": { lastCommitAt: past, heartbeatAt: null, updatedAt: past },
+  };
+  for (const state of SWEPT_STATES) {
+    const d = decideSweep({ state, now: nowMs, staleMs, staleHours: "2", branch: "agent/issue-9", ...inputs[state] });
+    assert.equal(d.sweep, true, `decideSweep must sweep ${state} for this drift check`);
+    assert.ok(
+      SWEEP_PREFIXES.some((p) => d.comment.startsWith(p)),
+      `the metric counts the comment the sweep emits for ${state}: ${d.comment}`,
+    );
+  }
+}
+
+console.log("PASS ratchet-metrics.test.mjs #52 (2 criteria, 8 assertions)");
