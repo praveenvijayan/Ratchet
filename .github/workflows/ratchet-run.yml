@@ -65,9 +65,38 @@ jobs:
             echo "No ready issues — backlog drained. Nothing to do."
           fi
 
+      # Trust boundary: the issue body becomes instructions to an agent holding a
+      # write-scoped PAT. Anyone with issue-write access can edit a body after its
+      # plan was reviewed, so before handing it to the agent we require the body to
+      # (a) carry a plan-id marker and (b) still match the merged plan file. On any
+      # mismatch we comment the discrepancy and SKIP without making code changes.
+      # See DOCS.md → "Security: the unattended runner's trust boundary".
+      - name: Verify the picked issue matches its reviewed plan
+        id: verify
+        if: steps.pick.outputs.has_issue == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.FACTORY_PAT }}
+          N: ${{ steps.pick.outputs.number }}
+        run: |
+          set -euo pipefail
+          gh issue view "$N" --json body --jq .body > issue-body.md
+          if ISSUE_BODY_FILE=issue-body.md PLAN_DIR=plan node scripts/verify-issue-body.mjs > verify.out 2>&1; then
+            echo "verified=true" >> "$GITHUB_OUTPUT"
+            cat verify.out
+          else
+            echo "verified=false" >> "$GITHUB_OUTPUT"
+            reason="$(sed 's/^SKIP: //' verify.out)"
+            body="$(printf '%s\n\n%s\n\n%s' \
+              '🛑 **ratchet-run skipped this issue without making any changes.**' \
+              "$reason" \
+              'The unattended runner only works issues whose body still matches the reviewed plan/*.md file it was compiled from (issue-body prompt-injection guard — see DOCS.md, Security). No code was changed and no branch was created.')"
+            gh issue comment "$N" --body "$body"
+            echo "Skipped issue #$N: $reason"
+          fi
+
       # --- Agent step: Claude Code. Swap this block for OpenAI Codex if preferred. ---
       - name: Work the issue
-        if: steps.pick.outputs.has_issue == 'true'
+        if: steps.pick.outputs.has_issue == 'true' && steps.verify.outputs.verified == 'true'
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
