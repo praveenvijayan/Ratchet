@@ -47,38 +47,30 @@ in sync.
 ## Layout
 
 ```
-AGENTS.md                      Operating manual (the 7-step loop). Canonical.
-CLAUDE.md / GEMINI.md          One-line pointers to AGENTS.md for each tool.
-.agents/skills/<name>/         Canonical skills (Codex + Antigravity)
-  SKILL.md                       portable skill body
-  agents/openai.yaml             Codex invocation policy (explicit-only)
-.claude/skills/<name>/SKILL.md Mirror for Claude Code
-plugin/                        Optional Claude Code plugin packaging
-.claude-plugin/marketplace.json  Optional marketplace (Claude Code only)
-AGENTS.md                      Operating manual (100% framework, overwrite-safe)
-GATES.md                       Project config you hand-author (verification gates)
-CLAUDE.md / GEMINI.md          One-line pointers to AGENTS.md for each tool
-.ratchet-version              Installed framework version (managed by the updater)
-.agents/skills/<name>/         Canonical skills (Codex + Antigravity)
-  SKILL.md                       portable skill body
-  agents/openai.yaml             Codex invocation policy (explicit-only)
-.claude/skills/<name>/SKILL.md Mirror for Claude Code
-plugin/                        Optional Claude Code plugin packaging
+AGENTS.md                        Operating manual (the 7-step loop). Canonical, overwrite-safe.
+CLAUDE.md / GEMINI.md            One-line pointers to AGENTS.md for each tool.
+GATES.md                         Project config you hand-author (verification gates).
+.ratchet-version                 Installed framework version (managed by the updater).
+.agents/skills/<name>/           Canonical skills (Codex + Antigravity)
+  SKILL.md                         portable skill body
+  agents/openai.yaml               Codex invocation policy (explicit-only)
+.claude/skills/<name>/SKILL.md   Mirror for Claude Code
+plugin/                          Optional Claude Code plugin packaging
 .claude-plugin/marketplace.json  Optional marketplace (Claude Code only)
 plan/
-  README.md                    The plan-file format contract
-  0001-email-login.md          Worked example
+  README.md                        The plan-file format contract
+  examples/0001-email-login.md     Worked example (not synced — kept for reference)
 memory/
-  USER.md                      Human-owned preferences (agent reads, never edits)
-  ARCHITECTURE.md              Coarse codebase map (generated; scopes the agent's reads)
-  MEMORY.md                    Distilled knowledge cache (agent proposes via PR)
+  USER.md                          Human-owned preferences (agent reads, never edits)
+  ARCHITECTURE.md                  Coarse codebase map (generated; scopes the agent's reads)
+  MEMORY.md                        Distilled knowledge cache (agent proposes via PR)
 scripts/
-  plan-sync.mjs                Zero-dep deterministic plan→issue compiler
-  plan-sync.test.mjs           Regression test for the compiler (node scripts/plan-sync.test.mjs)
-  ratchet-update.sh            Pulls framework updates, preserves project files
-.github/workflows/             plan-sync, unblock-dependents, sweep-stale-claims, ratchet-run
-.env.example                   PAT documentation for local runs
-setup.sh                       Sync skills into each tool's location
+  plan-sync.mjs                    Zero-dep deterministic plan→issue compiler
+  plan-sync.test.mjs               Regression test for the compiler (node scripts/plan-sync.test.mjs)
+  ratchet-update.sh                Pulls framework updates, preserves project files
+.github/workflows/               plan-sync, unblock-dependents, sweep-stale-claims, pr-gates, release, ratchet-run
+.env.example                     PAT documentation for local runs
+setup.sh                         Sync skills into each tool's location
 ```
 
 The skills: **`/ratchet-plan`** (idea → `plan/*.md`), **`/ratchet-sync`**

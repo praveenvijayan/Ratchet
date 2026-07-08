@@ -156,7 +156,7 @@ setup.sh                        Mirror skills into each tool's location
 
 plan/
   README.md                     The plan-file format contract
-  0001-email-login.md           Worked example
+  examples/0001-email-login.md  Worked example (not synced — kept for reference)
 memory/
   USER.md                       Human-owned preferences (agent reads, never edits)
   ARCHITECTURE.md               Coarse codebase map (generated; agent scopes reads with it)
