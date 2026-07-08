@@ -7,6 +7,12 @@
 // against parser internals:
 //   1. Every scripts/*.test.mjs suite in this repo is run by a GATES.md gate row.
 //   2. The guard fails when a *.test.mjs file exists that no gate row runs.
+// Plus issue #83:
+//   3. gates-coverage parses GATES.md rows with the same shared parser run-gates
+//      executes them with.
+//   4. A test file mentioned only in a TODO: command is reported as uncovered.
+//   5. A backticked gate command containing a pipe, with the suite filename
+//      after the pipe, counts as covered without a false failure.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -90,4 +96,64 @@ function runGuard(env) {
   assert.equal(green.status, 0, "once every suite is wired, the guard exits zero");
 }
 
-console.log("PASS gates-coverage.test.mjs (2 criteria, guard verified against repo and fixtures)");
+// --- #83 Criterion 1: gates-coverage shares run-gates' row parser --------
+{
+  const dir = await mkdtemp(join(tmpdir(), "gates-coverage-shared-parser-"));
+  await writeFile(join(dir, "escaped-pipe.test.mjs"), "");
+  const gatesText = [
+    "# Gates",
+    "",
+    "| Order | Gate | Command | Pass condition |",
+    "|-------|------|---------|----------------|",
+    "| 1 | test: escaped pipe | node -e \"console.log('a')\" \\| node scripts/escaped-pipe.test.mjs | exit 0 |",
+    "",
+  ].join("\n");
+
+  assert.deepEqual(
+    uncoveredTestFiles(dir, gatesText),
+    [],
+    "gates-coverage must use the same escaped-pipe-aware row parser as run-gates",
+  );
+}
+
+// --- #83 Criterion 2: TODO commands do not count as coverage -------------
+{
+  const dir = await mkdtemp(join(tmpdir(), "gates-coverage-todo-"));
+  await writeFile(join(dir, "todo-only.test.mjs"), "");
+  const gatesText = [
+    "# Gates",
+    "",
+    "| Order | Gate | Command | Pass condition |",
+    "|-------|------|---------|----------------|",
+    "| 1 | test: todo only | TODO: node scripts/todo-only.test.mjs | - |",
+    "",
+  ].join("\n");
+
+  assert.deepEqual(
+    uncoveredTestFiles(dir, gatesText),
+    ["todo-only.test.mjs"],
+    "a suite mentioned only in a TODO gate is still uncovered because run-gates skips it",
+  );
+}
+
+// --- #83 Criterion 3: backticked pipes keep filenames after the pipe -----
+{
+  const dir = await mkdtemp(join(tmpdir(), "gates-coverage-piped-command-"));
+  await writeFile(join(dir, "after-pipe.test.mjs"), "");
+  const gatesText = [
+    "# Gates",
+    "",
+    "| Order | Gate | Command | Pass condition |",
+    "|-------|------|---------|----------------|",
+    "| 1 | test: after pipe | `node -e \"console.log('prefix')\" | node scripts/after-pipe.test.mjs` | exit 0 |",
+    "",
+  ].join("\n");
+
+  assert.deepEqual(
+    uncoveredTestFiles(dir, gatesText),
+    [],
+    "a backticked pipe command must cover the suite named after the pipe",
+  );
+}
+
+console.log("PASS gates-coverage.test.mjs (5 criteria, guard verified against repo and fixtures)");
