@@ -59,10 +59,30 @@ If code exists, detect commands **from real evidence only**:
    Commands to **recognise**, not invent. If a gate has no matching
    script/config, or the script is a stub, write `TODO: <gate> command` instead
    of guessing.
-3. **Edit `GATES.md`** — replace the body rows of the table with the detected
-   commands, keeping the columns. Add one comment above the table:
+3. **Security gates — same evidence-only discipline.** Agent-authored commits
+   need dependency and secret checks at least as much as human ones. Add two
+   more gates, `audit` (dependency vulnerabilities) and `secret-scan`, from the
+   ecosystem you already detected. The ecosystem-standard auditors ship with (or
+   are the canonical companion to) the manifest, so the manifest is the evidence
+   for `audit`; a secret scanner is only emitted when its config is committed.
+
+   | Gate        | Evidence                                   | Command |
+   |-------------|--------------------------------------------|---------|
+   | audit       | Node manifest + lockfile                   | `<pm> audit` |
+   | audit       | Python `pyproject.toml` / `requirements.txt` | `pip-audit` |
+   | audit       | Rust `Cargo.toml`                          | `cargo audit` |
+   | audit       | Go `go.mod`                                | `govulncheck ./...` |
+   | secret-scan | `.gitleaks.toml` / `gitleaks.toml` present | `gitleaks detect --no-banner --redact` |
+
+   No matching ecosystem manifest → write `TODO: audit command`. No committed
+   secret-scanner config → write `TODO: secret-scan command`. Never guess a
+   security command from nothing.
+4. **Edit `GATES.md`** — replace the body rows of the table with the detected
+   commands (the five build gates plus the `audit` and `secret-scan` rows),
+   keeping the columns. Add one comment above the table:
    `<!-- auto-detected by /ratchet-init on <date>; verify before first run -->`.
-4. **Never run a gate.** Detection only.
+5. **Never run a gate.** Detection only — this includes the security gates: an
+   `audit` or `secret-scan` looks read-only but still must not be executed.
 
 ## Step 3 — Scaffold memory and map the codebase
 
@@ -143,8 +163,11 @@ creating a token and setting a secret are credential actions the user owns):
 
 - Token safety: never create the PAT, set the secret value, write a real token
   into any file, or print/log a token. Inform and verify presence only.
-- Evidence-based gates: never fabricate a command; unknown → `TODO`.
-- Detection never executes the project's build/test commands.
+- Evidence-based gates: never fabricate a command; unknown → `TODO`. This
+  covers the security gates too — no ecosystem manifest → `TODO: audit`; no
+  committed scanner config → `TODO: secret-scan`.
+- Detection never executes the project's build/test commands, nor the security
+  gates (`audit`, `secret-scan`) — a scan looks read-only but is still not run.
 - File edits, labels, and read-only checks only — never change branch
   protection, repo settings, or visibility.
 - Idempotent: safe to re-run any time the stack, labels, or token drift.
