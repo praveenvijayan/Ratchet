@@ -45,8 +45,34 @@ async function gh(token, method, path, { body, allow404 = false } = {}) {
     body: body ? JSON.stringify(body) : undefined,
   });
   if (res.status === 404 && allow404) return null;
-  if (!res.ok) throw new Error(`${method} ${path} -> ${res.status} ${await res.text()}`);
+  if (!res.ok) {
+    const text = await res.text();
+    // Attach the status and raw body so callers can discriminate one failure
+    // mode from another (e.g. a tag-collision 422 vs. an invalid-input 422)
+    // instead of pattern-matching a flattened message string.
+    const err = new Error(`${method} ${path} -> ${res.status} ${text}`);
+    err.status = res.status;
+    err.body = text;
+    throw err;
+  }
   return res.status === 204 ? null : res.json();
+}
+
+// True only when a 422 body reports the *tag* already exists — GitHub's
+// validation error carries an `errors[]` entry of {field:"tag_name",
+// code:"already_exists"}. Any other 422 (an invalid target_commitish, a
+// malformed field) fails this check, so it is never mistaken for a benign
+// tag collision. Fails closed on a body that is not the expected JSON shape.
+function isTagAlreadyExists(body) {
+  try {
+    const parsed = JSON.parse(body);
+    return (
+      Array.isArray(parsed.errors) &&
+      parsed.errors.some((e) => e.field === "tag_name" && e.code === "already_exists")
+    );
+  } catch {
+    return false;
+  }
 }
 
 // Parse "v1.2.3" (or "1.2.3") into parts, remembering the "v" prefix so the
@@ -171,6 +197,14 @@ export async function main() {
     return { released: false, reason: "tag-exists" };
   }
 
+  // Target the repository's default branch, not a hardcoded "main". A consumer
+  // repo whose default is master/trunk/develop would otherwise get a release
+  // POST with a target_commitish that names no real branch — which GitHub
+  // rejects with a 422 indistinguishable from a tag collision. Read the real
+  // default branch from the repo so the tag lands on it.
+  const repoMeta = await gh(token, "GET", `/repos/${repo}`);
+  const defaultBranch = repoMeta?.default_branch || "main";
+
   const today = new Date().toISOString().slice(0, 10);
   const lines = prs.map((pr) => `- ${pr.title} (#${pr.number})`);
   const changelog = [
@@ -187,15 +221,18 @@ export async function main() {
       body: {
         tag_name: version,
         name: version,
-        target_commitish: "main",
+        target_commitish: defaultBranch,
         body: changelog,
       },
     });
   } catch (e) {
-    // A 422 here means the tag was created between our pre-flight check and now
-    // (a concurrent run beat us). Treat it as a clean no-op, not a crash — no
-    // release was created, so nothing is left half-done.
-    if (/ -> 422\b/.test(e.message)) {
+    // Only a 422 whose body reports the *tag* already exists is a benign
+    // no-op: the tag was created between our pre-flight check and now (a
+    // concurrent run beat us), so nothing here is left half-done. Every other
+    // 422 — an invalid target_commitish, any other validation failure — is a
+    // real error and must surface loudly with the API's actual message, not be
+    // silently swallowed as "another run beat us to it".
+    if (e.status === 422 && isTagAlreadyExists(e.body)) {
       console.log(`Tag ${version} already exists — another run beat us to it; nothing released, nothing partial created.`);
       setOutput("released", "false");
       return { released: false, reason: "tag-exists" };

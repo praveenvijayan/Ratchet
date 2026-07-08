@@ -11,6 +11,9 @@
 //   - a dangling tag from a partial run advances the version, not collides (AC2)
 //   - the first-ever release seeds from .ratchet-version, not v0.0.1 (AC3)
 //   - DOCS.md's pin-to-tag guidance no longer promises tags that may not exist (AC4)
+// plus #81 (stop treating every 422 as a tag collision; target the default branch):
+//   - a non-collision 422 (invalid target_commitish) fails loudly, not as a no-op
+//   - the release targets the repository's default branch (master), not a hardcoded main
 
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, writeFileSync, rmSync } from "node:fs";
@@ -19,20 +22,30 @@ import { main } from "./release.mjs";
 
 const respond = (data, status = 200) => ({ ok: true, status, json: async () => data, text: async () => JSON.stringify(data) });
 const notFound = () => ({ ok: false, status: 404, json: async () => ({}), text: async () => "Not Found" });
-const conflict = () => ({ ok: false, status: 422, json: async () => ({}), text: async () => "Reference already exists" });
+const fail = (status, data) => ({ ok: false, status, json: async () => data, text: async () => JSON.stringify(data) });
+// A real GitHub tag-collision 422: errors[] names field:"tag_name", code:"already_exists".
+const conflict = () => fail(422, { message: "Validation Failed", errors: [{ resource: "Release", code: "already_exists", field: "tag_name" }] });
+// A real GitHub invalid-target 422 (e.g. target_commitish naming no branch): same
+// status, different errors[] — must NOT be mistaken for a benign tag collision.
+const badTarget = () => fail(422, { message: "Validation Failed", errors: [{ resource: "Release", code: "invalid", field: "target_commitish" }] });
 
 // Build an in-memory GitHub API. `latest` is the /releases/latest payload (or
 // null for a 404 — no releases yet); `pulls` is page 1 of closed PRs; `tags` is
 // the list of tag names; `existingTags` are tags whose git ref resolves (the
-// pre-flight collision check); `failCreate` makes the release POST return 422.
+// pre-flight collision check); `failCreate` makes the release POST return a
+// tag-collision 422; `createResponse`, when set, overrides the POST response
+// (e.g. an invalid-target 422); `defaultBranch` is the repo's default branch.
 // Created releases are captured for assertions.
-function mockGitHub({ latest, pulls, tags = [], existingTags = null, failCreate = false }) {
+function mockGitHub({ latest, pulls, tags = [], existingTags = null, failCreate = false, createResponse = null, defaultBranch = "main" }) {
   const refTags = existingTags ?? tags;
   const created = [];
   globalThis.fetch = async (url, opts = {}) => {
     const { pathname, searchParams } = new URL(url);
     const method = opts.method || "GET";
     const body = opts.body ? JSON.parse(opts.body) : null;
+    if (method === "GET" && pathname === "/repos/o/r") {
+      return respond({ default_branch: defaultBranch });
+    }
     if (method === "GET" && pathname === "/repos/o/r/releases/latest") {
       return latest === null ? notFound() : respond(latest);
     }
@@ -47,6 +60,7 @@ function mockGitHub({ latest, pulls, tags = [], existingTags = null, failCreate 
       return refTags.includes(tag) ? respond({ ref: `refs/tags/${tag}` }) : notFound();
     }
     if (method === "POST" && pathname === "/repos/o/r/releases") {
+      if (createResponse) return createResponse();
       if (failCreate) return conflict();
       created.push(body);
       return respond({ ...body, html_url: `https://github.com/o/r/releases/tag/${body.tag_name}` }, 201);
@@ -99,6 +113,7 @@ try {
   let result = await main();
   assert.equal(result.released, true, "a batch of merged PRs must produce a release");
   assert.equal(created.length, 1, "exactly one release is created");
+  assert.equal(created[0].target_commitish, "main", "the release targets the repo's default branch (main here), not a hardcoded value");
   assert.equal(created[0].tag_name, "v1.3.0", `minor bump of v1.2.3 must be v1.3.0, got ${created[0].tag_name}`);
   assert.ok(created[0].body.includes("Add feature X (#42)"), "changelog must list a merged PR by title and number");
   assert.ok(created[0].body.includes("Fix bug Y (#41)"), "changelog must list every PR merged since the last tag");
@@ -205,6 +220,38 @@ try {
   assert.equal(result.released, false, "a create-time collision releases nothing");
   assert.equal(created.length, 0, "a create-time collision leaves nothing partial");
 
+  // --- AC1. a non-collision 422 fails loudly with the API's real error ---------
+  // GitHub also returns 422 for an invalid target_commitish. That is NOT a tag
+  // collision and must never be swallowed as "another run beat us to it" — it
+  // must fail with the actual API error so a mis-targeted release lane is seen.
+  process.env.RELEASE_BUMP = "patch";
+  created = mockGitHub({
+    latest: { tag_name: "v1.2.3", published_at: "2026-01-01T00:00:00Z" },
+    tags: ["v1.2.3"],
+    createResponse: badTarget, // the POST 422s on target_commitish, not the tag
+    pulls: [{ number: 72, title: "New work", merged_at: "2026-02-01T00:00:00Z" }],
+  });
+  await assert.rejects(
+    () => main(),
+    (e) => e.message.includes("422") && e.message.includes("target_commitish") && !e.message.includes("beat us"),
+    "a 422 that is not a tag collision surfaces the API's actual error, never the benign no-op message",
+  );
+
+  // --- AC3. the release targets the repository's default branch ----------------
+  // A repo whose default branch is `master` must cut a release targeting master,
+  // not a hardcoded `main` (which would 422 as an invalid target_commitish).
+  process.env.RELEASE_BUMP = "patch";
+  created = mockGitHub({
+    latest: { tag_name: "v1.2.3", published_at: "2026-01-01T00:00:00Z" },
+    tags: ["v1.2.3"],
+    defaultBranch: "master",
+    pulls: [{ number: 73, title: "Work on a master-default repo", merged_at: "2026-02-01T00:00:00Z" }],
+  });
+  result = await main();
+  assert.equal(result.released, true, "a master-default repo cuts a release");
+  assert.equal(created.length, 1, "exactly one release is created on a master-default repo");
+  assert.equal(created[0].target_commitish, "master", `the release must target the default branch 'master', got ${created[0].target_commitish}`);
+
   // --- invalid bump: a clear error, not a stack trace --------------------------
   process.env.RELEASE_BUMP = "sideways";
   mockGitHub({ latest: null, tags: [], pulls: [] });
@@ -250,7 +297,7 @@ try {
     "DOCS.md documents failed deploy semantics without rollback mutation",
   );
 
-  console.log("PASS release.test.mjs (34 assertions)");
+  console.log("PASS release.test.mjs (39 assertions)");
 } finally {
   delete process.env.GITHUB_OUTPUT;
   rmSync(OUTPUT_FILE, { force: true });
