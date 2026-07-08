@@ -33,7 +33,18 @@ async function runGates(rows) {
   const gatesFile = join(dir, `GATES-${n}.md`);
   const summaryFile = join(dir, `summary-${n}.md`);
   n++;
-  const table = [
+  await writeFile(gatesFile, gatesTable(rows));
+  const res = spawnSync("node", [RUNNER], {
+    encoding: "utf8",
+    env: { ...process.env, GATES_FILE: gatesFile, GITHUB_STEP_SUMMARY: summaryFile },
+  });
+  const summary = await readFile(summaryFile, "utf8").catch(() => "");
+  return { status: res.status, out: (res.stdout || "") + (res.stderr || ""), summary };
+}
+
+// Build a GATES.md table body from rows (shared by both helpers).
+const gatesTable = (rows) =>
+  [
     "# Gates",
     "",
     "| Order | Gate | Command | Pass condition |",
@@ -41,10 +52,20 @@ async function runGates(rows) {
     ...rows.map((r) => `| ${r.order} | ${r.gate} | ${r.command} | — |`),
     "",
   ].join("\n");
-  await writeFile(gatesFile, table);
+
+// #84: run with a base-branch GATES.md (BASE_GATES_FILE) alongside the PR's own
+// working-tree GATES.md (GATES_FILE). The runner must judge by the base copy and
+// flag the PR's copy when it differs.
+async function runGatesWithBase(baseRows, headRows) {
+  const baseFile = join(dir, `base-GATES-${n}.md`);
+  const headFile = join(dir, `head-GATES-${n}.md`);
+  const summaryFile = join(dir, `summary-base-${n}.md`);
+  n++;
+  await writeFile(baseFile, gatesTable(baseRows));
+  await writeFile(headFile, gatesTable(headRows));
   const res = spawnSync("node", [RUNNER], {
     encoding: "utf8",
-    env: { ...process.env, GATES_FILE: gatesFile, GITHUB_STEP_SUMMARY: summaryFile },
+    env: { ...process.env, GATES_FILE: headFile, BASE_GATES_FILE: baseFile, GITHUB_STEP_SUMMARY: summaryFile },
   });
   const summary = await readFile(summaryFile, "utf8").catch(() => "");
   return { status: res.status, out: (res.stdout || "") + (res.stderr || ""), summary };
@@ -152,4 +173,52 @@ const fail = "`node -e \"process.exit(3)\"`";
   assert.ok(/column/i.test(out), "the failure must explain the row's column count is ambiguous");
 }
 
-console.log("PASS run-gates.test.mjs (7 criteria, 25 assertions)");
+// --- #84 AC1: gates are judged by the base-branch GATES.md, not the PR's copy.
+// The PR softens its own gate to a no-op that would pass; the base still carries
+// the real failing gate, so the run fails and the PR's command never runs — a PR
+// cannot edit what it is judged by --------------------------------------------
+{
+  const { status, out } = await runGatesWithBase(
+    [{ order: 1, gate: "guard", command: fail }], // base: the real, failing gate
+    [{ order: 1, gate: "guard", command: echo("SELF_SERVED") }], // PR tries to soften it
+  );
+  assert.notEqual(status, 0, "the base-branch gate must decide the outcome, not the PR's edited copy");
+  assert.ok(!out.includes("SELF_SERVED"), "the PR's own gate command must never run when a base config is provided");
+}
+
+// --- #84 AC2: a PR that modifies GATES.md gets a visible notice in the output
+// and the job summary, so a legitimate config change is flagged for the reviewer
+// rather than silently deferred ------------------------------------------------
+{
+  const { status, out, summary } = await runGatesWithBase(
+    [{ order: 1, gate: "guard", command: echo("OK") }],
+    [
+      { order: 1, gate: "guard", command: echo("OK") },
+      { order: 2, gate: "added-in-pr", command: echo("OK") },
+    ],
+  );
+  assert.equal(status, 0, "a within-base gate config still passes while the edit is flagged");
+  assert.ok(/base branch's config/i.test(out) && /after merge/i.test(out), "a modified GATES.md must be flagged in the check output");
+  assert.ok(/changed in this PR/i.test(summary), "the summary must flag the GATES.md change for the reviewer");
+}
+
+// --- #84: an unmodified GATES.md draws no config-change notice (no false alarm)
+{
+  const rows = [{ order: 1, gate: "guard", command: echo("OK") }];
+  const { status, summary } = await runGatesWithBase(rows, rows);
+  assert.equal(status, 0, "identical base and PR gate config must pass");
+  assert.ok(!/changed in this PR/i.test(summary), "identical config must not be flagged as a change");
+}
+
+// --- #84 AC3: DOCS.md documents how gate config changes are reviewed and when
+// they take effect. Asserted on the key facts (base branch, after-merge timing),
+// not exact prose, so it verifies the trust-boundary material without brittleness
+{
+  const docs = await readFile(fileURLToPath(new URL("../DOCS.md", import.meta.url)), "utf8");
+  const section = docs.slice(docs.indexOf("gate config is judged from the base branch"));
+  assert.ok(section.length > 0, "DOCS.md must carry a gate-config trust-boundary section");
+  assert.ok(/base branch/i.test(section), "DOCS.md must state that gate config is judged from the base branch");
+  assert.ok(/after (it )?merge/i.test(section), "DOCS.md must state a config change takes effect only after merge");
+}
+
+console.log("PASS run-gates.test.mjs (10 criteria, 33 assertions)");

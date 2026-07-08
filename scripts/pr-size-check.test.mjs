@@ -25,13 +25,21 @@ const dir = await mkdtemp(join(tmpdir(), "pr-size-test-"));
 let n = 0;
 // Run the check against a fixture GATES.md with the given PR counts. `gates`
 // is the raw GATES.md body (may omit the size config to exercise defaults).
-async function check({ gates = "", additions, deletions, changedFiles, files }) {
-  const gatesFile = join(dir, `GATES-${n++}.md`);
+// `baseGates`, when given, is written to a separate file and passed as
+// BASE_GATES_FILE — the base-branch config the check must judge by (#84).
+async function check({ gates = "", baseGates, additions, deletions, changedFiles, files }) {
+  const idx = n++;
+  const gatesFile = join(dir, `GATES-${idx}.md`);
   await writeFile(gatesFile, gates);
   const env = {
     ...process.env,
     GATES_FILE: gatesFile,
   };
+  if (baseGates !== undefined) {
+    const baseFile = join(dir, `BASE-GATES-${idx}.md`);
+    await writeFile(baseFile, baseGates);
+    env.BASE_GATES_FILE = baseFile;
+  }
   if (files) {
     env.PR_FILES_JSON = JSON.stringify(files);
   } else {
@@ -135,4 +143,57 @@ const withLimitsAndExcludes = (lines, files, excludes) =>
   assert.ok(res.out.includes("package-lock.json"), `failure must name the excluded lockfile, got:\n${res.out}`);
 }
 
-console.log("PASS pr-size-check.test.mjs (23 assertions)");
+// --- #84 AC1: thresholds are read from the base branch's GATES.md, not the PR's.
+// The PR raises its own limit to 10000; the base limit of 10 still applies, so an
+// over-limit PR fails — it cannot edit what judges it -------------------------
+{
+  const res = await check({
+    baseGates: withLimits(10, 6),
+    gates: withLimits(10000, 6),
+    additions: 30,
+    deletions: 0,
+    changedFiles: 1,
+  });
+  assert.equal(res.code, 1, "the base-branch limit must decide, not the PR's raised limit");
+  assert.ok(res.out.includes("limit 10)"), `the base limit of 10 must be the one enforced, got:\n${res.out}`);
+}
+
+// --- #84 AC1 (exclusions): a PR cannot excuse its own files via an exclude_paths
+// it adds only in its diff. Config comes from the base, which has no such exclude
+{
+  const files = [{ filename: "src/huge.js", additions: 500, deletions: 0 }];
+  const res = await check({
+    baseGates: withLimits(10, 6),
+    gates: withLimitsAndExcludes(10, 6, ["src/**"]),
+    files,
+  });
+  assert.equal(res.code, 1, "an exclude_paths added only in the PR must not spare its own files");
+}
+
+// --- #84 AC2: a PR that modifies GATES.md is flagged in the size check output --
+{
+  const res = await check({
+    baseGates: withLimits(400, 6),
+    gates: withLimits(500, 6),
+    additions: 10,
+    deletions: 0,
+    changedFiles: 1,
+  });
+  assert.equal(res.code, 0, "a PR within the base limit still passes");
+  assert.ok(/base branch's config/i.test(res.out) && /after merge/i.test(res.out), `a modified GATES.md must be flagged, got:\n${res.out}`);
+}
+
+// --- #84: identical base and PR config draws no false config-change flag ------
+{
+  const res = await check({
+    baseGates: withLimits(400, 6),
+    gates: withLimits(400, 6),
+    additions: 10,
+    deletions: 0,
+    changedFiles: 1,
+  });
+  assert.equal(res.code, 0, "a within-limit PR passes");
+  assert.ok(!/base branch's config/i.test(res.out), "identical base and PR config must not be flagged as a change");
+}
+
+console.log("PASS pr-size-check.test.mjs (31 assertions)");

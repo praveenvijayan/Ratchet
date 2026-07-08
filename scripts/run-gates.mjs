@@ -28,6 +28,14 @@ import { execSync } from "node:child_process";
 import { GateParseError, parseGates } from "./gates-table.mjs";
 
 const GATES_FILE = process.env.GATES_FILE || "GATES.md";
+// The pr-gates workflow extracts the base branch's GATES.md and points
+// BASE_GATES_FILE at it, so a PR is judged by gate config it cannot edit in the
+// same diff (issue #84 — a PR could otherwise blank its own gate rows and go
+// green). When set, that base copy — not the PR's working-tree GATES.md — is the
+// authoritative source of gate commands. Unset (local verify runs, tests), the
+// working-tree file is used exactly as before.
+const BASE_GATES_FILE = process.env.BASE_GATES_FILE || "";
+const CONFIG_FILE = BASE_GATES_FILE || GATES_FILE;
 
 // Surface a line both in stdout and, when running in Actions, the check's job
 // summary. Summary writes are best-effort — a summary hiccup must never mask a
@@ -47,8 +55,8 @@ const notice = (msg) => console.log(`::notice::${msg}`);
 const warning = (msg) => console.log(`::warning::${msg}`);
 const errorAnnot = (msg) => console.log(`::error::${msg}`);
 
-if (!existsSync(GATES_FILE)) {
-  const msg = `Gates file not found: ${GATES_FILE}. Cannot verify — expected the project's GATES.md at the repo root.`;
+if (!existsSync(CONFIG_FILE)) {
+  const msg = `Gates file not found: ${CONFIG_FILE}. Cannot verify — expected the project's GATES.md at the repo root.`;
   errorAnnot(msg);
   console.error(msg);
   process.exit(1);
@@ -56,10 +64,10 @@ if (!existsSync(GATES_FILE)) {
 
 let gates;
 try {
-  gates = parseGates(readFileSync(GATES_FILE, "utf8"), GATES_FILE);
+  gates = parseGates(readFileSync(CONFIG_FILE, "utf8"), CONFIG_FILE);
 } catch (e) {
   if (!(e instanceof GateParseError)) throw e;
-  const msg = `Cannot verify — ${GATES_FILE} has an unparseable gate row, refusing to run a possibly-truncated command. ${e.message}`;
+  const msg = `Cannot verify — ${CONFIG_FILE} has an unparseable gate row, refusing to run a possibly-truncated command. ${e.message}`;
   errorAnnot(msg);
   summary(`### Gates\n\n❌ ${msg}`);
   console.error(msg);
@@ -67,14 +75,38 @@ try {
 }
 
 if (gates.length === 0) {
-  const msg = `No gate rows found in ${GATES_FILE}. Nothing to verify — add a gates table with at least one row.`;
+  const msg = `No gate rows found in ${CONFIG_FILE}. Nothing to verify — add a gates table with at least one row.`;
   notice(msg);
   summary(`### Gates\n\n${msg}`);
   console.log(msg);
   process.exit(0);
 }
 
-summary(`### Gates (${GATES_FILE})\n`);
+summary(`### Gates (${CONFIG_FILE})\n`);
+
+// Criterion 2 (#84): when we judged by a base copy, a PR that also edits its own
+// GATES.md must be flagged — the edit is deferred to the reviewer and applies
+// only after merge, never silently to the PR that introduced it.
+if (BASE_GATES_FILE) {
+  let headText = "";
+  try {
+    headText = existsSync(GATES_FILE) ? readFileSync(GATES_FILE, "utf8") : "";
+  } catch {
+    headText = "";
+  }
+  let baseText = "";
+  try {
+    baseText = readFileSync(BASE_GATES_FILE, "utf8");
+  } catch {
+    baseText = "";
+  }
+  if (headText !== baseText) {
+    const msg = `This PR modifies ${GATES_FILE}. Gates ran from the base branch's config, so the change is judged by the reviewer and only takes effect after merge.`;
+    warning(msg);
+    summary(`\n> ⚠️ **${GATES_FILE} changed in this PR** — gates ran from the base-branch config; the edit applies only after merge.\n`);
+  }
+}
+
 let run = 0;
 let skipped = 0;
 for (const { order, gate, command } of gates) {

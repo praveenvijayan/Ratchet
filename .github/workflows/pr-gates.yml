@@ -26,8 +26,30 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "20"
+      # Judge the PR by the gate config on the BASE branch, not the copy the PR
+      # ships (issue #84). The head checkout's GATES.md is untrusted here: a PR
+      # could blank its own gate rows and go green. Extract the base-branch
+      # GATES.md to a temp file and pass it as BASE_GATES_FILE; run-gates.mjs
+      # treats that as authoritative and flags any in-PR GATES.md edit.
+      - name: Extract base-branch GATES.md
+        id: base_gates
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          dest="$RUNNER_TEMP/base-GATES.md"
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          if git cat-file -e "$BASE_SHA:GATES.md" 2>/dev/null; then
+            git show "$BASE_SHA:GATES.md" > "$dest"
+            echo "file=$dest" >> "$GITHUB_OUTPUT"
+            echo "Judging this PR by GATES.md from base $BASE_SHA."
+          else
+            echo "::warning::Base branch has no GATES.md at $BASE_SHA; judging by the PR's own copy."
+          fi
       - name: Run GATES.md gates
         run: node scripts/run-gates.mjs
+        env:
+          BASE_GATES_FILE: ${{ steps.base_gates.outputs.file }}
 
   # Enforce the AGENTS.md step 3 scope cap mechanically: an oversized agent PR
   # is the biggest drain on review, the loop's bottleneck. Thresholds live in
@@ -41,9 +63,28 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "20"
+      # Same base-config trust boundary as the gates job (issue #84): the size
+      # thresholds and exclude_paths must come from the base branch, so a PR
+      # cannot raise its own limit or exclude its own files to pass.
+      - name: Extract base-branch GATES.md
+        id: base_gates
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          dest="$RUNNER_TEMP/base-GATES.md"
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          if git cat-file -e "$BASE_SHA:GATES.md" 2>/dev/null; then
+            git show "$BASE_SHA:GATES.md" > "$dest"
+            echo "file=$dest" >> "$GITHUB_OUTPUT"
+            echo "Judging this PR by GATES.md from base $BASE_SHA."
+          else
+            echo "::warning::Base branch has no GATES.md at $BASE_SHA; judging by the PR's own copy."
+          fi
       - name: Check agent PR size
         run: node scripts/pr-size-check.mjs
         env:
+          BASE_GATES_FILE: ${{ steps.base_gates.outputs.file }}
           PR_ADDITIONS: ${{ github.event.pull_request.additions }}
           PR_DELETIONS: ${{ github.event.pull_request.deletions }}
           PR_CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
