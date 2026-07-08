@@ -125,7 +125,15 @@ function findCycles(plans) {
 }
 
 async function main() {
-  const files = (await readdir(PLAN_DIR)).filter((f) => f.endsWith(".md") && f !== "README.md");
+  // Top-level *.md only. Subdirectories are deliberately never scanned — notably
+  // plan/done/, where the archive sweep (scripts/archive-closed-plans.mjs) parks
+  // the plan files of closed issues. Those issues still carry their plan-id
+  // marker, so a blocked_by pointing at an archived slug keeps resolving through
+  // the marker (see the regression test) even though the file is out of scope.
+  const entries = await readdir(PLAN_DIR, { withFileTypes: true });
+  const files = entries
+    .filter((e) => e.isFile() && e.name.endsWith(".md") && e.name !== "README.md")
+    .map((e) => e.name);
 
   // Pass 1: parse plan files (no network yet). Done first so the blocked_by
   // cycle gate below can fail before we touch GitHub — a deadlocked plan set

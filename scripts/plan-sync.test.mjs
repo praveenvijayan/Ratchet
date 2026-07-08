@@ -9,7 +9,7 @@
 // the loud warning for slugs that resolve to nothing.
 
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -51,12 +51,40 @@ Body of 0077.
 ## Acceptance criteria
 - [ ] never created
 `);
+// #21 AC3: a plan whose only blocker was ARCHIVED (its file moved to plan/done/,
+// its issue CLOSED) must still resolve the link through the closed issue's
+// marker — and, being closed, that blocker must not force state:blocked.
+await writeFile(join(planDir, "0088-depends-on-archived.md"), `---
+title: Depends on an archived plan
+priority: low
+blocked_by: [0002-archived-closed]
+---
+Body of 0088.
+
+## Acceptance criteria
+- [ ] something
+`);
+// #21 AC2: plan-sync must ignore plan/done/ entirely — a plan file parked there
+// is never scanned and never becomes an issue.
+await mkdir(join(planDir, "done"), { recursive: true });
+await writeFile(join(planDir, "done", "0099-archived.md"), `---
+title: Already archived, must be ignored
+priority: high
+blocked_by: []
+---
+Body of 0099.
+
+## Acceptance criteria
+- [ ] must never be synced
+`);
 
 // --- in-memory GitHub API ----------------------------------------------
 const label = (name) => ({ name });
 const issues = new Map([
   // Issue whose plan file is gone: must still resolve via its marker.
   [10, { number: 10, state: "open", title: "Removed plan", labels: [label("state:ready"), label("priority:P2")], body: "Old body\n\n<!-- plan-id: 0001-removed-plan -->" }],
+  // Archived blocker: its plan file lives in plan/done/, its issue is CLOSED.
+  [12, { number: 12, state: "closed", title: "Archived", labels: [], body: "Old body\n\n<!-- plan-id: 0002-archived-closed -->" }],
   // The editable issue that gains blockers on this sync.
   [68, { number: 68, state: "open", title: "Existing", labels: [label("state:ready"), label("priority:P1")], body: "Old body\n\n<!-- plan-id: 0036-existing -->" }],
 ]);
@@ -131,6 +159,18 @@ assert.ok(
   "unknown frontmatter key must be warned about, naming the file and key",
 );
 
+// #21 AC3: a blocked_by pointing at an archived (closed-issue) slug resolves
+// through the marker, so the new issue links `Blocked by #12`; and because that
+// blocker is closed, the issue is not frozen — it lands state:ready.
+const dependsOnArchived = [...issues.values()].find((i) => i.body.includes("plan-id: 0088-depends-on-archived"));
+assert.ok(dependsOnArchived, "0088 issue was created");
+assert.ok(dependsOnArchived.body.includes("Blocked by #12"), "an archived slug must still resolve to its closed issue via the marker");
+assert.ok(names(dependsOnArchived).includes("state:ready"), `a closed blocker must not freeze the issue, got: ${names(dependsOnArchived)}`);
+
+// #21 AC2: nothing in plan/done/ is ever scanned — 0099 never becomes an issue.
+const archivedSynced = [...issues.values()].find((i) => (i.body || "").includes("plan-id: 0099-archived"));
+assert.ok(!archivedSynced, "a plan file in plan/done/ must never be synced");
+
 // --- blocked_by cycle gate ----------------------------------------------
 // A two-file cycle (each blocked_by the other) is a deadlock: sync must fail
 // loudly, naming every slug, and change nothing. Run as a subprocess because
@@ -174,4 +214,4 @@ assert.ok(cycleExit !== 0, "plan-sync must exit non-zero on a blocked_by cycle")
 assert.ok(/cycle/i.test(cycleErr), `cycle error must say so loudly, got: ${cycleErr}`);
 assert.ok(/0005-a/.test(cycleErr) && /0006-b/.test(cycleErr), `cycle error must name every slug, got: ${cycleErr}`);
 
-console.log("PASS plan-sync.test.mjs (13 assertions)");
+console.log("PASS plan-sync.test.mjs (17 assertions)");

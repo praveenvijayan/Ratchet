@@ -57,6 +57,23 @@ is the **slug**: it is the permanent identity of the issue and how other files
 reference it as a dependency. Never rename a file after its issue is created;
 the rename orphans the link and creates a duplicate.
 
+## Archiving closed plans
+
+Plan files are not deleted when their issues close — they are **archived**. Run
+the dedicated sweep periodically (for example alongside `/ratchet-memory`):
+
+```sh
+node scripts/archive-closed-plans.mjs
+```
+
+It moves every `plan/*.md` whose issue is **closed** into `plan/done/`, keeping
+the active `plan/` directory a map of live work while history stays on disk and
+in git. It only *moves* files — review the renames and commit them, so the
+archive lands as one reviewable change. This is safe: `plan-sync` never scans
+`plan/done/`, and it resolves every `blocked_by` through the issue's
+`<!-- plan-id: slug -->` marker, so a dependency on an archived slug keeps
+working. Never edit files under `plan/done/`; they are frozen history.
+
 ## Format
 
 ```markdown
