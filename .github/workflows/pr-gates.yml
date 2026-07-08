@@ -27,3 +27,22 @@ jobs:
           node-version: "20"
       - name: Run GATES.md gates
         run: node scripts/run-gates.mjs
+
+  # Enforce the AGENTS.md step 3 scope cap mechanically: an oversized agent PR
+  # is the biggest drain on review, the loop's bottleneck. Thresholds live in
+  # GATES.md; the PR's size comes from the event payload. A separate job so the
+  # red check reads "size" distinctly from the gate failures.
+  size:
+    if: startsWith(github.head_ref, 'agent/issue-')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Check agent PR size
+        run: node scripts/pr-size-check.mjs
+        env:
+          PR_ADDITIONS: ${{ github.event.pull_request.additions }}
+          PR_DELETIONS: ${{ github.event.pull_request.deletions }}
+          PR_CHANGED_FILES: ${{ github.event.pull_request.changed_files }}

@@ -165,6 +165,20 @@ current issue. If scope exceeds the issue (~400 changed lines or ~6 files),
 remove `state:in-progress`, and exit. Scope creep is a planning failure, not a
 licence to improvise.
 
+**Renew your lease on long builds — the heartbeat.** `sweep-stale-claims`
+reclaims any `state:in-progress` issue that shows no activity for `STALE_HOURS`,
+so a crashed agent never freezes an issue. But you only push once the gates are
+green (step 4), so a legitimate build can run past `STALE_HOURS` with nothing
+pushed — indistinguishable from a crash unless you signal life. To renew the
+lease **without pushing red code**, post a **heartbeat**: an issue comment whose
+body contains the marker `<!-- ratchet-heartbeat -->`, at least once per
+`STALE_HOURS` while you work. The sweep measures freshness from the newest of
+your commits, your heartbeats, and the claim event, so a fresh heartbeat keeps
+the claim yours no matter how long the original claim has been open. Stop
+heart-beating (a crash) and the sweep still reclaims the issue after
+`STALE_HOURS` — the crash-recovery path is untouched. A commit or push counts as
+activity too; the heartbeat is only for stretches where nothing is pushed.
+
 
 ### 4. Verify — locally, fail-fast, before pushing
 Run the **Gates** in order. Stop at the first failure. Before calling the work
@@ -215,7 +229,10 @@ it becomes a new `plan/*.md` file. Fix what's wrong; queue what's new.
 A human merges. GitHub closes the issue via `Closes #<N>`. Two workflows react:
 `unblock-dependents` flips newly-unblocked issues to `state:ready` (this is what
 makes step 1 fire again), and `sweep-stale-claims` returns abandoned
-`state:in-progress` issues to `state:ready`. Nothing waits on anyone
+`state:in-progress` issues to `state:ready` — measuring activity from the newest
+of the branch's commits, a heartbeat comment (`<!-- ratchet-heartbeat -->`) an
+agent posts during a long build, or the claim event, so a live-but-quiet claim
+is never reclaimed while a crashed one still is. Nothing waits on anyone
 remembering anything.
 
 ---
@@ -286,6 +303,49 @@ unattended execution, but it is off by default and not required.)
 
 ---
 
+## Hotfix / revert fast lane (production breakage only)
+
+The forward-only loop assumes there is time for a planning-PR round trip. A
+production outage does not. This is the **one** sanctioned exception to the
+plan-first rule — narrow, explicit, and still human-gated.
+
+**It exists only on an explicit human trigger.** A human says "hotfix" or
+"revert PR #M" (in chat, or via a watcher event pointed at that PR). An agent
+that merely *suspects* a merge broke production never invokes it on its own — it
+reports what it sees and waits for the human to pull the trigger. No
+self-invocation, ever. This is the only case in which you may open a branch and
+a PR without a `state:ready` issue behind it (the exception Hard Rule 0 names).
+
+**What it skips, and what it keeps.** It skips **only** the `plan/*.md` →
+planning-PR → sync round trip. It still ends in a normal PR that a human reviews
+and merges, and it still runs the `GATES.md` gates first. The merge/review gate
+is never skipped — only the planning detour is.
+
+**Pick the mode by what stops the bleeding fastest and safest:**
+
+- **Revert (default — prefer this).** When a specific merged PR is the cause and
+  undoing it is clean, revert that merge on a fresh `hotfix/<slug>` branch off
+  `main`: `git revert -m 1 <merge-sha>`. It is the fastest, lowest-risk path
+  because it returns `main` to a known-good state. Use it **unless** a revert is
+  impossible or would itself cause harm.
+- **Forward hotfix.** When a revert would tear out unrelated good work that
+  shipped in the same merge, or the fix is a small correction a revert cannot
+  express, make the minimal targeted change on the same `hotfix/<slug>` branch
+  instead. Keep it to the smallest change that ends the incident.
+
+**Steps.** Branch `hotfix/<slug>` off current `main` (in a worktree, as always),
+make the revert or the fix, run the `GATES.md` gates (`scripts/run-gates.mjs`)
+fail-fast, then open a PR titled `hotfix: <what broke>` that names the offending
+merge — and **stop for human review**. You never merge.
+
+**Close the loop back into the normal system.** Once the bleeding is stopped,
+the incident becomes a normal `plan/*.md` (via `/ratchet-plan`) capturing the
+root cause with acceptance criteria. The hotfix stops the symptom now; the plan
+file puts the durable fix back in the queue, to be built, reviewed, and merged
+the ordinary way. A hotfix with no follow-up plan file is an unfinished hotfix.
+
+---
+
 ## Gates (defined in GATES.md)
 
 
@@ -320,7 +380,11 @@ claim; the labels make state visible to humans.
    `plan/*.md` for it (with acceptance criteria) or create a `state:ready` issue,
    then STOP. Finding the fix is not permission to apply it. Going from "found a
    bug" straight to editing files is the single worst protocol violation — it
-   bypasses the issue, the branch, and the human review gate all at once.
+   bypasses the issue, the branch, and the human review gate all at once. The
+   **only** exception is the human-triggered hotfix/revert fast lane (see
+   "Hotfix / revert fast lane"): it may skip the planning round trip, but only
+   on an explicit human trigger, and it still ends in a human-reviewed PR — it
+   never lets you self-invoke or skip review.
 1. Issues come only from `plan/*.md` via sync. Never hand-author issues unless
    explicitly told to.
 2. The claim is the `agent/issue-<N>` ref, created server-side off up-to-date
