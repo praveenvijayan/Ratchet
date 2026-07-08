@@ -9,6 +9,7 @@
 //   2. Gate commands are parsed from GATES.md itself.
 //   3. A failing gate exits non-zero with the gate's name in the check summary.
 //   4. A TODO: row is skipped with a visible notice, never treated as passed.
+// Plus #47 AC3: the summary names each distinct test gate it ran.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -95,4 +96,19 @@ const fail = "`node -e \"process.exit(3)\"`";
   assert.ok(!/passed/i.test(summary), "a skipped TODO gate must never be reported as passed");
 }
 
-console.log("PASS run-gates.test.mjs (4 criteria, 13 assertions)");
+// --- #47 AC3: the summary names each distinct test gate it ran, so a reviewer
+// reads suite-by-suite coverage at a glance rather than identical "test" rows --
+{
+  const { status, summary } = await runGates([
+    { order: 1, gate: "test: plan-sync", command: echo("A") },
+    { order: 2, gate: "test: criteria", command: echo("B") },
+    { order: 3, gate: "format", command: "TODO: format command" },
+  ]);
+  assert.equal(status, 0, "all runnable gates passing must exit zero");
+  for (const name of ["test: plan-sync", "test: criteria"]) {
+    assert.ok(summary.includes(name), `the summary must name the test gate "${name}" it ran`);
+  }
+  assert.ok(/passed/i.test(summary), "each ran gate is reported as passed under its own name");
+}
+
+console.log("PASS run-gates.test.mjs (5 criteria, 18 assertions)");

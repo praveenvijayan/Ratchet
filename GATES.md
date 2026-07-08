@@ -32,17 +32,32 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 | 1     | format      | TODO: format command              | —              |
 | 2     | typecheck   | TODO: typecheck command           | —              |
 | 3     | lint        | TODO: lint command                | —              |
-| 4     | test        | `node scripts/plan-sync.test.mjs` | exit 0         |
-| 4b    | test        | `node scripts/plan-sync-concurrency.test.mjs` | exit 0 |
-| 4c    | test        | `node scripts/release.test.mjs`   | exit 0 |
-| 4d    | test        | `node scripts/sweep-stale-claims.test.mjs` | exit 0 |
-| 4e    | test        | `node scripts/archive-closed-plans.test.mjs` | exit 0 |
-| 4f    | test        | `node scripts/unblock-dependents.test.mjs` | exit 0 |
-| 4g    | test        | `node scripts/ratchet-update.test.mjs` | exit 0 |
-| 4h    | test        | `node scripts/archive-closed-plans-workflow.test.mjs` | exit 0 |
+| 4a    | test: plan-sync                 | `node scripts/plan-sync.test.mjs`                 | exit 0 |
+| 4b    | test: plan-sync-concurrency     | `node scripts/plan-sync-concurrency.test.mjs`     | exit 0 |
+| 4c    | test: release                   | `node scripts/release.test.mjs`                   | exit 0 |
+| 4d    | test: sweep-stale-claims        | `node scripts/sweep-stale-claims.test.mjs`        | exit 0 |
+| 4e    | test: archive-closed-plans      | `node scripts/archive-closed-plans.test.mjs`      | exit 0 |
+| 4f    | test: archive-closed-plans-workflow | `node scripts/archive-closed-plans-workflow.test.mjs` | exit 0 |
+| 4g    | test: unblock-dependents        | `node scripts/unblock-dependents.test.mjs`        | exit 0 |
+| 4h    | test: ratchet-update            | `node scripts/ratchet-update.test.mjs`            | exit 0 |
+| 4i    | test: criteria                  | `node scripts/criteria.test.mjs`                  | exit 0 |
+| 4j    | test: pr-size-check             | `node scripts/pr-size-check.test.mjs`             | exit 0 |
+| 4k    | test: run-gates                 | `node scripts/run-gates.test.mjs`                 | exit 0 |
+| 4l    | test: sweep-lease               | `node scripts/sweep-lease.test.mjs`               | exit 0 |
+| 4m    | test: verify-issue-body         | `node scripts/verify-issue-body.test.mjs`         | exit 0 |
+| 4n    | test: ratchet-metrics           | `node scripts/ratchet-metrics.test.mjs`           | exit 0 |
+| 4o    | test: docs-refresh              | `node scripts/docs-refresh.test.mjs`              | exit 0 |
+| 4p    | test: ratchet-init-skill        | `node scripts/ratchet-init-skill.test.mjs`        | exit 0 |
+| 4q    | test: gates-coverage            | `node scripts/gates-coverage.test.mjs`            | exit 0 |
+| 4r    | test-coverage                   | `node scripts/gates-coverage.mjs`                 | exit 0 |
 | 5     | build       | TODO: build command               | —              |
 | 6     | audit       | TODO: audit command               | —              |
 | 7     | secret-scan | TODO: secret-scan command         | —              |
+
+Each `scripts/*.test.mjs` suite gets its own named `test:` row so `run-gates`
+lists every suite it ran (coverage at a glance). The `test-coverage` gate
+(`scripts/gates-coverage.mjs`) fails if a suite exists that no row above runs,
+so a new suite can never be added without wiring it in here.
 
 ## PR size limit (agent PRs)
 
