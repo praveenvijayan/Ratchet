@@ -14,14 +14,15 @@ REMOTE_URL="${RATCHET_REMOTE:-https://github.com/praveenvijayan/Ratchet.git}"
 REF="${1:-main}"
 
 # Framework-owned paths — safe to overwrite from upstream.
-# Deliberately EXCLUDES: GATES.md, memory/, plan/*.md (issues), .env, README.md,
-# LICENSE, .gitignore — those are project-owned.
+# The whole `scripts/` directory ships so that every script a shipped workflow
+# invokes (and every helper those scripts import) always lands in the consumer
+# repo — the list can't drift behind the workflows. `scripts/ratchet-update.test.mjs`
+# guards this. Deliberately EXCLUDES: GATES.md, memory/, plan/*.md (issues),
+# .env, README.md, LICENSE, .gitignore — those are project-owned.
 FRAMEWORK_PATHS=(
   .agents .claude plugin .claude-plugin
   .github/workflows
-  scripts/plan-sync.mjs scripts/ratchet-update.sh
-  scripts/ratchet-watch.sh scripts/ratchet-watch.mjs
-  scripts/ratchet-uninstall.sh
+  scripts
   setup.sh
   plan/README.md
   AGENTS.md CLAUDE.md GEMINI.md DOCS.md
@@ -58,4 +59,4 @@ printf '%s\n' "$NEWVER" > .ratchet-version
 echo
 echo "Ratchet framework updated to: $NEWVER"
 echo "Untouched (project-owned): GATES.md, memory/, plan/ issues, .env, README.md, LICENSE, .gitignore, your code."
-echo "Next: review 'git diff', and if your stack changed, re-run /factory-init to refresh GATES.md."
+echo "Next: review 'git diff', and if your stack changed, re-run /ratchet-init to refresh GATES.md."

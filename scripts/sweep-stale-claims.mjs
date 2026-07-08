@@ -15,6 +15,7 @@
 // branch's last commit, a heartbeat comment, and the claim event. Reusing it here
 // keeps "is this claim alive?" defined in exactly one place.
 import { leaseReference, isStale, isHeartbeat } from "./sweep-lease.mjs";
+import { classifyRequeue } from "./criteria.mjs";
 import { fileURLToPath } from "node:url";
 
 // The three lifecycle states the sweep patrols. state:in-progress is the
@@ -48,9 +49,20 @@ export const SWEEP_COMMENT_PREFIXES = {
 //   input.claimAt      — most recent state:in-progress labeled-event time, or null
 //   input.heartbeatAt  — most recent lease-heartbeat comment time, or null
 //   input.updatedAt    — issue.updated_at
-//   input.hasOpenPr    — an open PR exists from agent/issue-<N> (in-review only)
+//   input.branchExists — false when the agent branch is known to be gone
+//   input.prState      — open/merged/closed-with-feedback/closed/unknown (in-review only)
+//   input.prNumber     — matching PR number, when known
+//   input.prClosedAt   — closed PR timestamp, when known
+//   input.reworkGraceMs — configurable grace before closed feedback is requeued
+//   input.reworkGraceHours — same window as a string, for comment text
 // Returns { sweep: false } to leave the issue untouched, or
-// { sweep: true, deleteRef, comment } to requeue it to state:ready.
+// { sweep: true, deleteRef, targetState, reason, comment } to move it to
+// targetState. `reason` is the diagnostic sentence (why the claim was
+// reclaimed); `comment` is the full note, reason plus the outcome sentence.
+// The orchestration re-reads the issue at write time and runs the decision
+// through classifyRequeue, which rebuilds the comment from `reason` and
+// downgrades a state:ready outcome to state:draft when the live body has lost
+// its acceptance criteria.
 export function decideSweep(input) {
   switch (input.state) {
     case "state:in-progress": return decideInProgress(input);
@@ -65,7 +77,7 @@ export function decideSweep(input) {
 // shared lease rule, otherwise a quiet main would make every fresh, still-
 // building claim look instantly stale. A zero-commit claim (aheadBy === 0) must
 // not time from its tip (which IS main HEAD), so its commit signal is withheld.
-function decideInProgress({ now, staleMs, staleHours, branch, aheadBy, lastCommitAt, claimAt, heartbeatAt, updatedAt }) {
+function decideInProgress({ now, staleMs, staleHours, branch, branchExists = true, aheadBy, lastCommitAt, claimAt, heartbeatAt, updatedAt }) {
   const { ref, source } = leaseReference({
     lastCommitAt: aheadBy > 0 ? lastCommitAt : null,
     heartbeatAt, claimAt, fallbackAt: updatedAt,
@@ -76,23 +88,55 @@ function decideInProgress({ now, staleMs, staleHours, branch, aheadBy, lastCommi
   // keep it for a human to inspect.
   const deleteRef = aheadBy === 0;
   const prefix = SWEEP_COMMENT_PREFIXES["state:in-progress"];
-  const comment = deleteRef
-    ? `${prefix} \`${branch}\` had no work for >${staleHours}h (measured from ${source}). Orphaned claim ref deleted; issue returned to \`state:ready\`.`
-    : `${prefix} no activity on \`${branch}\` for >${staleHours}h (measured from ${source}). Branch kept (has commits); issue returned to \`state:ready\`.`;
-  return { sweep: true, deleteRef, comment };
+  let reason;
+  if (branchExists === false) {
+    reason = `${prefix} branch no longer exists for \`${branch}\` and no activity was found for >${staleHours}h (measured from ${source}).`;
+  } else {
+    reason = deleteRef
+      ? `${prefix} \`${branch}\` had no work for >${staleHours}h (measured from ${source}). Orphaned claim ref deleted.`
+      : `${prefix} no activity on \`${branch}\` for >${staleHours}h (measured from ${source}). Branch kept (has commits).`;
+  }
+  return { sweep: true, deleteRef, targetState: "state:ready", reason, comment: `${reason} Issue returned to \`state:ready\`.` };
 }
 
-// in-review: an issue whose PR was closed or abandoned (not merged) stays in
-// review forever. The trigger is structural, not time-based — no open PR from
-// the claim branch means nothing is driving it to merge, so requeue it. A
-// still-open PR is live review work: never touched. The branch reached review,
-// so it has commits — never delete it.
-function decideInReview({ branch, hasOpenPr }) {
-  if (hasOpenPr) return { sweep: false };
+// in-review: use the actual PR state from the agent branch. A still-open PR is
+// live review work. A merged PR means the work is already done but the issue
+// stayed open, so keep it out of the ready queue and make the human cleanup
+// visible. A closed PR with review feedback gets a grace window before requeue,
+// because AGENTS.md routes that path through same-branch rework.
+function decideInReview({ now, branch, prState = "closed", prNumber = null, prClosedAt = null, reworkGraceMs = 0, reworkGraceHours = "0" }) {
+  const prefix = SWEEP_COMMENT_PREFIXES["state:in-review"];
+  if (prState === "open" || prState === "unknown") return { sweep: false };
+  if (prState === "merged") {
+    const reason = `${prefix} \`${branch}\` is \`state:in-review\`, but PR #${prNumber} was merged while this issue stayed open.`;
+    return {
+      sweep: true,
+      deleteRef: false,
+      targetState: "state:blocked",
+      reason,
+      comment: `${reason} Issue moved to \`state:blocked\` for human cleanup instead of \`state:ready\`, so merged work is not re-picked.`,
+    };
+  }
+  if (prState === "closed-with-feedback" && (!prClosedAt || now - prClosedAt < reworkGraceMs)) {
+    return { sweep: false };
+  }
+  if (prState === "closed-with-feedback") {
+    const reason = `${prefix} \`${branch}\` is \`state:in-review\`, and PR #${prNumber} was closed with review feedback more than ${reworkGraceHours}h ago.`;
+    return {
+      sweep: true,
+      deleteRef: false,
+      targetState: "state:ready",
+      reason,
+      comment: `${reason} Issue returned to \`state:ready\` so it can be re-picked.`,
+    };
+  }
+  const reason = `${prefix} \`${branch}\` is \`state:in-review\` but has no open PR from the agent branch.`;
   return {
     sweep: true,
     deleteRef: false,
-    comment: `${SWEEP_COMMENT_PREFIXES["state:in-review"]} \`${branch}\` is \`state:in-review\` but has no open PR (closed or abandoned without merge). Issue returned to \`state:ready\` so it can be re-picked.`,
+    targetState: "state:ready",
+    reason,
+    comment: `${reason} Issue returned to \`state:ready\` so it can be re-picked.`,
   };
 }
 
@@ -105,10 +149,13 @@ function decideInReview({ branch, hasOpenPr }) {
 function decideChangesRequested({ now, staleMs, staleHours, branch, lastCommitAt, heartbeatAt, updatedAt }) {
   const activity = Math.max(updatedAt, lastCommitAt ?? 0, heartbeatAt ?? 0);
   if (now - activity < staleMs) return { sweep: false };
+  const reason = `${SWEEP_COMMENT_PREFIXES["state:changes-requested"]} \`${branch}\` is \`state:changes-requested\` with no activity for >${staleHours}h.`;
   return {
     sweep: true,
     deleteRef: false,
-    comment: `${SWEEP_COMMENT_PREFIXES["state:changes-requested"]} \`${branch}\` is \`state:changes-requested\` with no activity for >${staleHours}h. Issue returned to \`state:ready\` so it can be re-picked.`,
+    targetState: "state:ready",
+    reason,
+    comment: `${reason} Issue returned to \`state:ready\` so it can be re-picked.`,
   };
 }
 
@@ -157,6 +204,37 @@ async function paginate(gh, path) {
 
 const labelNames = (labels) => labels.map((l) => (typeof l === "string" ? l : l.name));
 
+async function prStateForBranch(gh, repo, owner, branch) {
+  const prs = await gh("GET", `/repos/${repo}/pulls?state=all&head=${owner}:${branch}&per_page=10`);
+  if (prs.some((pr) => pr.state === "open")) return { prState: "open" };
+  const merged = prs.find((pr) => pr.merged_at);
+  if (merged) {
+    return {
+      prState: "merged",
+      prNumber: merged.number,
+      prClosedAt: new Date(merged.closed_at || merged.merged_at).getTime(),
+    };
+  }
+  const closed = prs
+    .filter((pr) => pr.state === "closed")
+    .sort((a, b) => new Date(b.closed_at || 0) - new Date(a.closed_at || 0))[0];
+  if (!closed) return { prState: "closed" };
+
+  let detail = closed;
+  try {
+    detail = await gh("GET", `/repos/${repo}/pulls/${closed.number}`);
+  } catch {
+    // The list response is enough to know the PR is closed; only feedback counts
+    // degrade when the detail read fails.
+  }
+  const hasFeedback = (detail.comments || 0) > 0 || (detail.review_comments || 0) > 0;
+  return {
+    prState: hasFeedback ? "closed-with-feedback" : "closed",
+    prNumber: closed.number,
+    prClosedAt: closed.closed_at ? new Date(closed.closed_at).getTime() : null,
+  };
+}
+
 export async function main() {
   const token = process.env.GITHUB_TOKEN || process.env.GITHUB_PAT;
   const repo = process.env.GITHUB_REPOSITORY;
@@ -166,6 +244,8 @@ export async function main() {
   const owner = repo.split("/")[0];
   const staleHours = process.env.STALE_HOURS || "2";
   const staleMs = Number(staleHours) * 3600 * 1000;
+  const reworkGraceHours = process.env.REWORK_GRACE_HOURS || staleHours;
+  const reworkGraceMs = Number(reworkGraceHours) * 3600 * 1000;
   // SWEEP_NOW pins the clock for the test; production uses the wall clock.
   const now = Number(process.env.SWEEP_NOW) || Date.now();
   const gh = ghClient(token);
@@ -180,13 +260,15 @@ export async function main() {
 
     // Signals are fetched only where a state weighs them; every fetch degrades
     // to the helper's documented fallback rather than failing the whole sweep.
-    let aheadBy = null, lastCommitAt = null, claimAt = null, heartbeatAt = null, hasOpenPr = false;
+    let aheadBy = null, lastCommitAt = null, claimAt = null, heartbeatAt = null, branchExists = true;
+    let prState = "closed", prNumber = null, prClosedAt = null;
 
     if (state === "state:in-progress" || state === "state:changes-requested") {
       try {
         const cmp = await gh("GET", `/repos/${repo}/compare/main...${branch}`);
         aheadBy = cmp.ahead_by;
-      } catch {
+      } catch (e) {
+        if (e.status === 404) branchExists = false;
         // branch absent or uncomparable -> no commit signal
       }
       if (aheadBy > 0) {
@@ -219,35 +301,59 @@ export async function main() {
 
     if (state === "state:in-review") {
       try {
-        const prs = await gh("GET", `/repos/${repo}/pulls?state=open&head=${owner}:${branch}&per_page=1`);
-        hasOpenPr = prs.length > 0;
+        ({ prState, prNumber, prClosedAt } = await prStateForBranch(gh, repo, owner, branch));
       } catch {
-        hasOpenPr = true; // PR list unreadable -> never sweep on doubt
+        prState = "unknown"; // PR list unreadable -> never sweep on doubt
       }
     }
 
     const decision = decideSweep({
       state, now, staleMs, staleHours, branch, aheadBy, lastCommitAt, claimAt, heartbeatAt,
-      updatedAt: new Date(issue.updated_at).getTime(), hasOpenPr,
+      updatedAt: new Date(issue.updated_at).getTime(), branchExists,
+      prState, prNumber, prClosedAt, reworkGraceMs, reworkGraceHours,
     });
     if (!decision.sweep) continue;
 
-    const labels = labelNames(issue.labels).filter((l) => !l.startsWith("state:"));
-    labels.push("state:ready");
+    // Re-read at write time. The listing that produced `issue` may be minutes
+    // and many API calls old, so writing labels from that stale snapshot can
+    // clobber a state change an agent made in the window (e.g. it opened a PR
+    // and moved the issue to state:in-review). Re-read the issue now: if its
+    // state label no longer matches the one this decision was made on, someone
+    // moved it — leave it alone. Otherwise recompute the labels from the fresh
+    // snapshot, and gate the requeue on the fresh body so an issue that lost
+    // its acceptance criteria after promotion is held at state:draft, not
+    // re-exposed as state:ready.
+    let fresh;
+    try {
+      fresh = await gh("GET", `/repos/${repo}/issues/${issue.number}`);
+    } catch {
+      console.log(`skipped #${issue.number}: could not re-read issue before write`);
+      continue; // never overwrite on doubt
+    }
+    const freshLabels = labelNames(fresh.labels || []);
+    const freshState = freshLabels.find((l) => SWEPT_STATES.has(l));
+    if (freshState !== state) {
+      console.log(`skipped #${issue.number}: state changed ${state} -> ${freshState ?? "(none)"} since listing`);
+      continue;
+    }
+
+    const final = classifyRequeue(decision, fresh.body || "");
+    const labels = freshLabels.filter((l) => !l.startsWith("state:"));
+    labels.push(final.targetState || "state:ready");
     await gh("PUT", `/repos/${repo}/issues/${issue.number}/labels`, { labels });
-    if (issue.assignees?.length) {
+    if (fresh.assignees?.length) {
       await gh("DELETE", `/repos/${repo}/issues/${issue.number}/assignees`, {
-        assignees: issue.assignees.map((a) => a.login),
+        assignees: fresh.assignees.map((a) => a.login),
       }).catch(() => {});
     }
-    if (decision.deleteRef) {
+    if (final.deleteRef) {
       await gh("DELETE", `/repos/${repo}/git/refs/heads/${branch}`).catch(() => {});
     }
-    await gh("POST", `/repos/${repo}/issues/${issue.number}/comments`, { body: decision.comment });
-    console.log(`swept #${issue.number} (${state}) -> state:ready${decision.deleteRef ? " (claim ref deleted)" : ""}`);
+    await gh("POST", `/repos/${repo}/issues/${issue.number}/comments`, { body: final.comment });
+    console.log(`swept #${issue.number} (${state}) -> ${final.targetState}${final.deleteRef ? " (claim ref deleted)" : ""}`);
     swept++;
   }
-  console.log(`sweep complete: ${swept} issue(s) returned to state:ready.`);
+  console.log(`sweep complete: ${swept} issue(s) requeued.`);
   return { swept };
 }
 

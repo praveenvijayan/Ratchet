@@ -82,15 +82,17 @@ const fail = "`node -e \"process.exit(3)\"`";
   assert.ok(/FAIL/i.test(summary), "the summary must mark the gate as failed");
 }
 
-// --- Criterion 4: TODO row is skipped with a visible notice, not passed ---
+// --- Criterion 4 / #58 AC3: TODO-only runs are visibly green but vacuous ---
 {
   const { status, out, summary } = await runGates([
     { order: 1, gate: "format", command: "TODO: format command" },
   ]);
   assert.equal(status, 0, "a TODO-only table has nothing to fail on");
   assert.ok(/::notice::/.test(out) && /skip/i.test(out), "a TODO gate must emit a visible skip notice");
+  assert.ok(/::warning::/.test(out) && /vacuous/i.test(out), "a TODO-only green run must emit a vacuous-check warning");
   assert.ok(/skip/i.test(summary), "the TODO gate must be shown as skipped in the summary");
+  assert.ok(/green but vacuous/i.test(summary), "the summary must visibly distinguish no-op green from verified green");
   assert.ok(!/passed/i.test(summary), "a skipped TODO gate must never be reported as passed");
 }
 
-console.log("PASS run-gates.test.mjs (4 criteria, 11 assertions)");
+console.log("PASS run-gates.test.mjs (4 criteria, 13 assertions)");

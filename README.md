@@ -76,10 +76,12 @@ setup.sh                         Sync skills into each tool's location
 The skills: **`/ratchet-plan`** (idea → `plan/*.md`), **`/ratchet-sync`**
 (compile plan files → issues now), **`/ratchet-init`** (one-time: labels, gate
 detection into `GATES.md`, memory scaffold, codebase map, PAT check),
-**`/ratchet-memory`** (prune & dedupe `memory/MEMORY.md`), **`/ratchet-map`**
-(regenerate the coarse codebase map),
-**`/ratchet-update`** (pull a newer framework version, project files untouched),
+**`/ratchet-next`** (advance after merge, or rework after review),
 **`/ratchet-status`** (read-only: why is nothing ready, and what to do),
+**`/ratchet-metrics`** (read-only loop health: cycle time, rework, sweeps,
+queue depth), **`/ratchet-memory`** (prune & dedupe `memory/MEMORY.md`),
+**`/ratchet-map`** (regenerate the coarse codebase map),
+**`/ratchet-update`** (pull a newer framework version, project files untouched),
 **`/ratchet-uninstall`** (cleanly remove Ratchet; keeps your data by default).
 
 ## Install
@@ -93,7 +95,7 @@ detection into `GATES.md`, memory scaffold, codebase map, PAT check),
    ```
    Codex and Antigravity also read `.agents/skills/` directly with no setup.
 3. Run **`/ratchet-init`** in your agent. It creates the labels, detects your
-   stack to fill the Gates table in `AGENTS.md`, and walks you through the PAT.
+   stack to fill `GATES.md`, and walks you through the PAT.
 
 ### Claude Code, one-command alternative
 

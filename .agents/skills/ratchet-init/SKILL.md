@@ -164,24 +164,31 @@ and only after the user explicitly says yes.
    ```
    Interpret the outcome:
    - **`200`** → already protected. Note whether it already requires a PR, the
-     `gates` check, and blocks force pushes.
+     `gates` and `size` checks, applies to administrators, and blocks force
+     pushes.
    - **`404`** (`Branch not protected`) → unprotected.
    - **`403`** → your token cannot even read protection; treat as the
      permission case in step 4 below and still report it.
 
-2. **If it is already protected with all three settings**, there is nothing to
-   do — say so and go to Step 6 (this keeps the skill idempotent).
+2. **If it is already protected with all offered settings**, there is nothing
+   to do — say so and go to Step 6 (this keeps the skill idempotent).
 
 3. **Otherwise, offer — describe the exact changes and ask the user to confirm.**
    Apply **only** on an explicit yes. The protection to offer:
    - **Require a pull request before merging** — blocks direct pushes to `main`
      (`required_pull_request_reviews` with `required_approving_review_count: 0`;
      the human's merge stays the gate, no forced approval ceremony).
-   - **Require the gates status check** to pass. GitHub reports the
-     `.github/workflows/pr-gates.yml` check under the context name **`gates`**
-     (the job id) — that exact string is what must be required, not the workflow
-     filename, or the requirement would reference a check that never reports and
-     no PR could merge.
+   - **Require the `gates` and `size` status checks** to pass. GitHub reports the
+     `.github/workflows/pr-gates.yml` jobs under the context names **`gates`**
+     and **`size`** (the job ids) — those exact strings are what must be
+     required, not the workflow filename, or the requirements would reference
+     checks that never report and no PR could merge.
+   - **Apply protection to administrators** (`enforce_admins: true`). This is the
+     recommended default for Ratchet because the prescribed agent credentials are
+     normally an owner/admin PAT. If `enforce_admins` is `false`, those
+     owner/admin tokens are exempt from the rule and can bypass the required PR
+     and status checks. Set it to `false` only when the human explicitly wants an
+     admin escape hatch and accepts that trade-off.
    - **Block force pushes and branch deletion** on `main`.
    If the user **declines**, change nothing and record in the report that `main`
    is unprotected by the user's choice. Declining is a valid outcome, not a
@@ -191,8 +198,8 @@ and only after the user explicitly says yes.
    ```
    gh api -X PUT "repos/{owner}/{repo}/branches/main/protection" --input - <<'JSON'
    {
-     "required_status_checks": { "strict": false, "contexts": ["gates"] },
-     "enforce_admins": false,
+     "required_status_checks": { "strict": false, "contexts": ["gates", "size"] },
+     "enforce_admins": true,
      "required_pull_request_reviews": { "required_approving_review_count": 0 },
      "restrictions": null,
      "allow_force_pushes": false,
@@ -200,9 +207,13 @@ and only after the user explicitly says yes.
    }
    JSON
    ```
-   `enforce_admins: false` deliberately leaves the repo owner an escape hatch for
-   a sanctioned hotfix; the requirement still blocks every agent.
-   - **On success**, re-read protection and confirm the three settings took
+   `enforce_admins: true` is the recommended default: it applies the PR and
+   check requirements to owner/admin PATs too, so agents using those credentials
+   are bound by protection. If the human explicitly asks for
+   `enforce_admins: false`, state that owner/admin PATs are exempt and can
+   bypass the rule; treat that as a conscious hotfix escape hatch, not the safe
+   default.
+   - **On success**, re-read protection and confirm the offered settings took
      effect; report them.
    - **On a `403`/permission error, do not fail the whole init and do not claim
      success.** Setting protection needs **Administration: Read/Write** on the
@@ -210,8 +221,8 @@ and only after the user explicitly says yes.
      Report *exactly* that the token is missing the administration permission,
      then give the manual fallback:
      1. In the repo, **Settings → Branches → Add rule** for `main`: require a
-        pull request, require the **`gates`** status check, and block force
-        pushes; **or**
+        pull request, require the **`gates`** and **`size`** status checks,
+        apply the rule to administrators, and block force pushes; **or**
      2. re-run `/ratchet-init` with a PAT that has **Administration: Read/Write**
         on this repo.
    - On any other error, report the HTTP status and message rather than
@@ -227,9 +238,10 @@ and only after the user explicitly says yes.
 - State PAT status: `FACTORY_PAT` secret present? `.env` `GITHUB_PAT` present?
   If either is missing, repeat the Step 3 instruction.
 - **Always state `main`'s branch-protection status** (from Step 5): protected
-  with require-PR + `gates` check + no-force-push, partially protected (name the
-  gaps), unprotected by the user's choice, or not set because the token lacked
-  the administration permission (with the manual steps). Never omit this line.
+  with require-PR + `gates`/`size` checks + admin enforcement + no-force-push,
+  partially protected (name the gaps), unprotected by the user's choice, or not
+  set because the token lacked the administration permission (with the manual
+  steps). Never omit this line.
 - Remaining human-owned steps: verify the detected gates; confirm the workflows
   are under `.github/workflows/`.
 

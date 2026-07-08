@@ -6,20 +6,28 @@
 //   1. tags the next version and builds a changelog from merged PR titles
 //   2. safe default — the workflow job is gated on RATCHET_RELEASE
 //   4. no merges since the last tag exits cleanly with a message, not an error
-// plus the first-ever-release edge and the invalid-bump error path.
+// plus the invalid-bump error path, and the idempotent/version-aware criteria:
+//   - a computed tag that already exists exits cleanly, creating nothing (AC1)
+//   - a dangling tag from a partial run advances the version, not collides (AC2)
+//   - the first-ever release seeds from .ratchet-version, not v0.0.1 (AC3)
+//   - DOCS.md's pin-to-tag guidance no longer promises tags that may not exist (AC4)
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { main } from "./release.mjs";
 
 const respond = (data, status = 200) => ({ ok: true, status, json: async () => data, text: async () => JSON.stringify(data) });
 const notFound = () => ({ ok: false, status: 404, json: async () => ({}), text: async () => "Not Found" });
+const conflict = () => ({ ok: false, status: 422, json: async () => ({}), text: async () => "Reference already exists" });
 
 // Build an in-memory GitHub API. `latest` is the /releases/latest payload (or
-// null for a 404 — no releases yet); `pulls` is page 1 of closed PRs; created
-// releases are captured for assertions.
-function mockGitHub({ latest, pulls }) {
+// null for a 404 — no releases yet); `pulls` is page 1 of closed PRs; `tags` is
+// the list of tag names; `existingTags` are tags whose git ref resolves (the
+// pre-flight collision check); `failCreate` makes the release POST return 422.
+// Created releases are captured for assertions.
+function mockGitHub({ latest, pulls, tags = [], existingTags = null, failCreate = false }) {
+  const refTags = existingTags ?? tags;
   const created = [];
   globalThis.fetch = async (url, opts = {}) => {
     const { pathname, searchParams } = new URL(url);
@@ -31,7 +39,15 @@ function mockGitHub({ latest, pulls }) {
     if (method === "GET" && pathname === "/repos/o/r/pulls") {
       return respond(Number(searchParams.get("page")) === 1 ? pulls : []);
     }
+    if (method === "GET" && pathname === "/repos/o/r/tags") {
+      return respond(Number(searchParams.get("page")) === 1 ? tags.map((name) => ({ name })) : []);
+    }
+    if (method === "GET" && pathname.startsWith("/repos/o/r/git/ref/tags/")) {
+      const tag = decodeURIComponent(pathname.slice("/repos/o/r/git/ref/tags/".length));
+      return refTags.includes(tag) ? respond({ ref: `refs/tags/${tag}` }) : notFound();
+    }
     if (method === "POST" && pathname === "/repos/o/r/releases") {
+      if (failCreate) return conflict();
       created.push(body);
       return respond({ ...body, html_url: `https://github.com/o/r/releases/tag/${body.tag_name}` }, 201);
     }
@@ -40,70 +56,174 @@ function mockGitHub({ latest, pulls }) {
   return created;
 }
 
+// Capture console.log for message assertions; returns the collected lines.
+function captureLogs(fn) {
+  const logs = [];
+  const real = console.log;
+  console.log = (...a) => logs.push(a.join(" "));
+  return Promise.resolve()
+    .then(fn)
+    .finally(() => { console.log = real; })
+    .then((result) => ({ result, logs }));
+}
+
+// The tests share the real .ratchet-version file (read by the seed path). Back
+// up its original state and restore it no matter how the run ends, so a crash
+// mid-test never leaves the working tree dirty.
+const SEED_FILE = fileURLToPath(new URL("../.ratchet-version", import.meta.url));
+const seedExisted = existsSync(SEED_FILE);
+const seedOriginal = seedExisted ? readFileSync(SEED_FILE, "utf8") : null;
+const setSeed = (value) => (value === null ? rmSync(SEED_FILE, { force: true }) : writeFileSync(SEED_FILE, value));
+const restoreSeed = () => (seedExisted ? writeFileSync(SEED_FILE, seedOriginal) : rmSync(SEED_FILE, { force: true }));
+
 process.env.GITHUB_TOKEN = "test-token";
 process.env.GITHUB_REPOSITORY = "o/r";
 
-// --- 1. tags the next version and builds a changelog from PR titles ---------
-process.env.RELEASE_BUMP = "minor";
-let created = mockGitHub({
-  latest: { tag_name: "v1.2.3", published_at: "2026-01-01T00:00:00Z" },
-  pulls: [
-    { number: 42, title: "Add feature X", merged_at: "2026-02-01T00:00:00Z" },
-    { number: 41, title: "Fix bug Y", merged_at: "2026-01-15T00:00:00Z" },
-    { number: 40, title: "Old thing before the tag", merged_at: "2025-12-01T00:00:00Z" },
-    { number: 39, title: "Never merged", merged_at: null },
-  ],
-});
-let result = await main();
-assert.equal(result.released, true, "a batch of merged PRs must produce a release");
-assert.equal(created.length, 1, "exactly one release is created");
-assert.equal(created[0].tag_name, "v1.3.0", `minor bump of v1.2.3 must be v1.3.0, got ${created[0].tag_name}`);
-assert.ok(created[0].body.includes("Add feature X (#42)"), "changelog must list a merged PR by title and number");
-assert.ok(created[0].body.includes("Fix bug Y (#41)"), "changelog must list every PR merged since the last tag");
-assert.ok(!created[0].body.includes("Old thing"), "PRs merged before the last tag are excluded");
-assert.ok(!created[0].body.includes("Never merged"), "unmerged PRs are excluded");
-
-// --- 4. no merges since the last tag: clean exit, a message, no error --------
-process.env.RELEASE_BUMP = "patch";
-created = mockGitHub({
-  latest: { tag_name: "v1.3.0", published_at: "2026-03-01T00:00:00Z" },
-  pulls: [{ number: 50, title: "Merged long ago", merged_at: "2026-02-01T00:00:00Z" }],
-});
-const logs = [];
-const realLog = console.log;
-console.log = (...a) => logs.push(a.join(" "));
 try {
+  // --- 1. tags the next version and builds a changelog from PR titles ---------
+  process.env.RELEASE_BUMP = "minor";
+  let created = mockGitHub({
+    latest: { tag_name: "v1.2.3", published_at: "2026-01-01T00:00:00Z" },
+    tags: ["v1.2.3"],
+    pulls: [
+      { number: 42, title: "Add feature X", merged_at: "2026-02-01T00:00:00Z" },
+      { number: 41, title: "Fix bug Y", merged_at: "2026-01-15T00:00:00Z" },
+      { number: 40, title: "Old thing before the tag", merged_at: "2025-12-01T00:00:00Z" },
+      { number: 39, title: "Never merged", merged_at: null },
+    ],
+  });
+  let result = await main();
+  assert.equal(result.released, true, "a batch of merged PRs must produce a release");
+  assert.equal(created.length, 1, "exactly one release is created");
+  assert.equal(created[0].tag_name, "v1.3.0", `minor bump of v1.2.3 must be v1.3.0, got ${created[0].tag_name}`);
+  assert.ok(created[0].body.includes("Add feature X (#42)"), "changelog must list a merged PR by title and number");
+  assert.ok(created[0].body.includes("Fix bug Y (#41)"), "changelog must list every PR merged since the last tag");
+  assert.ok(!created[0].body.includes("Old thing"), "PRs merged before the last tag are excluded");
+  assert.ok(!created[0].body.includes("Never merged"), "unmerged PRs are excluded");
+
+  // --- 4. no merges since the last tag: clean exit, a message, no error --------
+  process.env.RELEASE_BUMP = "patch";
+  created = mockGitHub({
+    latest: { tag_name: "v1.3.0", published_at: "2026-03-01T00:00:00Z" },
+    tags: ["v1.3.0"],
+    pulls: [{ number: 50, title: "Merged long ago", merged_at: "2026-02-01T00:00:00Z" }],
+  });
+  ({ result } = await captureLogs(main).then(({ result, logs }) => {
+    assert.ok(logs.some((l) => l.includes("Nothing to release")), "a clear 'nothing to release' message is printed");
+    return { result };
+  }));
+  assert.equal(result.released, false, "no PRs since the tag means nothing is released");
+  assert.equal(created.length, 0, "no release is created when there is nothing to ship");
+
+  // --- AC3. first-ever release seeds its version from .ratchet-version ---------
+  // No tags and no prior release: the version must come from .ratchet-version
+  // (shipped as advertised), not the bare v0.0.1 the old code produced.
+  process.env.RELEASE_BUMP = "patch";
+  setSeed("3.3.6\n");
+  created = mockGitHub({
+    latest: null,
+    tags: [],
+    pulls: [{ number: 1, title: "Initial commit of the thing", merged_at: "2026-01-01T00:00:00Z" }],
+  });
   result = await main();
+  assert.equal(created.length, 1, "the first release is created");
+  assert.equal(created[0].tag_name, "v3.3.6", `first release must seed from .ratchet-version (v3.3.6), got ${created[0].tag_name}`);
+  assert.ok(created[0].body.includes("Initial commit of the thing (#1)"), "first changelog includes all merged PRs");
+
+  // Seed fallback: with no .ratchet-version and no tags, fall back to v0.0.1.
+  setSeed(null);
+  created = mockGitHub({
+    latest: null,
+    tags: [],
+    pulls: [{ number: 1, title: "Initial commit", merged_at: "2026-01-01T00:00:00Z" }],
+  });
+  result = await main();
+  assert.equal(created[0].tag_name, "v0.0.1", `without .ratchet-version the first release bumps from v0.0.0, got ${created[0].tag_name}`);
+
+  // Malformed .ratchet-version is a clear error on the first release, not a crash.
+  setSeed("not-a-version\n");
+  mockGitHub({ latest: null, tags: [], pulls: [{ number: 1, title: "x", merged_at: "2026-01-01T00:00:00Z" }] });
+  await assert.rejects(
+    () => main(),
+    (e) => e.message.includes(".ratchet-version") && e.message.includes("not semver"),
+    "a malformed .ratchet-version is rejected with a clear message",
+  );
+  restoreSeed();
+
+  // --- AC2. a dangling tag from a partial run advances the version ------------
+  // The last *release* is v1.2.3, but a tag v1.3.0 was left behind by a failed
+  // run (no backing release). Numbering from tags must yield v1.3.1, cleanly —
+  // never recompute v1.3.0 and 422.
+  process.env.RELEASE_BUMP = "patch";
+  created = mockGitHub({
+    latest: { tag_name: "v1.2.3", published_at: "2026-01-01T00:00:00Z" },
+    tags: ["v1.2.3", "v1.3.0"],
+    pulls: [{ number: 60, title: "Work merged after the partial run", merged_at: "2026-02-01T00:00:00Z" }],
+  });
+  result = await main();
+  assert.equal(result.released, true, "re-running after a partial failure still ships");
+  assert.equal(created[0].tag_name, "v1.3.1", `must advance past the dangling v1.3.0 tag to v1.3.1, got ${created[0].tag_name}`);
+
+  // --- AC1. a computed tag that already exists exits cleanly, creating nothing -
+  // Pre-flight path: the target tag's ref exists (created since we listed tags).
+  process.env.RELEASE_BUMP = "patch";
+  created = mockGitHub({
+    latest: { tag_name: "v1.2.3", published_at: "2026-01-01T00:00:00Z" },
+    tags: ["v1.2.3"],
+    existingTags: ["v1.2.3", "v1.2.4"], // v1.2.4 ref exists but is not yet in the tags list
+    pulls: [{ number: 70, title: "New work", merged_at: "2026-02-01T00:00:00Z" }],
+  });
+  ({ result } = await captureLogs(main).then(({ result, logs }) => {
+    assert.ok(logs.some((l) => l.includes("v1.2.4") && l.includes("already exists")), "a clear 'tag already exists' message is printed");
+    return { result };
+  }));
+  assert.equal(result.released, false, "a colliding tag releases nothing");
+  assert.equal(created.length, 0, "nothing partial is created when the tag already exists");
+
+  // AC1 race path: the create call itself 422s (a concurrent run beat us). Still
+  // a clean no-op, never an unhandled API error.
+  process.env.RELEASE_BUMP = "patch";
+  created = mockGitHub({
+    latest: { tag_name: "v1.2.3", published_at: "2026-01-01T00:00:00Z" },
+    tags: ["v1.2.3"],
+    existingTags: ["v1.2.3"], // pre-flight sees no clash...
+    failCreate: true, // ...but the POST loses the race and 422s
+    pulls: [{ number: 71, title: "New work", merged_at: "2026-02-01T00:00:00Z" }],
+  });
+  ({ result } = await captureLogs(main).then(({ result, logs }) => {
+    assert.ok(logs.some((l) => l.includes("already exists")), "a 422 on create prints a clear message, not a stack trace");
+    return { result };
+  }));
+  assert.equal(result.released, false, "a create-time collision releases nothing");
+  assert.equal(created.length, 0, "a create-time collision leaves nothing partial");
+
+  // --- invalid bump: a clear error, not a stack trace --------------------------
+  process.env.RELEASE_BUMP = "sideways";
+  mockGitHub({ latest: null, tags: [], pulls: [] });
+  await assert.rejects(
+    () => main(),
+    (e) => e.message.includes("sideways") && e.message.includes("major, minor, or patch"),
+    "an invalid RELEASE_BUMP is rejected with a message naming the valid values",
+  );
+  delete process.env.RELEASE_BUMP;
+
+  // --- 2. safe default: the workflow job is gated on RATCHET_RELEASE -----------
+  const workflow = readFileSync(fileURLToPath(new URL("../.github/workflows/release.yml", import.meta.url)), "utf8");
+  assert.ok(workflow.includes("vars.RATCHET_RELEASE == 'true'"), "the release job must be gated on RATCHET_RELEASE (off by default)");
+  assert.ok(workflow.includes("workflow_dispatch"), "the release lane runs on demand");
+
+  // --- AC4. DOCS.md pin-to-tag guidance matches reality ------------------------
+  const docs = readFileSync(fileURLToPath(new URL("../DOCS.md", import.meta.url)), "utf8");
+  assert.ok(
+    !docs.includes("git tag v1.2.0 && git push --tags"),
+    "DOCS.md no longer instructs pinning to tags cut by hand outside the release lane",
+  );
+  assert.ok(
+    /released.*tag|tag.*actually released|opt-in release lane/i.test(docs),
+    "DOCS.md conditions tag-pinning on a version having actually been released",
+  );
+
+  console.log("PASS release.test.mjs (24 assertions)");
 } finally {
-  console.log = realLog;
+  restoreSeed();
 }
-assert.equal(result.released, false, "no PRs since the tag means nothing is released");
-assert.equal(created.length, 0, "no release is created when there is nothing to ship");
-assert.ok(logs.some((l) => l.includes("Nothing to release")), "a clear 'nothing to release' message is printed");
-
-// --- first-ever release: no prior tag (404) starts from v0.0.0 ---------------
-process.env.RELEASE_BUMP = "patch";
-created = mockGitHub({
-  latest: null,
-  pulls: [{ number: 1, title: "Initial commit of the thing", merged_at: "2026-01-01T00:00:00Z" }],
-});
-result = await main();
-assert.equal(created[0].tag_name, "v0.0.1", `first release with no prior tag must bump from v0.0.0, got ${created[0].tag_name}`);
-assert.ok(created[0].body.includes("Initial commit of the thing (#1)"), "first changelog includes all merged PRs");
-
-// --- invalid bump: a clear error, not a stack trace --------------------------
-process.env.RELEASE_BUMP = "sideways";
-mockGitHub({ latest: null, pulls: [] });
-await assert.rejects(
-  () => main(),
-  (e) => e.message.includes("sideways") && e.message.includes("major, minor, or patch"),
-  "an invalid RELEASE_BUMP is rejected with a message naming the valid values",
-);
-delete process.env.RELEASE_BUMP;
-
-// --- 2. safe default: the workflow job is gated on RATCHET_RELEASE -----------
-const workflow = readFileSync(fileURLToPath(new URL("../.github/workflows/release.yml", import.meta.url)), "utf8");
-assert.ok(workflow.includes("vars.RATCHET_RELEASE == 'true'"), "the release job must be gated on RATCHET_RELEASE (off by default)");
-assert.ok(workflow.includes("workflow_dispatch"), "the release lane runs on demand");
-
-console.log("PASS release.test.mjs (13 assertions)");

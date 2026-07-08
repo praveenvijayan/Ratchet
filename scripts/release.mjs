@@ -59,6 +59,49 @@ function bumpVersion(parts, bump) {
   return `${parts.prefix}${major}.${minor}.${patch}`;
 }
 
+// Numeric compare of two parsed versions. > 0 when `a` is newer than `b`.
+function compareVersions(a, b) {
+  return a.major - b.major || a.minor - b.minor || a.patch - b.patch;
+}
+
+// The highest existing semver tag in the repo (across all pages), or null if
+// there are none. Non-semver tags are ignored. Tags — not releases — are the
+// source of truth for "which version numbers are taken": a tag left behind by a
+// partial run, a manual tag, or a deleted release still counts, so we never
+// recompute a version that already exists and hit an unhandled 422.
+async function highestSemverTag(token, repo) {
+  let best = null;
+  for (let page = 1; ; page++) {
+    const batch = await gh(token, "GET", `/repos/${repo}/tags?per_page=100&page=${page}`);
+    for (const t of batch) {
+      const parts = parseVersion(t.name);
+      if (parts && (!best || compareVersions(parts, best) > 0)) best = parts;
+    }
+    if (batch.length < 100) break;
+  }
+  return best;
+}
+
+// Seed the first-ever release from `.ratchet-version` (the installed framework
+// version) so it ships as advertised instead of a bare v0.0.1. Returns a tag
+// string, or null when the file is absent or empty. A malformed file is a clear
+// error, not a silent fallback — the first tag is not something to guess at.
+function readSeedVersion() {
+  if (!existsSync(".ratchet-version")) return null;
+  const raw = readFileSync(".ratchet-version", "utf8").trim();
+  if (!raw) return null;
+  const parts = parseVersion(raw);
+  if (!parts) {
+    throw new Error(
+      `.ratchet-version contains '${raw}', which is not semver (expected MAJOR.MINOR.PATCH, optionally v-prefixed). Fix or remove it, then re-run the first release.`,
+    );
+  }
+  // Repo tag convention is a leading "v" (see DOCS.md); normalise so the first
+  // tag matches and later bumps keep the same style.
+  const prefix = parts.prefix || "v";
+  return `${prefix}${parts.major}.${parts.minor}.${parts.patch}`;
+}
+
 // Every PR merged into the default branch after `since` (an ISO timestamp, or
 // null to take all merged PRs — the first-ever release).
 async function mergedPRsSince(token, repo, since) {
@@ -89,19 +132,13 @@ export async function main() {
     throw new Error(`Invalid RELEASE_BUMP '${bump}' — must be major, minor, or patch.`);
   }
 
-  // The last release anchors both the version to bump and the "since" window.
-  // No release yet is a normal first-run, not an error: start from v0.0.0 and
-  // include every merged PR.
+  // The latest *release* anchors only the changelog window (which PRs are new).
+  // Version numbering comes from tags below — releases can be deleted while their
+  // tags remain, so the release is the wrong thing to number from. No release yet
+  // is a normal first run, not an error: include every merged PR.
   const latest = await gh(token, "GET", `/repos/${repo}/releases/latest`, { allow404: true });
   const lastTag = latest?.tag_name || null;
   const since = latest ? (latest.published_at || latest.created_at) : null;
-
-  const base = lastTag ? parseVersion(lastTag) : { prefix: "v", major: 0, minor: 0, patch: 0 };
-  if (!base) {
-    throw new Error(
-      `Latest release tag '${lastTag}' is not semver (expected vMAJOR.MINOR.PATCH); cannot compute the next version. Tag a semver release manually, then re-run.`,
-    );
-  }
 
   const prs = await mergedPRsSince(token, repo, since);
   if (prs.length === 0) {
@@ -109,7 +146,23 @@ export async function main() {
     return { released: false };
   }
 
-  const version = bumpVersion(base, bump);
+  // Next version from the highest existing semver tag, so a dangling tag from a
+  // partial run advances the number instead of colliding with it. With no tags
+  // at all it is the first-ever release: seed from .ratchet-version.
+  const topTag = await highestSemverTag(token, repo);
+  const version = topTag
+    ? bumpVersion(topTag, bump)
+    : readSeedVersion() || bumpVersion({ prefix: "v", major: 0, minor: 0, patch: 0 }, bump);
+
+  // Guard against a collision the bump can't see — a concurrent run, or a tag
+  // created since we listed tags. Never let the create call fail with a raw 422:
+  // check first and exit cleanly, having created nothing.
+  const clash = await gh(token, "GET", `/repos/${repo}/git/ref/tags/${version}`, { allow404: true });
+  if (clash) {
+    console.log(`Tag ${version} already exists — nothing released. Remove the tag or choose a different bump, then re-run.`);
+    return { released: false, reason: "tag-exists" };
+  }
+
   const today = new Date().toISOString().slice(0, 10);
   const lines = prs.map((pr) => `- ${pr.title} (#${pr.number})`);
   const changelog = [
@@ -120,14 +173,26 @@ export async function main() {
     `_${prs.length} merged PR(s) since ${lastTag || "the start of the project"}._`,
   ].join("\n");
 
-  const release = await gh(token, "POST", `/repos/${repo}/releases`, {
-    body: {
-      tag_name: version,
-      name: version,
-      target_commitish: "main",
-      body: changelog,
-    },
-  });
+  let release;
+  try {
+    release = await gh(token, "POST", `/repos/${repo}/releases`, {
+      body: {
+        tag_name: version,
+        name: version,
+        target_commitish: "main",
+        body: changelog,
+      },
+    });
+  } catch (e) {
+    // A 422 here means the tag was created between our pre-flight check and now
+    // (a concurrent run beat us). Treat it as a clean no-op, not a crash — no
+    // release was created, so nothing is left half-done.
+    if (/ -> 422\b/.test(e.message)) {
+      console.log(`Tag ${version} already exists — another run beat us to it; nothing released, nothing partial created.`);
+      return { released: false, reason: "tag-exists" };
+    }
+    throw e;
+  }
 
   console.log(`Released ${version} from ${prs.length} merged PR(s).`);
   console.log(changelog);

@@ -90,16 +90,52 @@ function stateLabels(issue) {
   return issue.labels.map((l) => (typeof l === "string" ? l : l.name));
 }
 
-// Detect blocked_by cycles among plan files. Only edges whose target is also a
-// plan file in this sync can form a cycle (issues carry no outgoing blocked_by),
-// so the graph is built from `plans` alone. Returns one ordered slug path per
-// distinct cycle (deduped by membership); a plan blocked on itself yields a
-// single-slug cycle. DFS with a recursion stack: a back edge to a slug still on
-// the stack closes a cycle.
-function findCycles(plans) {
+function blockerNumbers(issue) {
+  const nums = [];
+  const body = issue.body || "";
+  for (const match of body.matchAll(/(?:^|\n)Blocked by #(\d+)\b/g)) {
+    nums.push(Number(match[1]));
+  }
+  return nums;
+}
+
+function issueState(issue) {
+  return (issue.state || "").toLowerCase();
+}
+
+function usableLabels(file, labels = []) {
+  const kept = [];
+  for (const label of labels) {
+    if (label.startsWith("state:") || label.startsWith("priority:")) {
+      console.log(`WARNING: ${file} has reserved label '${label}' — ignored`);
+    } else {
+      kept.push(label);
+    }
+  }
+  return kept;
+}
+
+// Detect blocked_by cycles across live plan files and marker-resolved issues.
+// Current plan files are authoritative for their outgoing edges; marker-only
+// issues use their rendered `Blocked by #N` lines so a cycle assembled across
+// syncs is still caught. Returns one ordered slug path per distinct cycle
+// (deduped by membership); a plan blocked on itself yields a single-slug cycle.
+// DFS with a recursion stack: a back edge to a slug still on the stack closes a
+// cycle.
+function findCycles(plans, bySlug = new Map()) {
+  const numberToSlug = new Map();
+  for (const [slug, issue] of bySlug) numberToSlug.set(issue.number, slug);
+
   const adj = new Map();
   for (const [slug, { fm }] of plans) {
-    adj.set(slug, (fm.blocked_by || []).filter((s) => plans.has(s)));
+    adj.set(slug, (fm.blocked_by || []).filter((s) => plans.has(s) || bySlug.has(s)));
+  }
+  for (const [slug, issue] of bySlug) {
+    if (plans.has(slug) || issueState(issue) === "closed") continue;
+    const edges = blockerNumbers(issue)
+      .map((n) => numberToSlug.get(n))
+      .filter((s) => s && (plans.has(s) || bySlug.has(s)));
+    if (edges.length) adj.set(slug, edges);
   }
   const cycles = [];
   const seen = new Set();   // membership keys already reported
@@ -108,7 +144,7 @@ function findCycles(plans) {
   const dfs = (v) => {
     color.set(v, 1);
     path.push(v);
-    for (const w of adj.get(v)) {
+    for (const w of adj.get(v) || []) {
       if (color.get(w) === 1) {
         const cyc = path.slice(path.indexOf(w));
         const key = [...cyc].sort().join(",");
@@ -139,17 +175,18 @@ async function main() {
   // cycle gate below can fail before we touch GitHub — a deadlocked plan set
   // must leave every issue untouched.
   const plans = new Map();
+  const invalidPlans = [];
   for (const file of files) {
     const slug = file.replace(/\.md$/, "");
     const parsed = parsePlan(await readFile(join(PLAN_DIR, file), "utf8"));
     if (!parsed || !parsed.fm.title || !parsed.fm.priority) {
-      console.log(`SKIP ${file} (missing title or priority)`);
+      invalidPlans.push(`${file} (missing title or priority)`);
       continue;
     }
     // A bad priority sorts as lowest and silently corrupts triage order, so it
     // is a hard skip, not a warning-and-continue — the file must be fixed.
     if (!VALID_PRIORITIES.has(parsed.fm.priority)) {
-      console.log(`SKIP ${file} — WARNING: invalid priority '${parsed.fm.priority}' (must be high, medium, or low)`);
+      invalidPlans.push(`${file} (invalid priority '${parsed.fm.priority}', must be high, medium, or low)`);
       continue;
     }
     // Unknown keys and a missing blocked_by are warnings, not skips: the file
@@ -168,16 +205,22 @@ async function main() {
     plans.set(slug, parsed);
   }
 
-  // Cycle gate: a blocked_by cycle among plan files is a deadlock — no issue in
-  // the cycle can ever be unblocked and unblock-dependents would never fire.
-  // Fail loudly, naming every slug in each cycle, before creating or editing
-  // anything on GitHub.
-  const cycles = findCycles(plans);
-  if (cycles.length) {
-    console.error("ERROR: blocked_by cycle detected among plan files — this is a deadlock.");
+  if (invalidPlans.length) {
+    console.error("ERROR: invalid plan frontmatter skipped one or more files. Nothing was changed.");
+    console.error("Fix these plan files, then re-sync:");
+    for (const reason of invalidPlans) console.error(`  • ${reason}`);
+    process.exit(1);
+  }
+
+  // Fail fast for cycles fully described by the current batch before any
+  // network call. Marker-resolved cross-sync cycles are checked after issue
+  // discovery below, still before any mutation.
+  const fileCycles = findCycles(plans);
+  if (fileCycles.length) {
+    console.error("ERROR: blocked_by cycle detected — this is a deadlock.");
     console.error("No issue in a cycle can ever be unblocked. Nothing was changed. Break each");
     console.error("cycle by removing a blocked_by edge, then re-sync:");
-    for (const cyc of cycles) console.error(`  • ${cyc.join(" → ")} → ${cyc[0]}`);
+    for (const cyc of fileCycles) console.error(`  • ${cyc.join(" → ")} → ${cyc[0]}`);
     process.exit(1);
   }
 
@@ -192,6 +235,19 @@ async function main() {
   }
   const slugToNumber = new Map();
   for (const [slug, issue] of bySlug) slugToNumber.set(slug, issue.number);
+
+  // Cycle gate: a blocked_by cycle is a deadlock — no issue in the cycle can
+  // ever be unblocked and unblock-dependents would never fire. Fail loudly,
+  // naming every slug in each cycle, before creating or editing anything on
+  // GitHub.
+  const cycles = findCycles(plans, bySlug);
+  if (cycles.length) {
+    console.error("ERROR: blocked_by cycle detected — this is a deadlock.");
+    console.error("No issue in a cycle can ever be unblocked. Nothing was changed. Break each");
+    console.error("cycle by removing a blocked_by edge, then re-sync:");
+    for (const cyc of cycles) console.error(`  • ${cyc.join(" → ")} → ${cyc[0]}`);
+    process.exit(1);
+  }
 
   // Pass 2a: create a minimal issue for every new plan BEFORE rendering any
   // body, so slugToNumber is total and a blocker can never be dropped just
@@ -227,7 +283,7 @@ async function main() {
     // in pass 2a, so it is open by definition.)
     const openBlockers = blockerNums.filter((n) => byNumber.get(n)?.state !== "closed");
     const state = openBlockers.length ? "state:blocked" : (hasCriteria ? "state:ready" : "state:draft");
-    const labels = [state, `priority:${fm.priority}`, ...(fm.labels || [])];
+    const labels = [state, `priority:${fm.priority}`, ...usableLabels(`${slug}.md`, fm.labels || [])];
     if (state === "state:draft") drafted.push(slug);
 
     const existing = bySlug.get(slug);

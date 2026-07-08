@@ -162,16 +162,42 @@ memory/
   ARCHITECTURE.md               Coarse codebase map (generated; agent scopes reads with it)
   MEMORY.md                     Distilled knowledge cache (agent proposes via PR)
 scripts/
-  plan-sync.mjs                 Deterministic plan→issue compiler (zero-dep, Node 20+)
-  plan-sync.test.mjs            Regression test for the compiler (zero-dep, run with node)
+  archive-closed-plans.mjs      Move closed issue plans into plan/done/
+  archive-closed-plans.test.mjs Regression test for the archive sweep
+  criteria.mjs                  Shared acceptance-criteria readiness rule
+  criteria.test.mjs             Regression test for the readiness rule
+  docs-refresh.test.mjs         Regression test for documentation inventory
+  plan-sync-concurrency.test.mjs Workflow concurrency regression test
+  plan-sync.mjs                 Deterministic plan→issue compiler
+  plan-sync.test.mjs            Regression test for the compiler
+  pr-size-check.mjs             Enforce the agent PR size limit in CI
+  pr-size-check.test.mjs        Regression test for the size gate
+  ratchet-init-skill.test.mjs   Regression test for the init skill contract
+  ratchet-metrics.mjs           Read-only loop health metrics
+  ratchet-metrics.test.mjs      Regression test for loop metrics
+  ratchet-uninstall.sh          Remove framework files on a review branch
   ratchet-update.sh             Pull framework updates, preserve project files
-  ratchet-watch.sh              Real-time GitHub→local bridge (gh webhook forward)
-  ratchet-watch.mjs             Zero-dep webhook receiver / event classifier
+  ratchet-watch.mjs             Webhook receiver / event classifier
+  ratchet-watch.sh              Real-time GitHub→local bridge
+  release.mjs                   Opt-in release tag + changelog publisher
+  release.test.mjs              Regression test for releases
+  run-gates.mjs                 Run GATES.md locally and in CI
+  run-gates.test.mjs            Regression test for the gate runner
+  sweep-lease.mjs               Shared claim lease freshness rule
+  sweep-lease.test.mjs          Regression test for renewable leases
+  sweep-stale-claims.mjs        Return abandoned work to the queue
+  sweep-stale-claims.test.mjs   Regression test for stale-claim decisions
+  unblock-dependents.mjs        Promote issues after blockers close
+  unblock-dependents.test.mjs   Regression test for unblock logic
+  verify-issue-body.mjs         Trust-boundary check for ratchet-run
+  verify-issue-body.test.mjs    Regression test for issue-body verification
 .github/workflows/
   plan-sync.yml                 Compile plan/*.md → issues on push
-  unblock-dependents.yml        On issue close, promote unblocked dependents
-  sweep-stale-claims.yml        Return abandoned in-progress issues to ready
+  pr-gates.yml                  Run GATES.md gates and PR size check on agent PRs
   ratchet-run.yml               OPTIONAL CI runner (off by default)
+  release.yml                   OPTIONAL release tag + changelog lane
+  unblock-dependents.yml        On issue close, promote unblocked dependents
+  sweep-stale-claims.yml        Return abandoned work to the queue
 .agents/skills/<name>/          Canonical skills (Codex + Antigravity)
 .claude/skills/<name>/          Mirror for Claude Code
 plugin/                         Optional Claude Code plugin packaging
@@ -193,6 +219,7 @@ side effects. Invoke as `/name` in Claude Code or Antigravity, or `/skills` /
 | `/ratchet-sync` | Only without the PR flow | Local/no-PR escape hatch: compiles working-tree `plan/*.md` into issues now. Normally unused — merging the planning PR does this. |
 | `/ratchet-next` | After a merge or review | Advances (sync main + next issue) on approval, or reworks the same PR on rejection. The heart of the continuous local loop. |
 | `/ratchet-status` | When nothing seems ready | Read-only diagnosis of the queue: why nothing is pickable (drafts without criteria, blocked chains, unmerged planning PR) and the next action to unblock. |
+| `/ratchet-metrics` | To inspect loop health | Read-only report from GitHub data: cycle time, rework rate, stale-claim sweeps, and queue depth by state. |
 | `/ratchet-memory` | Periodically (e.g. quarterly) | Prunes and dedupes `memory/MEMORY.md`, verifies issue/PR links, stops for review. |
 | `/ratchet-map` | When structure drifts | Regenerates the coarse codebase map `memory/ARCHITECTURE.md` (language-agnostic), stops for review. |
 | `/ratchet-update` | To upgrade | Pulls newer framework files onto a review branch; never touches project-owned files. |
@@ -229,11 +256,12 @@ See §8 — this is the routine that responds to a human's PR decision.
 |----------|---------|--------|
 | `plan-sync` | push to `plan/**` on `main` (i.e. planning-PR merge), or manual | Compiles `plan/*.md` into issues, idempotently (dedup via a `<!-- plan-id -->` marker). Scoped to `main` so the planning branch doesn't create issues early. |
 | `unblock-dependents` | `issues: closed` | Strips the closed issue's own `state:*` label (closed is terminal; a lingering `state:in-review` misleads), then promotes every issue whose blockers are now all closed to `state:ready`. This re-feeds the queue. |
-| `sweep-stale-claims` | every 30 min, or manual | Returns `state:in-progress` issues with no branch commits for >2h to `state:ready` — a poor-man's lease expiry for crashed agents. A pure claim (zero commits, no PR) also has its orphaned `agent/issue-<N>` ref deleted so the issue re-claims cleanly; branches that carry commits are kept for inspection. |
+| `sweep-stale-claims` | every 30 min, or manual | Patrols `state:in-progress`, `state:in-review`, and `state:changes-requested`. Freshness is the newest proof of life: a branch commit, a claim event, or a heartbeat issue comment containing `<!-- ratchet-heartbeat -->`. Stale zero-commit claims return to `state:ready` and have the orphan ref deleted; committed branches are kept. In-review issues with no live PR are requeued, while merged PRs whose issue stayed open are moved to `state:blocked` for human cleanup. Changes-requested work is requeued only after the inactivity window. |
+| `pr-gates` | agent PR opened, synchronized, or reopened | Runs `scripts/run-gates.mjs` as the `gates` job and `scripts/pr-size-check.mjs` as the `size` job on every `agent/issue-*` PR. Branch protection should require both contexts. |
 | `ratchet-run` | PR merged, or manual | OPTIONAL, off by default. Runs an agent in CI to work the next issue. Requires `RATCHET_AUTO=true` and an agent API key. Before handing an issue to the agent it verifies the body still matches its reviewed plan file (see *Security* below); most users do not enable this — the local loop (§8) is the recommended path. |
 | `release` | manual (`workflow_dispatch`) | OPTIONAL, off by default — the post-merge "ship" stage. Requires `RATCHET_RELEASE=true`. On demand it tags the next semver version (bump chosen at dispatch) and publishes a changelog built from the titles of the PRs merged since the last release. With no merges since the last tag it exits with a "nothing to release" message, not an error. With the variable unset it no-ops. |
 
-All three core workflows read `${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN }}`
+The GitHub-mutating workflows read `${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN }}`
 so they work with the default token and upgrade automatically when the PAT is
 set (see §10).
 
@@ -246,21 +274,40 @@ PAT** (contents + pull-requests + issues write). That makes the issue body a
 trust boundary, and it is why the runner is **opt-in** (off unless
 `RATCHET_AUTO=true`).
 
-- **Threat — issue-body prompt injection.** Issue bodies are compiled from
-  plan files that a human reviewed and merged. But anyone with issue-write
-  access can edit a body *after* compilation, and GitHub issue edits are not
-  code-reviewed. Without a guard, that edited text becomes instructions to an
-  agent that can push branches and open PRs — a privilege-escalation path from
-  "can edit an issue" to "can run code with the PAT".
-- **Control — verify against the reviewed plan before acting.** On each run,
-  after picking the next issue, `ratchet-run` requires the body to (1) carry a
-  `<!-- plan-id: <slug> -->` marker and (2) still match `plan/<slug>.md` on
-  `main` (the reviewed source of truth), using `scripts/verify-issue-body.mjs`.
-  On any mismatch — missing marker, missing plan file, or edited body — it
-  comments the specific discrepancy on the issue and **skips it without creating
-  a branch or changing code**. Restoring the body to its plan (or re-syncing
-  from the plan file) re-enables automation. The bound-changing content lives in
-  reviewed, version-controlled files, never in a mutable issue body.
+- **Threat — issue prompt injection, on every mutable channel.** Issue bodies
+  are compiled from plan files that a human reviewed and merged. But anyone with
+  issue-write access can edit a body, edit the **title**, or add a **comment**
+  *after* compilation, and GitHub issue edits are not code-reviewed. The agent
+  the runner launches reads the whole issue — title and comments included — so
+  any of these channels can become instructions to an agent that can push
+  branches and open PRs: a privilege-escalation path from "can edit an issue" to
+  "can run code with the PAT". A fourth channel is the `plan-id` **slug** itself:
+  it is attacker-influenced text that flows into a filesystem path.
+- **Control — verify against the reviewed plan before acting; neutralise each
+  channel.** On each run, after picking the next issue, `ratchet-run` runs
+  `scripts/verify-issue-body.mjs`, which fails **closed** on every check:
+  - **Body** — must carry a `<!-- plan-id: <slug> -->` marker and still match
+    `plan/<slug>.md` on `main` (the reviewed source of truth).
+  - **Title** — must still equal the plan file's `title:` frontmatter. An edited
+    title fails verification exactly as an edited body does; title text is never
+    treated as work instructions.
+  - **Slug** — must match the safe slug charset (lowercase letters, digits, and
+    hyphen-joined segments). A slug carrying a dot, a slash, `..`, or any other
+    character is rejected before it is ever joined into a path, so a crafted
+    marker cannot traverse the filesystem to a look-alike plan file — the guard
+    fails closed on principle, not by accident.
+  - **Comments** — have no reviewed source to match against, so they are
+    excluded by the runner's **prompt contract**: the "Work the issue" step
+    instructs the agent that only the verified body and its plan file are trusted
+    instructions and that titles and comments are untrusted display text to be
+    obeyed by nothing.
+
+  On any body/title/slug mismatch — missing marker, unsafe slug, missing plan
+  file, or edited body/title — the runner comments the specific discrepancy on
+  the issue and **skips it without creating a branch or changing code**.
+  Restoring the issue to its plan (or re-syncing from the plan file) re-enables
+  automation. The bound-changing content lives in reviewed, version-controlled
+  files, never in a mutable issue field.
 - **Required PAT scopes.** `FACTORY_PAT` is a fine-grained token scoped to this
   repository with **Contents: write** (push branches), **Pull requests: write**
   (open PRs), and **Issues: write** (labels, comments, assignment). Grant no
@@ -290,6 +337,12 @@ Short description of what and why.
 ## Acceptance criteria
 - [ ] User submits email + password and receives a session token
 - [ ] Invalid credentials return 401 with a generic message
+
+## Non-functional
+- Login response p95 stays under 200 ms in the existing load harness
+
+## Test notes
+- Regression-test the lockout path after five failed attempts
 ```
 
 `title` and `priority` are required. A file with at least one `- [ ]` acceptance
@@ -301,6 +354,11 @@ body, so a blocker on a brand-new file resolves on the first run, and a slug
 that matches nothing is a loud `WARNING`, never a silent drop. The file owns issue *content*;
 once an issue leaves `ready`/`draft`, sync stops touching it so live work is
 never clobbered.
+
+Optional `## Non-functional` and `## Test notes` sections are copied into the
+issue body. They let a plan require performance, accessibility, migration, edge
+case, regression, or integration coverage beyond the acceptance-criteria
+checkboxes without making those extra checks look like readiness criteria.
 
 ### Reporting something you found (bug, improvement, follow-up)
 
@@ -484,23 +542,26 @@ files (`GATES.md` plus everything under `memory/`) live outside it.
 
 ```
 /ratchet-update           # pull upstream main onto a review branch
-/ratchet-update v1.2.0    # or a specific release tag
+/ratchet-update v1.2.0    # or a specific released tag (must exist upstream)
 ```
 
-It pulls only framework paths (skills, workflows, scripts, `AGENTS.md`,
-pointers, `.env.example`), re-syncs the skill mirrors, bumps `.ratchet-version`,
-and stops for you to review the diff and open a PR. It never touches the
-project-owned set:
+It pulls only framework paths (skills, workflows, the whole `scripts/` tree,
+`AGENTS.md`/`DOCS.md`, pointers, `setup.sh`, `plan/README.md`, `.env.example`),
+re-syncs the skill mirrors, bumps `.ratchet-version`, and stops for you to
+review the diff and open a PR. It never touches the project-owned set:
 
 | Framework (pulled, overwrite-safe) | Project-owned (never touched) |
 |------------------------------------|-------------------------------|
 | `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `DOCS.md` | `GATES.md` (config) |
 | `.agents/`, `.claude/`, `plugin/`, `.claude-plugin/` | `memory/` (`USER.md`, `ARCHITECTURE.md`, `MEMORY.md`) |
-| `.github/workflows/`, `scripts/*` | your `plan/*.md` issue files |
-| `.env.example` | `.env`, `README.md`, `LICENSE`, `.gitignore`, your code |
+| `.github/workflows/`, `scripts/*`, `setup.sh` | your `plan/*.md` issue files |
+| `plan/README.md`, `.env.example` | `.env`, `README.md`, `LICENSE`, `.gitignore`, your code |
 
-`.ratchet-version` records the installed version. Tag releases upstream
-(`git tag v1.2.0 && git push --tags`) so consumers can pin to a known version.
+`.ratchet-version` records the installed version. Pinning an update to a tag
+(`/ratchet-update v1.2.0`) only works for a version the upstream has actually
+released; those tags are cut by the opt-in release lane (§6), which creates each
+one idempotently. Until a release is cut there may be no tags to pin to, so plain
+`/ratchet-update` tracks `main`.
 
 ---
 

@@ -38,6 +38,8 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 | 4d    | test        | `node scripts/sweep-stale-claims.test.mjs` | exit 0 |
 | 4e    | test        | `node scripts/archive-closed-plans.test.mjs` | exit 0 |
 | 4f    | test        | `node scripts/unblock-dependents.test.mjs` | exit 0 |
+| 4g    | test        | `node scripts/ratchet-update.test.mjs` | exit 0 |
+| 4h    | test        | `node scripts/archive-closed-plans-workflow.test.mjs` | exit 0 |
 | 5     | build       | TODO: build command               | —              |
 | 6     | audit       | TODO: audit command               | —              |
 | 7     | secret-scan | TODO: secret-scan command         | —              |
@@ -51,3 +53,8 @@ the numbers here; they default to the manual's ~400 changed lines / ~6 files.
 
 - max_changed_lines: 400
 - max_changed_files: 6
+- exclude_paths: [package-lock.json, pnpm-lock.yaml, yarn.lock, Cargo.lock, poetry.lock, go.sum]
+
+`exclude_paths` accepts comma-separated path patterns. The lockfiles above are
+excluded by default even if this line is omitted; add generated artifacts here
+when they should not count toward review-size limits.

@@ -15,6 +15,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 
+const planSync = fileURLToPath(new URL("./plan-sync.mjs", import.meta.url));
+
 // --- fixture plan dir --------------------------------------------------
 const planDir = await mkdtemp(join(tmpdir(), "plan-sync-test-"));
 await writeFile(join(planDir, "0036-existing.md"), `---
@@ -38,18 +40,6 @@ Body of 0063.
 
 ## Acceptance criteria
 - [ ] something else
-`);
-// Invalid priority: must be skipped (never created) with a loud warning that
-// names the file and the offending value.
-await writeFile(join(planDir, "0077-bad-priority.md"), `---
-title: Has a bogus priority
-priority: P3
-blocked_by: []
----
-Body of 0077.
-
-## Acceptance criteria
-- [ ] never created
 `);
 // #21 AC3: a plan whose only blocker was ARCHIVED (its file moved to plan/done/,
 // its issue CLOSED) must still resolve the link through the closed issue's
@@ -108,6 +98,19 @@ Body of 0081.
 
 ## Test notes
 - [ ] this checkbox is not an acceptance criterion
+`);
+// #56 AC2: labels that would corrupt the state machine are never applied from
+// plan frontmatter, while ordinary custom labels still pass through.
+await writeFile(join(planDir, "0082-reserved-labels.md"), `---
+title: Reserved labels are filtered
+priority: high
+labels: [state:ready, priority:P1, workflow:sync]
+blocked_by: []
+---
+Body of 0082.
+
+## Acceptance criteria
+- [ ] reserved labels are ignored
 `);
 
 // --- in-memory GitHub API ----------------------------------------------
@@ -169,15 +172,6 @@ assert.ok(existing.body.includes("Blocked by #10"), "0036 must link the blocker 
 assert.ok(names(existing).includes("state:blocked"), `0036 should be blocked, got: ${names(existing)}`);
 assert.ok(logs.some((l) => l.includes("WARNING") && l.includes("0999-typo")), "unresolved slug must be warned about loudly");
 
-// Criterion 1 + 4: an invalid priority is skipped (never created) with a loud
-// warning naming the file and the offending value.
-const badPriority = [...issues.values()].find((i) => i.body.includes("plan-id: 0077-bad-priority"));
-assert.ok(!badPriority, "0077 with invalid priority must never be created");
-assert.ok(
-  logs.some((l) => l.includes("WARNING") && l.includes("0077-bad-priority") && l.includes("P3")),
-  "invalid priority must be warned about loudly, naming the file and the value",
-);
-
 // Criterion 2: a missing blocked_by warns (naming the file) but does not block
 // the sync — 0063 is still created and ready.
 assert.ok(
@@ -221,6 +215,53 @@ assert.ok(
   `0081 must stay draft: ## Test notes checkboxes must not fake acceptance criteria, got: ${names(notesOnly)}`,
 );
 
+// #56 AC2: labels entries beginning state: or priority: are never applied to
+// the issue and produce a warning naming the file.
+const reservedLabels = [...issues.values()].find((i) => i.body.includes("plan-id: 0082-reserved-labels"));
+assert.ok(reservedLabels, "0082-reserved-labels issue was created");
+assert.ok(names(reservedLabels).includes("state:ready"), `0082 should keep its computed state, got: ${names(reservedLabels)}`);
+assert.equal(names(reservedLabels).filter((name) => name === "state:ready").length, 1, `0082 must not apply frontmatter state labels, got: ${names(reservedLabels)}`);
+assert.ok(names(reservedLabels).includes("priority:high"), `0082 should keep its computed priority, got: ${names(reservedLabels)}`);
+assert.ok(names(reservedLabels).includes("workflow:sync"), `0082 should keep ordinary custom labels, got: ${names(reservedLabels)}`);
+assert.ok(!names(reservedLabels).includes("priority:P1"), `0082 must drop frontmatter priority labels, got: ${names(reservedLabels)}`);
+assert.ok(
+  logs.some((l) => l.includes("WARNING") && l.includes("0082-reserved-labels.md") && l.includes("state:ready")),
+  "reserved state labels must warn, naming the file",
+);
+assert.ok(
+  logs.some((l) => l.includes("WARNING") && l.includes("0082-reserved-labels.md") && l.includes("priority:P1")),
+  "reserved priority labels must warn, naming the file",
+);
+
+// #56 AC1: a sync that skipped any plan file for invalid frontmatter finishes
+// as a visible failure, not a green run.
+const invalidDir = await mkdtemp(join(tmpdir(), "plan-sync-invalid-"));
+await writeFile(join(invalidDir, "0077-bad-priority.md"), `---
+title: Has a bogus priority
+priority: P3
+blocked_by: []
+---
+Body of 0077.
+
+## Acceptance criteria
+- [ ] never created
+`);
+let invalidExit = 0;
+let invalidErr = "";
+try {
+  execFileSync(process.execPath, [planSync], {
+    cwd: invalidDir, // avoid loading the repo's .env; validation fails before network calls
+    env: { GITHUB_TOKEN: "test-token", GITHUB_REPOSITORY: "o/r", PLAN_DIR: invalidDir, PATH: process.env.PATH },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+} catch (e) {
+  invalidExit = e.status ?? 1;
+  invalidErr = `${e.stderr || ""}${e.stdout || ""}`;
+}
+assert.ok(invalidExit !== 0, "invalid frontmatter must exit non-zero");
+assert.ok(/invalid plan frontmatter/i.test(invalidErr), `invalid frontmatter error must say so loudly, got: ${invalidErr}`);
+assert.ok(/0077-bad-priority/.test(invalidErr) && /P3/.test(invalidErr), `invalid frontmatter error must name the file and value, got: ${invalidErr}`);
+
 // --- blocked_by cycle gate ----------------------------------------------
 // A two-file cycle (each blocked_by the other) is a deadlock: sync must fail
 // loudly, naming every slug, and change nothing. Run as a subprocess because
@@ -247,7 +288,6 @@ Body of B.
 ## Acceptance criteria
 - [ ] b
 `);
-const planSync = fileURLToPath(new URL("./plan-sync.mjs", import.meta.url));
 let cycleExit = 0;
 let cycleErr = "";
 try {
@@ -264,4 +304,53 @@ assert.ok(cycleExit !== 0, "plan-sync must exit non-zero on a blocked_by cycle")
 assert.ok(/cycle/i.test(cycleErr), `cycle error must say so loudly, got: ${cycleErr}`);
 assert.ok(/0005-a/.test(cycleErr) && /0006-b/.test(cycleErr), `cycle error must name every slug, got: ${cycleErr}`);
 
-console.log("PASS plan-sync.test.mjs (23 assertions)");
+// #56 AC3: a blocked_by cycle whose edges span live files and marker-resolved
+// issues is detected and reported loudly before any mutation.
+const markerCycleDir = await mkdtemp(join(tmpdir(), "plan-sync-marker-cycle-"));
+await writeFile(join(markerCycleDir, "0100-live-a.md"), `---
+title: Live A
+priority: medium
+blocked_by: [0099-marker-b]
+---
+Body of A.
+
+## Acceptance criteria
+- [ ] a
+`);
+const markerCycleScript = `
+  const label = (name) => ({ name });
+  const issues = [
+    { number: 1, state: "open", title: "Marker B", labels: [label("state:blocked")], body: "B body\\n\\nBlocked by #2\\n\\n<!-- plan-id: 0099-marker-b -->" },
+    { number: 2, state: "open", title: "Live A", labels: [label("state:ready")], body: "A body\\n\\n<!-- plan-id: 0100-live-a -->" },
+  ];
+  const respond = (data) => ({ ok: true, status: 200, json: async () => data, text: async () => JSON.stringify(data) });
+  globalThis.fetch = async (url, opts = {}) => {
+    const { pathname, searchParams } = new URL(url);
+    const method = opts.method || "GET";
+    if (method === "GET" && pathname === "/repos/o/r/issues") {
+      return respond(Number(searchParams.get("page")) === 1 ? issues : []);
+    }
+    throw new Error("unexpected mutation before cycle gate: " + method + " " + url);
+  };
+  process.env.GITHUB_TOKEN = "test-token";
+  process.env.GITHUB_REPOSITORY = "o/r";
+  process.env.PLAN_DIR = ${JSON.stringify(markerCycleDir)};
+  await import(${JSON.stringify(new URL("./plan-sync.mjs", import.meta.url).href)});
+`;
+let markerCycleExit = 0;
+let markerCycleErr = "";
+try {
+  execFileSync(process.execPath, ["--input-type=module", "-e", markerCycleScript], {
+    cwd: markerCycleDir,
+    env: { PATH: process.env.PATH },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+} catch (e) {
+  markerCycleExit = e.status ?? 1;
+  markerCycleErr = `${e.stderr || ""}${e.stdout || ""}`;
+}
+assert.ok(markerCycleExit !== 0, "marker-resolved blocked_by cycle must exit non-zero");
+assert.ok(/cycle/i.test(markerCycleErr), `marker-resolved cycle error must say so loudly, got: ${markerCycleErr}`);
+assert.ok(/0100-live-a/.test(markerCycleErr) && /0099-marker-b/.test(markerCycleErr), `marker-resolved cycle error must name every slug, got: ${markerCycleErr}`);
+
+console.log("PASS plan-sync.test.mjs");
