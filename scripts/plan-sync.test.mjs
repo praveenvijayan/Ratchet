@@ -12,6 +12,8 @@ import assert from "node:assert/strict";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { execFileSync } from "node:child_process";
 
 // --- fixture plan dir --------------------------------------------------
 const planDir = await mkdtemp(join(tmpdir(), "plan-sync-test-"));
@@ -92,4 +94,47 @@ assert.ok(existing.body.includes("Blocked by #10"), "0036 must link the blocker 
 assert.ok(names(existing).includes("state:blocked"), `0036 should be blocked, got: ${names(existing)}`);
 assert.ok(logs.some((l) => l.includes("WARNING") && l.includes("0999-typo")), "unresolved slug must be warned about loudly");
 
-console.log("PASS plan-sync.test.mjs (6 assertions)");
+// --- blocked_by cycle gate ----------------------------------------------
+// A two-file cycle (each blocked_by the other) is a deadlock: sync must fail
+// loudly, naming every slug, and change nothing. Run as a subprocess because
+// the gate ends the process with a non-zero exit; the gate runs before any
+// network call, so a dummy token/repo and no fetch mock are enough.
+const cycleDir = await mkdtemp(join(tmpdir(), "plan-sync-cycle-"));
+await writeFile(join(cycleDir, "0005-a.md"), `---
+title: Plan A
+priority: P2
+blocked_by: [0006-b]
+---
+Body of A.
+
+## Acceptance criteria
+- [ ] a
+`);
+await writeFile(join(cycleDir, "0006-b.md"), `---
+title: Plan B
+priority: P2
+blocked_by: [0005-a]
+---
+Body of B.
+
+## Acceptance criteria
+- [ ] b
+`);
+const planSync = fileURLToPath(new URL("./plan-sync.mjs", import.meta.url));
+let cycleExit = 0;
+let cycleErr = "";
+try {
+  execFileSync(process.execPath, [planSync], {
+    cwd: cycleDir, // avoid loading the repo's .env; the gate makes no network call anyway
+    env: { GITHUB_TOKEN: "test-token", GITHUB_REPOSITORY: "o/r", PLAN_DIR: cycleDir, PATH: process.env.PATH },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+} catch (e) {
+  cycleExit = e.status ?? 1;
+  cycleErr = `${e.stderr || ""}${e.stdout || ""}`;
+}
+assert.ok(cycleExit !== 0, "plan-sync must exit non-zero on a blocked_by cycle");
+assert.ok(/cycle/i.test(cycleErr), `cycle error must say so loudly, got: ${cycleErr}`);
+assert.ok(/0005-a/.test(cycleErr) && /0006-b/.test(cycleErr), `cycle error must name every slug, got: ${cycleErr}`);
+
+console.log("PASS plan-sync.test.mjs (9 assertions)");
