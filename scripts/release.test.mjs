@@ -71,10 +71,13 @@ function captureLogs(fn) {
 // up its original state and restore it no matter how the run ends, so a crash
 // mid-test never leaves the working tree dirty.
 const SEED_FILE = fileURLToPath(new URL("../.ratchet-version", import.meta.url));
+const OUTPUT_FILE = fileURLToPath(new URL("../.release-test-output", import.meta.url));
 const seedExisted = existsSync(SEED_FILE);
 const seedOriginal = seedExisted ? readFileSync(SEED_FILE, "utf8") : null;
 const setSeed = (value) => (value === null ? rmSync(SEED_FILE, { force: true }) : writeFileSync(SEED_FILE, value));
 const restoreSeed = () => (seedExisted ? writeFileSync(SEED_FILE, seedOriginal) : rmSync(SEED_FILE, { force: true }));
+const resetOutput = () => { rmSync(OUTPUT_FILE, { force: true }); process.env.GITHUB_OUTPUT = OUTPUT_FILE; };
+const readOutput = () => (existsSync(OUTPUT_FILE) ? readFileSync(OUTPUT_FILE, "utf8") : "");
 
 process.env.GITHUB_TOKEN = "test-token";
 process.env.GITHUB_REPOSITORY = "o/r";
@@ -92,6 +95,7 @@ try {
       { number: 39, title: "Never merged", merged_at: null },
     ],
   });
+  resetOutput();
   let result = await main();
   assert.equal(result.released, true, "a batch of merged PRs must produce a release");
   assert.equal(created.length, 1, "exactly one release is created");
@@ -100,6 +104,8 @@ try {
   assert.ok(created[0].body.includes("Fix bug Y (#41)"), "changelog must list every PR merged since the last tag");
   assert.ok(!created[0].body.includes("Old thing"), "PRs merged before the last tag are excluded");
   assert.ok(!created[0].body.includes("Never merged"), "unmerged PRs are excluded");
+  assert.match(readOutput(), /^released=true$/m, "a published release must expose released=true to the workflow");
+  assert.match(readOutput(), /^version=v1\.3\.0$/m, "a published release must expose the version to deploy");
 
   // --- 4. no merges since the last tag: clean exit, a message, no error --------
   process.env.RELEASE_BUMP = "patch";
@@ -108,12 +114,14 @@ try {
     tags: ["v1.3.0"],
     pulls: [{ number: 50, title: "Merged long ago", merged_at: "2026-02-01T00:00:00Z" }],
   });
+  resetOutput();
   ({ result } = await captureLogs(main).then(({ result, logs }) => {
     assert.ok(logs.some((l) => l.includes("Nothing to release")), "a clear 'nothing to release' message is printed");
     return { result };
   }));
   assert.equal(result.released, false, "no PRs since the tag means nothing is released");
   assert.equal(created.length, 0, "no release is created when there is nothing to ship");
+  assert.match(readOutput(), /^released=false$/m, "a no-op release must expose released=false so deploy is skipped");
 
   // --- AC3. first-ever release seeds its version from .ratchet-version ---------
   // No tags and no prior release: the version must come from .ratchet-version
@@ -212,6 +220,13 @@ try {
   assert.ok(workflow.includes("vars.RATCHET_RELEASE == 'true'"), "the release job must be gated on RATCHET_RELEASE (off by default)");
   assert.ok(workflow.includes("workflow_dispatch"), "the release lane runs on demand");
 
+  // --- #62. deploy gate is opt-in, post-publish, and visibly failing ----------
+  assert.ok(workflow.includes("vars.RATCHET_DEPLOY == 'true'"), "deploy must be gated on explicit RATCHET_DEPLOY opt-in");
+  assert.ok(workflow.includes("steps.publish.outputs.released == 'true'"), "deploy must run only after release.mjs published a release");
+  assert.ok(workflow.includes("RATCHET_DEPLOY_COMMAND is empty"), "missing deploy command after opt-in must fail visibly");
+  assert.ok(!/^  deploy:/m.test(workflow), "repos that do not opt in must not get a separate deploy job");
+  assert.ok(!/delete|remove/i.test(workflow.match(/- name: Deploy[\s\S]*/)?.[0] || ""), "deploy step must not delete or mutate the tag/release on failure");
+
   // --- AC4. DOCS.md pin-to-tag guidance matches reality ------------------------
   const docs = readFileSync(fileURLToPath(new URL("../DOCS.md", import.meta.url)), "utf8");
   assert.ok(
@@ -222,8 +237,22 @@ try {
     /released.*tag|tag.*actually released|opt-in release lane/i.test(docs),
     "DOCS.md conditions tag-pinning on a version having actually been released",
   );
+  assert.ok(
+    docs.includes("RATCHET_DEPLOY=true") && docs.includes("RATCHET_DEPLOY_COMMAND"),
+    "DOCS.md documents the explicit deploy opt-in and command setting",
+  );
+  assert.ok(
+    /no deploy job and no deploy config/i.test(docs),
+    "DOCS.md says repos that do not opt in have no deploy job or required config",
+  );
+  assert.ok(
+    /deploy fails[\s\S]*visibly red[\s\S]*does not delete or mutate the tag\/release/i.test(docs),
+    "DOCS.md documents failed deploy semantics without rollback mutation",
+  );
 
-  console.log("PASS release.test.mjs (24 assertions)");
+  console.log("PASS release.test.mjs (34 assertions)");
 } finally {
+  delete process.env.GITHUB_OUTPUT;
+  rmSync(OUTPUT_FILE, { force: true });
   restoreSeed();
 }

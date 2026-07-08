@@ -56,12 +56,13 @@ agent owns the middle; the human owns the gate; GitHub automation owns the edges
 plan/*.md ─sync→ issue(ready) → claim → build → verify → PR(in-review)
                      ▲                                        │
                      └──── unblock / next ◀── human merges ───┤
-                                                              └→ release (opt-in): tag + changelog
+                                                              └→ release (opt-in): tag + changelog → deploy gate
 ```
 
 The dashed branch off `human merges` is the **release lane** (§6, `release`):
-an opt-in, post-merge "ship" stage that tags a version and publishes a changelog
-from the merged PR titles. It is off by default and never blocks the loop.
+an opt-in, post-merge "ship" stage that tags a version, publishes a changelog
+from the merged PR titles, and can run a repo-owned deploy command after the
+tag/release exists. It is off by default and never blocks the loop.
 
 The seven steps, as defined in `AGENTS.md`:
 
@@ -264,7 +265,7 @@ See §8 — this is the routine that responds to a human's PR decision.
 | `sweep-stale-claims` | every 30 min, or manual | Patrols `state:in-progress`, `state:in-review`, and `state:changes-requested`. Freshness is the newest proof of life: a branch commit, a claim event, or a heartbeat issue comment containing `<!-- ratchet-heartbeat -->`. Stale zero-commit claims return to `state:ready` and have the orphan ref deleted; committed branches are kept. In-review issues with no live PR are requeued, while merged PRs whose issue stayed open are moved to `state:blocked` for human cleanup. Changes-requested work is requeued only after the inactivity window. |
 | `pr-gates` | agent PR opened, synchronized, or reopened | Runs `scripts/run-gates.mjs` as the `gates` job and `scripts/pr-size-check.mjs` as the `size` job on every `agent/issue-*` PR. Branch protection should require both contexts. |
 | `ratchet-run` | PR merged, or manual | OPTIONAL, off by default. Runs an agent in CI to work the next issue. Requires `RATCHET_AUTO=true` and an agent API key. Before handing an issue to the agent it verifies the body still matches its reviewed plan file (see *Security* below); most users do not enable this — the local loop (§8) is the recommended path. |
-| `release` | manual (`workflow_dispatch`) | OPTIONAL, off by default — the post-merge "ship" stage. Requires `RATCHET_RELEASE=true`. On demand it tags the next semver version (bump chosen at dispatch) and publishes a changelog built from the titles of the PRs merged since the last release. With no merges since the last tag it exits with a "nothing to release" message, not an error. With the variable unset it no-ops. |
+| `release` | manual (`workflow_dispatch`) | OPTIONAL, off by default — the post-merge "ship" stage. Requires `RATCHET_RELEASE=true`. On demand it tags the next semver version (bump chosen at dispatch) and publishes a changelog built from the titles of the PRs merged since the last release. With no merges since the last tag it exits with a "nothing to release" message, not an error. Deploy is a second opt-in: set `RATCHET_DEPLOY=true` and `RATCHET_DEPLOY_COMMAND` to a repo-owned shell command. Repos that do not opt in have no deploy job and no deploy config. If deploy fails, the workflow is visibly red after publication; it does not delete or mutate the tag/release. |
 
 The GitHub-mutating workflows read `${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN }}`
 so they work with the default token and upgrade automatically when the PAT is
