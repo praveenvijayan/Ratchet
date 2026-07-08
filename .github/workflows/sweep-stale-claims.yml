@@ -1,10 +1,14 @@
 name: sweep-stale-claims
 
-# Poor-man's lease expiry. Every 30 min, find issues stuck in state:in-progress
-# that have shown no activity for STALE_HOURS, and return them to the queue.
-# Freshness is measured from the branch's last commit once work exists, but from
-# the claim event while the branch still sits at main HEAD -- otherwise a quiet
-# main would make every fresh, still-building claim look instantly stale.
+# Poor-man's lease expiry across every non-terminal state. Every 30 min, find
+# issues that a vanished agent could strand forever and return them to the queue:
+#   - state:in-progress      — a claim with no activity for STALE_HOURS.
+#   - state:in-review        — no open PR from its agent/issue-<N> branch (the PR
+#                              was closed or abandoned without merging).
+#   - state:changes-requested — no activity for STALE_HOURS after a human asked
+#                              for changes.
+# The per-issue decision lives in scripts/sweep-stale-claims.mjs so it can be
+# unit-tested off the network and can never diverge from what runs here.
 # A crashed agent costs at most STALE_HOURS of delay, no human action.
 
 on:
@@ -14,7 +18,8 @@ on:
 
 permissions:
   issues: write
-  contents: write   # delete orphaned (zero-commit) claim refs
+  pull-requests: read   # detect an open PR for an in-review claim branch
+  contents: write       # delete orphaned (zero-commit) claim refs
 
 env:
   STALE_HOURS: "2"
@@ -23,71 +28,92 @@ jobs:
   sweep:
     runs-on: ubuntu-latest
     steps:
+      # Checkout so the github-script step can import the shared decision helper
+      # (scripts/sweep-stale-claims.mjs) — the single source of truth for the
+      # sweep, reused verbatim by the test.
+      - uses: actions/checkout@v4
       - uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN }}
           script: |
-            const STALE_MS = Number(process.env.STALE_HOURS) * 3600 * 1000;
+            const { pathToFileURL } = require("node:url");
+            const { decideSweep, SWEPT_STATES } = await import(
+              pathToFileURL(`${process.env.GITHUB_WORKSPACE}/scripts/sweep-stale-claims.mjs`).href
+            );
+
+            const staleHours = process.env.STALE_HOURS;
+            const staleMs = Number(staleHours) * 3600 * 1000;
             const now = Date.now();
-            const stuck = await github.paginate(github.rest.issues.listForRepo, {
+
+            const open = await github.paginate(github.rest.issues.listForRepo, {
               owner: context.repo.owner, repo: context.repo.repo,
-              state: "open", labels: "state:in-progress", per_page: 100,
+              state: "open", per_page: 100,
             });
-            for (const issue of stuck) {
+
+            for (const issue of open) {
               if (issue.pull_request) continue;
+              const state = issue.labels.map(l => l.name).find(l => SWEPT_STATES.has(l));
+              if (!state) continue;
               const branch = `agent/issue-${issue.number}`;
 
-              // Does the claim branch carry real work, or is it a pure claim ref
-              // still pointing at main HEAD? This decides how we measure freshness:
-              // a zero-commit claim's branch tip IS main's last commit, so timing it
-              // from the commit date would make every fresh claim look stale the
-              // moment main goes quiet for >STALE_HOURS. Compare first, then time.
-              let aheadBy = null;
-              try {
-                const cmp = await github.rest.repos.compareCommitsWithBasehead({
-                  owner: context.repo.owner, repo: context.repo.repo,
-                  basehead: `main...${branch}`,
-                });
-                aheadBy = cmp.data.ahead_by;
-              } catch (e) {
-                // branch absent or uncomparable -> nothing to delete, treat as claim-timed
+              // Signals fetched only where a state needs them.
+              let aheadBy = null, lastCommitAt = null, claimAt = null, hasOpenPr = false;
+
+              // in-progress and changes-requested weigh the branch's commits.
+              if (state === "state:in-progress" || state === "state:changes-requested") {
+                try {
+                  const cmp = await github.rest.repos.compareCommitsWithBasehead({
+                    owner: context.repo.owner, repo: context.repo.repo, basehead: `main...${branch}`,
+                  });
+                  aheadBy = cmp.data.ahead_by;
+                } catch (e) {
+                  // branch absent or uncomparable -> claim-timed / no commit signal
+                }
+                if (aheadBy > 0) {
+                  try {
+                    const c = await github.rest.repos.listCommits({
+                      owner: context.repo.owner, repo: context.repo.repo, sha: branch, per_page: 1,
+                    });
+                    const d = c.data[0]?.commit?.committer?.date;
+                    lastCommitAt = d ? new Date(d).getTime() : null;
+                  } catch (e) {
+                    // branch vanished between compare and list -> fall back inside the helper
+                  }
+                }
               }
 
-              // Pick the freshness reference and record its source for the comment.
-              // - Commits ahead of main -> the branch's last commit (real work in flight).
-              // - Zero commits (or no branch) -> the claim event: the most recent
-              //   `state:in-progress` labeled event, falling back to issue.updated_at.
-              let ref, source;
-              if (aheadBy > 0) {
-                let lastCommit = null;
-                try {
-                  const c = await github.rest.repos.listCommits({
-                    owner: context.repo.owner, repo: context.repo.repo, sha: branch, per_page: 1,
-                  });
-                  lastCommit = c.data[0]?.commit?.committer?.date;
-                } catch (e) {
-                  // branch vanished between compare and list -> fall back to issue update
-                }
-                ref = lastCommit ? new Date(lastCommit).getTime() : new Date(issue.updated_at).getTime();
-                source = lastCommit ? "last commit" : "issue update";
-              } else {
-                let claimAt = null;
+              // in-progress freshness can fall back to the claim event.
+              if (state === "state:in-progress") {
                 try {
                   const events = await github.paginate(github.rest.issues.listEvents, {
-                    owner: context.repo.owner, repo: context.repo.repo,
-                    issue_number: issue.number, per_page: 100,
+                    owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number, per_page: 100,
                   });
-                  const claims = events.filter(
-                    (e) => e.event === "labeled" && e.label && e.label.name === "state:in-progress",
-                  );
-                  claimAt = claims.length ? claims[claims.length - 1].created_at : null;
+                  const claims = events.filter(e => e.event === "labeled" && e.label && e.label.name === "state:in-progress");
+                  claimAt = claims.length ? new Date(claims[claims.length - 1].created_at).getTime() : null;
                 } catch (e) {
-                  // timeline unreadable -> fall back to issue update
+                  // timeline unreadable -> fall back to issue update inside the helper
                 }
-                ref = claimAt ? new Date(claimAt).getTime() : new Date(issue.updated_at).getTime();
-                source = claimAt ? "claim event" : "issue update";
               }
-              if (now - ref < STALE_MS) continue;
+
+              // in-review turns solely on whether a PR is still driving the branch.
+              if (state === "state:in-review") {
+                try {
+                  const prs = await github.rest.pulls.list({
+                    owner: context.repo.owner, repo: context.repo.repo,
+                    state: "open", head: `${context.repo.owner}:${branch}`, per_page: 1,
+                  });
+                  hasOpenPr = prs.data.length > 0;
+                } catch (e) {
+                  // PR list unreadable -> treat as an open PR (safe: never sweep on doubt)
+                  hasOpenPr = true;
+                }
+              }
+
+              const decision = decideSweep({
+                state, now, staleMs, staleHours, branch, aheadBy, lastCommitAt, claimAt,
+                updatedAt: new Date(issue.updated_at).getTime(), hasOpenPr,
+              });
+              if (!decision.sweep) continue;
 
               const labels = issue.labels.map(l => l.name).filter(l => !l.startsWith("state:"));
               labels.push("state:ready");
@@ -97,20 +123,13 @@ jobs:
                 assignees: issue.assignees.map(a => a.login),
               }).catch(() => {});
 
-              // A pure claim (zero commits beyond main, no PR) is litter: delete the
-              // ref so the issue can be cleanly re-claimed. Never delete a branch that
-              // has commits — that work is recoverable and stays for a human to inspect.
-              let deleted = false;
-              if (aheadBy === 0) {
+              if (decision.deleteRef) {
                 await github.rest.git.deleteRef({
                   owner: context.repo.owner, repo: context.repo.repo, ref: `heads/${branch}`,
-                }).then(() => { deleted = true; }).catch(() => {});
+                }).catch(() => {});
               }
 
               await github.rest.issues.createComment({
-                owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number,
-                body: deleted
-                  ? `Stale claim swept: \`${branch}\` had no work for >${process.env.STALE_HOURS}h (measured from ${source}). Orphaned claim ref deleted; issue returned to \`state:ready\`.`
-                  : `Stale claim swept: no activity on \`${branch}\` for >${process.env.STALE_HOURS}h (measured from ${source}). Branch kept (has commits); issue returned to \`state:ready\`.`,
+                owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number, body: decision.comment,
               });
             }
