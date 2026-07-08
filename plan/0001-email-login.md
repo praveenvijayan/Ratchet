@@ -13,4 +13,4 @@ separate plan files.
 - [ ] `POST /login` accepts `{ email, password }` and returns a session token on success
 - [ ] Invalid credentials return `401` with a generic message (no user enumeration)
 - [ ] Passwords are verified against the stored hash, never compared in plain text
-- [ ] A failing test exists for each of the above before implementation
+- [ ] Every criterion above has exactly one test named after it

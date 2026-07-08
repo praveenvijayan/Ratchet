@@ -27,7 +27,7 @@ One or two sentences: what this is and why it exists.
 - [ ] <observable, testable outcome 1>
 - [ ] <observable, testable outcome 2>
 - [ ] <what the user sees when it fails — a clear message, never a raw error>
-- [ ] <a test exists covering the above>
+- [ ] Every criterion above has exactly one test named after it
 ```
 
 **Good criteria are observable outcomes, not tasks.** "Returns 401 on bad
@@ -40,6 +40,15 @@ criteria must say what the user sees when it does — "Invalid credentials retur
 trace". Error handling is part of every issue's definition of done (Hard Rule 8
 in `AGENTS.md`), so criteria that spell out the failure behaviour give the
 agent and the reviewer the same target.
+
+**The criteria are the test plan.** Each `- [ ]` criterion gets exactly one
+test, named after it, exercising behaviour through the public interface — never
+mocks or implementation details. A test that maps back to no criterion (and no
+bug being fixed) does not get written; test count is bounded by criteria count.
+This is deliberate: it gives the building agent a stopping condition, and lets
+the reviewer verify correctness by diffing test names against criteria. If more
+tests seem genuinely needed, the criteria are incomplete — that is a planning
+gap, so refine the plan file (or add one); never pad the suite.
 
 ## File naming
 
