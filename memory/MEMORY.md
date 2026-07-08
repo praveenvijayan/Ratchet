@@ -34,6 +34,10 @@ Rules:
   (`<!-- ratchet-heartbeat -->`) during long builds; `sweep-stale-claims` times
   freshness from the newest of commit/heartbeat/claim via `scripts/sweep-lease.mjs`,
   so a live-but-quiet claim outlives `STALE_HOURS` but a crashed one is still swept (#8).
+- Closed-issue plan hygiene is automatic: `.github/workflows/archive-closed-plans.yml`
+  runs `archive-closed-plans.mjs` on a daily schedule and lands the moves as a PR
+  from the stable `chore/archive-closed-plans` branch — never a push to main; a
+  clean sweep (nothing maps to a closed issue) opens no PR (#51).
 - `ratchet-metrics` derives loop health read-only from issue timelines: "merged"
   = issue closed with `state_reason: completed`; cycle time = first `state:ready`
   label → that close; sweeps are counted from `sweep-stale-claims`'
