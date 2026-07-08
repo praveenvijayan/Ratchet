@@ -1,0 +1,29 @@
+name: pr-gates
+
+# Runs the GATES.md gates server-side on every agent PR, so the human
+# reviewer's trust anchor is a machine-verified check — not just the agent's
+# self-reported gate checklist in the PR body. Both this workflow and the
+# local verify step (AGENTS.md step 4) invoke scripts/run-gates.mjs, which
+# parses the commands out of GATES.md, so CI and the developer machine can
+# never run a different set of gates.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    # Only PRs coming from an agent/issue-* branch carry the self-reported
+    # checklist this backstops; skip everything else.
+    if: startsWith(github.head_ref, 'agent/issue-')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Run GATES.md gates
+        run: node scripts/run-gates.mjs
