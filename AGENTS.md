@@ -153,11 +153,17 @@ introduces or touches, with a clear, user-friendly message wherever a user can
 see the failure — this is part of the criteria, not an addition to them.
 **The criteria are the test plan**: write exactly one test per acceptance
 criterion, named after it, exercising behaviour through the public interface —
-no mock-verifying tests, no implementation-detail assertions. A test that maps
-to no criterion (and no bug being fixed) is padding; don't write it. If the
-work genuinely needs tests the criteria don't cover, the criteria are
-incomplete — that is a planning gap (capture a `plan/*.md`), not a licence to
-grow the suite. If you notice a
+no mock-verifying tests, no implementation-detail assertions. **Plus any tests
+the plan explicitly asks for**: a plan file may carry an optional `## Test notes`
+section (edge cases, property/regression/integration coverage) and an optional
+`## Non-functional` section (performance, accessibility, load, migration
+constraints). Tests and checks demanded by either are first-class, not padding —
+the plan asked for them, so they are planned coverage; write them and name each
+after the requirement it covers. What stays padding is a test that maps to
+*none* of these — no criterion, no `## Test notes`/`## Non-functional`
+requirement, and no bug being fixed; don't write it. If the work genuinely needs
+tests none of these cover, the plan is incomplete — that is a planning gap
+(capture or refine a `plan/*.md`), not a licence to grow the suite. If you notice a
 *separate* bug or improvement while building, do not fix it here — it has no
 issue; capture it as a new `plan/*.md` and keep your changes scoped to the
 current issue. If scope exceeds the issue (~400 changed lines or ~6 files),

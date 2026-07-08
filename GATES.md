@@ -35,7 +35,8 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 | 4     | test        | `node scripts/plan-sync.test.mjs` | exit 0         |
 | 4b    | test        | `node scripts/plan-sync-concurrency.test.mjs` | exit 0 |
 | 4c    | test        | `node scripts/release.test.mjs`   | exit 0 |
-| 4d    | test        | `node scripts/archive-closed-plans.test.mjs` | exit 0 |
+| 4d    | test        | `node scripts/sweep-stale-claims.test.mjs` | exit 0 |
+| 4e    | test        | `node scripts/archive-closed-plans.test.mjs` | exit 0 |
 | 5     | build       | TODO: build command               | —              |
 | 6     | audit       | TODO: audit command               | —              |
 | 7     | secret-scan | TODO: secret-scan command         | —              |

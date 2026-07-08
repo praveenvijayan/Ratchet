@@ -22,6 +22,10 @@ Rules:
 - `scripts/criteria.mjs` is the single "has acceptance criteria" rule, shared by
   `plan-sync.mjs` and the `unblock-dependents` workflow so promote-vs-hold can
   never diverge from what the compiler decided at creation (#5).
+- `ratchet-run` treats the issue body as a trust boundary: it only works issues
+  whose body carries a `plan-id` marker and still matches `plan/<slug>.md`
+  (`scripts/verify-issue-body.mjs`); an edited body is commented + skipped with
+  no code changes. Threat model documented in DOCS.md §6 Security (#17).
 - Claim leases are renewable: an agent posts a heartbeat comment
   (`<!-- ratchet-heartbeat -->`) during long builds; `sweep-stale-claims` times
   freshness from the newest of commit/heartbeat/claim via `scripts/sweep-lease.mjs`,

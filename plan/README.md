@@ -43,12 +43,49 @@ agent and the reviewer the same target.
 
 **The criteria are the test plan.** Each `- [ ]` criterion gets exactly one
 test, named after it, exercising behaviour through the public interface — never
-mocks or implementation details. A test that maps back to no criterion (and no
-bug being fixed) does not get written; test count is bounded by criteria count.
-This is deliberate: it gives the building agent a stopping condition, and lets
-the reviewer verify correctness by diffing test names against criteria. If more
-tests seem genuinely needed, the criteria are incomplete — that is a planning
-gap, so refine the plan file (or add one); never pad the suite.
+mocks or implementation details. This gives the building agent a stopping
+condition and lets the reviewer verify correctness by diffing test names against
+criteria. By default the test count is bounded by the criteria count: a test
+that maps to no criterion, no bug being fixed, and no section below is padding
+and does not get written. If more coverage seems genuinely needed, don't
+improvise it into the suite — say so *in the plan*, using the optional sections
+below (or refine the criteria). Planned tests are welcome; unplanned ones are
+padding.
+
+### Optional sections — raising the floor above the happy path
+
+Acceptance criteria are the floor, not the ceiling: production defects live
+precisely in the cases the criteria didn't enumerate. Two **optional** sections
+let a plan demand more without weakening the one-test-per-criterion rule. Put
+them in the body below the criteria; the sync carries them into the issue
+verbatim (no compiler change — a plan that omits both compiles and behaves
+exactly as it always has), and the building agent must honour them.
+
+```markdown
+## Non-functional
+- p95 request latency stays under 200 ms at 100 rps
+- all interactive controls reachable and operable by keyboard
+
+## Test notes
+- exercise the retry path under simulated network loss
+- property test: encode∘decode is identity for any valid input
+```
+
+- **`## Non-functional`** — constraints the change must satisfy that aren't a
+  single observable behaviour: performance budgets, accessibility, load,
+  security, migration safety. A building agent treats each as a requirement to
+  meet **and verify** — a stated latency budget means adding the check that
+  proves it, not hoping.
+- **`## Test notes`** — specific tests the plan wants **beyond** the
+  criteria-mapped set: edge cases, property/regression/integration coverage. A
+  building agent writes these in addition to the per-criterion tests, each named
+  after the case it covers. Because the plan asked for them, they are planned
+  coverage, not padding (see `AGENTS.md` step 3).
+
+**Use plain `-` bullets in both sections, never `- [ ]`.** Only a
+`## Acceptance criteria` block makes an issue pickable, and the readiness check
+looks for its checkboxes — reserving `- [ ]` for criteria keeps "which boxes are
+the criteria" unambiguous for the reviewer and the sync alike.
 
 ## File naming
 
