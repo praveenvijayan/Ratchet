@@ -72,8 +72,15 @@ where one PR closes one issue, order them so dependencies precede dependents, an
 write one file each. Use `blocked_by` with the **slugs** of files in this plan
 (never issue numbers). Priority: a broken core flow/crash is `high`, a normal
 defect `medium`, cosmetic `low`; state your choice. Keep acceptance criteria
-outcome-focused; if the user diagnosed a cause you may add a short `## Notes`,
-but never prescribe the implementation.
+outcome-focused, and when the change has user-visible failure modes, write them
+as concrete criteria — what the user sees on invalid input, a failed call, a
+timeout ("returns 401 with a generic message", "shows a retry prompt") — never
+a vague "handles errors". Error handling is part of every issue's definition of
+done (AGENTS.md Hard Rule 8). Write criteria knowing they are also the test
+plan: each criterion becomes exactly one test named after it, and nothing else
+gets tested — so every behaviour worth a test must appear as a criterion, and
+anything not worth a test should not be one. If the user diagnosed a cause you
+may add a short `## Notes`, but never prescribe the implementation.
 
 ## Step 3 — Push and open/update the planning PR
 
