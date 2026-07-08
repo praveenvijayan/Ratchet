@@ -7,7 +7,7 @@
 // supplies the plan text and acts on the verdict. Zero dependencies.
 //
 // CLI mode (used by .github/workflows/ratchet-run.yml):
-//   ISSUE_BODY_FILE=/path/to/body.md PLAN_DIR=plan node scripts/verify-issue-body.mjs
+//   ISSUE_BODY_FILE=body.md ISSUE_TITLE_FILE=title.txt PLAN_DIR=plan node scripts/verify-issue-body.mjs
 //   exit 0 + "VERIFIED ..." when safe to run; exit 1 + reason when it must skip.
 
 import { existsSync, readFileSync } from "node:fs";
@@ -16,6 +16,32 @@ import { pathToFileURL } from "node:url";
 import { planSlug } from "./criteria.mjs";
 
 export { planSlug };
+
+// A plan slug is a filename stem (see plan/README.md): lowercase letters and
+// digits in hyphen-joined segments, e.g. `0030-runner-title-comment-trust-boundary`.
+// The slug is attacker-influenced text (it comes from the mutable issue body) and
+// is joined into a filesystem path, so anything outside this charset — a dot, a
+// slash, `..`, uppercase, whitespace — is rejected before it can touch the disk.
+const SAFE_SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+export function isSafeSlug(slug) {
+  return typeof slug === "string" && SAFE_SLUG.test(slug);
+}
+
+// The plan file's `title:` frontmatter value — exactly what plan-sync compiles
+// into the issue title. Mirrors plan-sync's parsePlan scalar-key handling (strip
+// an inline `# comment`, trim, strip one layer of surrounding quotes) so a
+// verified title matches byte-for-byte what a reviewer approved. null when the
+// frontmatter is absent or carries no title.
+export function planTitle(planText) {
+  const m = String(planText).match(/^---\n([\s\S]*?)\n---/);
+  if (!m) return null;
+  for (const line of m[1].split("\n")) {
+    const kv = line.match(/^(\w+):\s*(.*)$/);
+    if (!kv || kv[1] !== "title") continue;
+    return kv[2].replace(/\s+#.*$/, "").trim().replace(/^["']|["']$/g, "");
+  }
+  return null;
+}
 
 // The plan file's authored content: everything below the frontmatter, trimmed.
 // Mirrors plan-sync's parsePlan body extraction exactly.
@@ -47,12 +73,24 @@ export function bodyMatchesPlan(issueBody, planText) {
   return normalize(planBody(planText)) === normalize(issueCore(issueBody));
 }
 
+// Does the issue title still match the reviewed plan's `title:` frontmatter?
+// The title is a second mutable channel into the agent, so it is verified the
+// same way the body is: any drift from the plan means it was edited after review.
+export function titleMatchesPlan(issueTitle, planText) {
+  return normalize(planTitle(planText)) === normalize(issueTitle);
+}
+
 // The full verdict the runner acts on. `planText` is null when no plan file
-// exists for the slug. Returns { verified, reason, slug? }.
-export function verify(issueBody, planText) {
+// exists for the slug; `issueTitle` is the issue's current title. Returns
+// { verified, reason, slug? }. Every path fails closed — an unverifiable or
+// edited body, title, or slug refuses the run rather than trusting it.
+export function verify(issueBody, planText, issueTitle) {
   const slug = planSlug(issueBody);
   if (!slug) {
     return { verified: false, reason: "issue body carries no `plan-id` marker; the runner only works issues compiled from a reviewed plan file" };
+  }
+  if (!isSafeSlug(slug)) {
+    return { verified: false, reason: `\`plan-id\` slug \`${slug}\` contains characters outside the safe slug charset (lowercase letters, digits, hyphen-joined segments); refusing to run on an unverifiable, path-unsafe slug`, slug };
   }
   if (planText == null) {
     return { verified: false, reason: `no plan file \`plan/${slug}.md\` found on main to verify against; refusing to run on an unverifiable issue`, slug };
@@ -60,22 +98,31 @@ export function verify(issueBody, planText) {
   if (!bodyMatchesPlan(issueBody, planText)) {
     return { verified: false, reason: `issue body no longer matches \`plan/${slug}.md\` — it was edited after compilation. Re-sync from the plan file, or revert the edit, to re-enable automation`, slug };
   }
-  return { verified: true, reason: `issue body matches \`plan/${slug}.md\``, slug };
+  if (!titleMatchesPlan(issueTitle, planText)) {
+    return { verified: false, reason: `issue title no longer matches the \`title:\` in \`plan/${slug}.md\` — it was edited after compilation. The title is never work instructions; re-sync from the plan file, or revert the edit, to re-enable automation`, slug };
+  }
+  return { verified: true, reason: `issue body and title match \`plan/${slug}.md\``, slug };
 }
 
 // --- CLI entry: only when executed directly, never when imported by a test ---
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const bodyFile = process.env.ISSUE_BODY_FILE;
+  const titleFile = process.env.ISSUE_TITLE_FILE;
   const planDir = process.env.PLAN_DIR || "plan";
   if (!bodyFile || !existsSync(bodyFile)) {
     console.error(`ISSUE_BODY_FILE not found: ${bodyFile || "(unset)"}`);
     process.exit(1);
   }
   const issueBody = readFileSync(bodyFile, "utf8");
+  const issueTitle = titleFile && existsSync(titleFile) ? readFileSync(titleFile, "utf8").trim() : "";
   const slug = planSlug(issueBody);
-  const planPath = slug ? join(planDir, `${slug}.md`) : null;
+  // Only join the slug into a path once it is known safe — an unsafe slug is
+  // attacker-influenced text and must never reach the filesystem. verify() also
+  // re-checks the charset, so the skip reason is identical whether or not a file
+  // happened to exist at a traversed path.
+  const planPath = isSafeSlug(slug) ? join(planDir, `${slug}.md`) : null;
   const planText = planPath && existsSync(planPath) ? readFileSync(planPath, "utf8") : null;
-  const { verified, reason } = verify(issueBody, planText);
+  const { verified, reason } = verify(issueBody, planText, issueTitle);
   console.log(verified ? `VERIFIED: ${reason}` : `SKIP: ${reason}`);
   process.exit(verified ? 0 : 1);
 }
