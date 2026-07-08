@@ -38,6 +38,7 @@ function summary(line) {
 }
 // GitHub annotations render in the check's output; harmless plain text locally.
 const notice = (msg) => console.log(`::notice::${msg}`);
+const warning = (msg) => console.log(`::warning::${msg}`);
 const errorAnnot = (msg) => console.log(`::error::${msg}`);
 
 if (!existsSync(GATES_FILE)) {
@@ -108,5 +109,9 @@ for (const { order, gate, command } of gates) {
 const done = run > 0
   ? `${run} gate(s) passed, ${skipped} skipped.`
   : `No runnable gates — ${skipped} skipped, 0 run.`;
+if (run === 0) {
+  warning(`${done} This green check is vacuous: GATES.md only contains TODO rows, so no real verification ran.`);
+  summary("\n⚠️ **Green but vacuous:** every gate row is `TODO`, so this run verified no real commands.");
+}
 summary(`\n${done}`);
 console.log(`\n${done}`);
