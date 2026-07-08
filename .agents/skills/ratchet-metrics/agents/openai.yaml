@@ -1,0 +1,7 @@
+# Codex skill metadata. Read-only reporting; explicit-invoke for consistency.
+# Invoke with /skills or $ratchet-metrics.
+policy:
+  allow_implicit_invocation: false
+interface:
+  display_name: "ratchet-metrics"
+  short_description: "Report loop health (cycle time, rework, sweeps, queue depth) from GitHub, read-only."
