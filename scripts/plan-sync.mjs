@@ -90,20 +90,46 @@ function stateLabels(issue) {
   return issue.labels.map((l) => (typeof l === "string" ? l : l.name));
 }
 
+// Detect blocked_by cycles among plan files. Only edges whose target is also a
+// plan file in this sync can form a cycle (issues carry no outgoing blocked_by),
+// so the graph is built from `plans` alone. Returns one ordered slug path per
+// distinct cycle (deduped by membership); a plan blocked on itself yields a
+// single-slug cycle. DFS with a recursion stack: a back edge to a slug still on
+// the stack closes a cycle.
+function findCycles(plans) {
+  const adj = new Map();
+  for (const [slug, { fm }] of plans) {
+    adj.set(slug, (fm.blocked_by || []).filter((s) => plans.has(s)));
+  }
+  const cycles = [];
+  const seen = new Set();   // membership keys already reported
+  const color = new Map();  // slug -> 1 (on stack) | 2 (done); absent = unseen
+  const path = [];
+  const dfs = (v) => {
+    color.set(v, 1);
+    path.push(v);
+    for (const w of adj.get(v)) {
+      if (color.get(w) === 1) {
+        const cyc = path.slice(path.indexOf(w));
+        const key = [...cyc].sort().join(",");
+        if (!seen.has(key)) { seen.add(key); cycles.push(cyc); }
+      } else if (!color.has(w)) {
+        dfs(w);
+      }
+    }
+    path.pop();
+    color.set(v, 2);
+  };
+  for (const v of adj.keys()) if (!color.has(v)) dfs(v);
+  return cycles;
+}
+
 async function main() {
   const files = (await readdir(PLAN_DIR)).filter((f) => f.endsWith(".md") && f !== "README.md");
-  const issues = await listAllIssues();
-  const bySlug = new Map();
-  for (const issue of issues) {
-    const mm = (issue.body || "").match(/<!-- plan-id: (.+?) -->/);
-    if (mm) bySlug.set(mm[1], issue);
-  }
 
-  // Pass 1: parse plan files. Seed slug -> number from every marker-bearing
-  // issue (not just those with a live plan file) so blockers on removed or
-  // skipped plans still resolve.
-  const slugToNumber = new Map();
-  for (const [slug, issue] of bySlug) slugToNumber.set(slug, issue.number);
+  // Pass 1: parse plan files (no network yet). Done first so the blocked_by
+  // cycle gate below can fail before we touch GitHub — a deadlocked plan set
+  // must leave every issue untouched.
   const plans = new Map();
   for (const file of files) {
     const slug = file.replace(/\.md$/, "");
@@ -133,6 +159,31 @@ async function main() {
     }
     plans.set(slug, parsed);
   }
+
+  // Cycle gate: a blocked_by cycle among plan files is a deadlock — no issue in
+  // the cycle can ever be unblocked and unblock-dependents would never fire.
+  // Fail loudly, naming every slug in each cycle, before creating or editing
+  // anything on GitHub.
+  const cycles = findCycles(plans);
+  if (cycles.length) {
+    console.error("ERROR: blocked_by cycle detected among plan files — this is a deadlock.");
+    console.error("No issue in a cycle can ever be unblocked. Nothing was changed. Break each");
+    console.error("cycle by removing a blocked_by edge, then re-sync:");
+    for (const cyc of cycles) console.error(`  • ${cyc.join(" → ")} → ${cyc[0]}`);
+    process.exit(1);
+  }
+
+  // Now read existing issues (network). Seed slug -> number from every
+  // marker-bearing issue (not just those with a live plan file) so blockers on
+  // removed or skipped plans still resolve.
+  const issues = await listAllIssues();
+  const bySlug = new Map();
+  for (const issue of issues) {
+    const mm = (issue.body || "").match(/<!-- plan-id: (.+?) -->/);
+    if (mm) bySlug.set(mm[1], issue);
+  }
+  const slugToNumber = new Map();
+  for (const [slug, issue] of bySlug) slugToNumber.set(slug, issue.number);
 
   // Pass 2a: create a minimal issue for every new plan BEFORE rendering any
   // body, so slugToNumber is total and a blocker can never be dropped just

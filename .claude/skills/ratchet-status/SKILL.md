@@ -28,6 +28,15 @@ report. The goal: turn "backlog drained" into a specific, actionable picture.
    - **Blocked chains** — for each `state:blocked` issue, read `Blocked by #N`
      and check whether the blockers are open. If a blocker is itself a draft,
      that draft is the **root** freezing the chain — call it out.
+   - **Blocked cycles** — build the graph from those `Blocked by #N` links (open
+     `state:blocked` issue → each open blocker) and look for a loop: follow the
+     links from each blocked issue and if you return to an issue already on the
+     current path, that set is a **deadlock cycle** — no member can ever unblock,
+     and `unblock-dependents` never fires for any of them. Report each cycle,
+     naming every issue in it (e.g. "#7 → #9 → #7"). This is the runtime twin of
+     the `plan-sync` cycle gate: the gate stops cycles born in one sync, this
+     catches any that already reached issues. A cycle is a **root** cause —
+     surface it above ordinary blocked chains.
    - **In-flight** — note any `state:in-progress` (claimed; maybe abandoned →
      `sweep-stale-claims` will requeue) or `state:in-review` (waiting on a human
      to merge/review — the loop advances when they do).
@@ -43,6 +52,8 @@ report. The goal: turn "backlog drained" into a specific, actionable picture.
      files and re-plan, or they'll never be picked."
    - "All open issues are blocked on #18 (a draft). Fix #18 first; the chain
      unblocks itself on merge."
+   - "#7 and #9 block each other (deadlock cycle). Break one `Blocked by` link —
+     edit a plan file to drop the edge and re-sync — or the pair is frozen forever."
    - "Queue genuinely empty — plan new work with `/ratchet-plan`."
 
 ## Hard rules

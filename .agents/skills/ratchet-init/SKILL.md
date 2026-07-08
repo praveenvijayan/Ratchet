@@ -7,8 +7,9 @@ allowed-tools: Read, Edit, Write, Glob, Grep, Bash(ls:*), Bash(gh:*)
 
 # Factory init (one-time per repo)
 
-Three jobs: create the state machine's labels, make `AGENTS.md` match this
-project's stack, and ensure the PAT the issue flow depends on is in place.
+Jobs: create the state machine's labels, make `AGENTS.md` match this project's
+stack, ensure the PAT the issue flow depends on is in place, and offer to
+protect `main` so the human's merge is the only way onto it.
 
 ## Preflight
 
@@ -148,7 +149,76 @@ creating a token and setting a secret are credential actions the user owns):
   4. State clearly: until both are set, automation falls back to the default
      token and the loop may stall on automated issue closes.
 
-## Step 5 — Report and hand off
+## Step 5 — Offer branch protection for `main` (only with explicit confirmation)
+
+Hard Rule 6 ("never merge, never push to `main`") is prompt obedience until a
+GitHub mechanism enforces it — an agent with push access can violate every rule
+mechanically. This step offers to protect `main` so the human's merge is the
+only way in. It is the **one** place `/ratchet-init` may change repo settings,
+and only after the user explicitly says yes.
+
+1. **Read the current status first — always, and record it.** The Step 6 report
+   must state `main`'s protection status no matter what happens below.
+   ```
+   gh api "repos/{owner}/{repo}/branches/main/protection" 2>/dev/null
+   ```
+   Interpret the outcome:
+   - **`200`** → already protected. Note whether it already requires a PR, the
+     `gates` check, and blocks force pushes.
+   - **`404`** (`Branch not protected`) → unprotected.
+   - **`403`** → your token cannot even read protection; treat as the
+     permission case in step 4 below and still report it.
+
+2. **If it is already protected with all three settings**, there is nothing to
+   do — say so and go to Step 6 (this keeps the skill idempotent).
+
+3. **Otherwise, offer — describe the exact changes and ask the user to confirm.**
+   Apply **only** on an explicit yes. The protection to offer:
+   - **Require a pull request before merging** — blocks direct pushes to `main`
+     (`required_pull_request_reviews` with `required_approving_review_count: 0`;
+     the human's merge stays the gate, no forced approval ceremony).
+   - **Require the gates status check** to pass. GitHub reports the
+     `.github/workflows/pr-gates.yml` check under the context name **`gates`**
+     (the job id) — that exact string is what must be required, not the workflow
+     filename, or the requirement would reference a check that never reports and
+     no PR could merge.
+   - **Block force pushes and branch deletion** on `main`.
+   If the user **declines**, change nothing and record in the report that `main`
+   is unprotected by the user's choice. Declining is a valid outcome, not a
+   failure.
+
+4. **Apply (only after an explicit yes):**
+   ```
+   gh api -X PUT "repos/{owner}/{repo}/branches/main/protection" --input - <<'JSON'
+   {
+     "required_status_checks": { "strict": false, "contexts": ["gates"] },
+     "enforce_admins": false,
+     "required_pull_request_reviews": { "required_approving_review_count": 0 },
+     "restrictions": null,
+     "allow_force_pushes": false,
+     "allow_deletions": false
+   }
+   JSON
+   ```
+   `enforce_admins: false` deliberately leaves the repo owner an escape hatch for
+   a sanctioned hotfix; the requirement still blocks every agent.
+   - **On success**, re-read protection and confirm the three settings took
+     effect; report them.
+   - **On a `403`/permission error, do not fail the whole init and do not claim
+     success.** Setting protection needs **Administration: Read/Write** on the
+     repo, which the default `GITHUB_TOKEN` and a PAT without that scope lack.
+     Report *exactly* that the token is missing the administration permission,
+     then give the manual fallback:
+     1. In the repo, **Settings → Branches → Add rule** for `main`: require a
+        pull request, require the **`gates`** status check, and block force
+        pushes; **or**
+     2. re-run `/ratchet-init` with a PAT that has **Administration: Read/Write**
+        on this repo.
+   - On any other error, report the HTTP status and message rather than
+     swallowing it — a silent settings failure is exactly what this step exists
+     to prevent.
+
+## Step 6 — Report and hand off
 
 - Confirm the nine labels (`gh label list`).
 - Confirm `memory/USER.md`, `memory/MEMORY.md`, and `memory/ARCHITECTURE.md` exist; if just created, remind
@@ -156,8 +226,12 @@ creating a token and setting a secret are credential actions the user owns):
 - Show the filled `GATES.md` table; call out every `TODO` row.
 - State PAT status: `FACTORY_PAT` secret present? `.env` `GITHUB_PAT` present?
   If either is missing, repeat the Step 3 instruction.
-- Remaining human-owned steps: verify the detected gates; confirm the three
-  workflows are under `.github/workflows/`; recommended — protect `main`.
+- **Always state `main`'s branch-protection status** (from Step 5): protected
+  with require-PR + `gates` check + no-force-push, partially protected (name the
+  gaps), unprotected by the user's choice, or not set because the token lacked
+  the administration permission (with the manual steps). Never omit this line.
+- Remaining human-owned steps: verify the detected gates; confirm the workflows
+  are under `.github/workflows/`.
 
 ## Hard rules
 
@@ -168,6 +242,8 @@ creating a token and setting a secret are credential actions the user owns):
   committed scanner config → `TODO: secret-scan`.
 - Detection never executes the project's build/test commands, nor the security
   gates (`audit`, `secret-scan`) — a scan looks read-only but is still not run.
-- File edits, labels, and read-only checks only — never change branch
-  protection, repo settings, or visibility.
+- The **only** repo-setting this skill may change is `main`'s branch protection,
+  and only after the user explicitly confirms it in Step 5. Everything else is
+  file edits, labels, and read-only checks — never change other repo settings or
+  visibility, and never touch branch protection without an explicit yes.
 - Idempotent: safe to re-run any time the stack, labels, or token drift.
