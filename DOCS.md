@@ -523,7 +523,7 @@ files (`GATES.md` plus everything under `memory/`) live outside it.
 
 ```
 /ratchet-update           # pull upstream main onto a review branch
-/ratchet-update v1.2.0    # or a specific release tag
+/ratchet-update v1.2.0    # or a specific released tag (must exist upstream)
 ```
 
 It pulls only framework paths (skills, workflows, the whole `scripts/` tree,
@@ -538,8 +538,11 @@ review the diff and open a PR. It never touches the project-owned set:
 | `.github/workflows/`, `scripts/*`, `setup.sh` | your `plan/*.md` issue files |
 | `plan/README.md`, `.env.example` | `.env`, `README.md`, `LICENSE`, `.gitignore`, your code |
 
-`.ratchet-version` records the installed version. Tag releases upstream
-(`git tag v1.2.0 && git push --tags`) so consumers can pin to a known version.
+`.ratchet-version` records the installed version. Pinning an update to a tag
+(`/ratchet-update v1.2.0`) only works for a version the upstream has actually
+released; those tags are cut by the opt-in release lane (§6), which creates each
+one idempotently. Until a release is cut there may be no tags to pin to, so plain
+`/ratchet-update` tracks `main`.
 
 ---
 
