@@ -17,7 +17,7 @@ import { join } from "node:path";
 const planDir = await mkdtemp(join(tmpdir(), "plan-sync-test-"));
 await writeFile(join(planDir, "0036-existing.md"), `---
 title: Existing issue gains new blockers
-priority: P1
+priority: high
 blocked_by: [0063-new-blocker, 0001-removed-plan, 0999-typo]
 ---
 Body of 0036.
@@ -25,14 +25,29 @@ Body of 0036.
 ## Acceptance criteria
 - [ ] something
 `);
+// Valid priority, but deliberately (a) omits the required blocked_by and (b)
+// carries an unknown key — both must warn without blocking the sync.
 await writeFile(join(planDir, "0063-new-blocker.md"), `---
 title: Brand-new blocker
-priority: P2
+priority: medium
+owner: nobody
 ---
 Body of 0063.
 
 ## Acceptance criteria
 - [ ] something else
+`);
+// Invalid priority: must be skipped (never created) with a loud warning that
+// names the file and the offending value.
+await writeFile(join(planDir, "0077-bad-priority.md"), `---
+title: Has a bogus priority
+priority: P3
+blocked_by: []
+---
+Body of 0077.
+
+## Acceptance criteria
+- [ ] never created
 `);
 
 // --- in-memory GitHub API ----------------------------------------------
@@ -92,4 +107,26 @@ assert.ok(existing.body.includes("Blocked by #10"), "0036 must link the blocker 
 assert.ok(names(existing).includes("state:blocked"), `0036 should be blocked, got: ${names(existing)}`);
 assert.ok(logs.some((l) => l.includes("WARNING") && l.includes("0999-typo")), "unresolved slug must be warned about loudly");
 
-console.log("PASS plan-sync.test.mjs (6 assertions)");
+// Criterion 1 + 4: an invalid priority is skipped (never created) with a loud
+// warning naming the file and the offending value.
+const badPriority = [...issues.values()].find((i) => i.body.includes("plan-id: 0077-bad-priority"));
+assert.ok(!badPriority, "0077 with invalid priority must never be created");
+assert.ok(
+  logs.some((l) => l.includes("WARNING") && l.includes("0077-bad-priority") && l.includes("P3")),
+  "invalid priority must be warned about loudly, naming the file and the value",
+);
+
+// Criterion 2: a missing blocked_by warns (naming the file) but does not block
+// the sync — 0063 is still created and ready.
+assert.ok(
+  logs.some((l) => l.includes("WARNING") && l.includes("0063-new-blocker") && l.includes("blocked_by")),
+  "missing blocked_by must be warned about, naming the file",
+);
+
+// Criterion 3: an unknown frontmatter key warns but does not block the sync.
+assert.ok(
+  logs.some((l) => l.includes("WARNING") && l.includes("0063-new-blocker") && l.includes("owner")),
+  "unknown frontmatter key must be warned about, naming the file and key",
+);
+
+console.log("PASS plan-sync.test.mjs (10 assertions)");
