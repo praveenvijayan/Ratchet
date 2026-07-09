@@ -1,0 +1,8 @@
+# Codex skill metadata. Explicit-invoke only — starting or attaching to the
+# fleet supervisor is an operator action, never model-fired.
+# Invoke with /skills or $ratchet-herd.
+policy:
+  allow_implicit_invocation: false
+interface:
+  display_name: "ratchet-herd"
+  short_description: "Validate config, then start or attach to the herd supervisor."
