@@ -172,12 +172,13 @@ export async function pollOnce({
 const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // The poll loop. `--once` (once: true) runs a single pass and returns; the
-// default keeps polling every pollSeconds. `sleep` is injectable so tests can
-// bound the otherwise-infinite loop.
+// default keeps polling every pollSeconds. `step` is the per-pass work
+// (defaulting to pollOnce; the dispatcher composes survey + dispatch into it),
+// and `sleep` is injectable so tests can bound the otherwise-infinite loop.
 export async function runLoop(opts) {
-  const { once = false, pollSeconds = 60, sleep = defaultSleep } = opts;
+  const { once = false, pollSeconds = 60, sleep = defaultSleep, step = pollOnce } = opts;
   for (;;) {
-    await pollOnce(opts);
+    await step(opts);
     if (once) return;
     await sleep(pollSeconds * 1000);
   }
