@@ -9,7 +9,9 @@ node_modules/
 .DS_Store
 .obsidian/
 
-# Ratchet local runtime state (events, signals)
+# Ratchet local runtime state: watcher events/signals, and the herd
+# supervisor's per-worker logs (.ratchet/logs/), state (.ratchet/herd-state.json),
+# escalations, and per-operator config (.ratchet/herd.json).
 .ratchet/
 
 # Per-worktree claim-owner marker (written at claim time; see AGENTS.md step 2)
