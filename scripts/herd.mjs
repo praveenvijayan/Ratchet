@@ -16,6 +16,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync, realpathSync } from "node:fs";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { runLoop, ghJson } from "./herd-survey.mjs";
 
 // Config location, relative to the repo root (the supervisor's cwd).
 export const CONFIG_PATH = ".ratchet/herd.json";
@@ -185,15 +186,16 @@ export function main(argv) {
       console.log(`Wrote default config to ${written} (adapters: claude, codex).`);
       return 0;
     }
-    // No subcommand or `run`: the supervisor needs a config. Dispatch lands in a
-    // later herd issue; here we load and report so the missing-config and
-    // invalid-config paths are exercised end to end.
+    // No subcommand or `run`: validate the config and report. The actual poll
+    // loop runs from the CLI entrypoint below (it is async); this synchronous
+    // branch is the config-validation contract the missing-config and
+    // invalid-config paths are exercised through.
     if (cmd === undefined || cmd === "run") {
       const config = loadConfig();
       const names = Object.keys(config.adapters);
       console.log(
         `herd config OK: ${names.length} adapter(s) [${names.join(", ")}], ` +
-          `maxWorkers=${config.maxWorkers}. Dispatch is not implemented yet.`,
+          `maxWorkers=${config.maxWorkers}.`,
       );
       return 0;
     }
@@ -210,4 +212,31 @@ export function main(argv) {
 
 const isMain =
   process.argv[1] && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1]);
-if (isMain) process.exit(main(process.argv.slice(2)));
+if (isMain) {
+  const argv = process.argv.slice(2);
+  const cmd = argv[0];
+  if (cmd === undefined || cmd === "run") {
+    // Supervisor: validate the config, then poll. `--once` does a single pass
+    // and exits; otherwise it keeps polling every pollSeconds. Never merges,
+    // approves, closes, or labels anything — it observes and escalates.
+    let config;
+    try {
+      config = loadConfig();
+    } catch (e) {
+      if (e instanceof HerdConfigError) {
+        console.error(e.message);
+        process.exit(1);
+      }
+      throw e;
+    }
+    runLoop({ gh: ghJson, once: argv.includes("--once"), pollSeconds: config.pollSeconds }).then(
+      () => process.exit(0),
+      (e) => {
+        console.error(`herd: supervisor stopped on an unexpected error: ${e.message}`);
+        process.exit(1);
+      },
+    );
+  } else {
+    process.exit(main(argv));
+  }
+}
