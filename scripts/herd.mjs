@@ -13,8 +13,8 @@
 // Zero dependencies. Requires Node 20+. Run:  node scripts/herd.mjs init
 //                                             node scripts/herd.mjs run
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, realpathSync } from "node:fs";
-import { dirname } from "node:path";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, realpathSync, accessSync, constants as fsConstants } from "node:fs";
+import { dirname, join, delimiter as pathDelimiter } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runLoop, pollOnce, ghJson } from "./herd-survey.mjs";
 import { dispatchOne, surveyReady } from "./herd-dispatch.mjs";
@@ -114,8 +114,8 @@ export function normalizeConfig(raw, file = CONFIG_PATH) {
   if (!isPlainObject(raw)) fail("top level must be a JSON object.");
   if (!isPlainObject(raw.adapters) || Object.keys(raw.adapters).length === 0)
     fail(`"adapters" must be a non-empty object mapping an adapter name to its command config.`);
-  if (!isPlainObject(raw.routing) || typeof raw.routing.default !== "string" || raw.routing.default === "")
-    fail(`"routing.default" is required — name the adapter to use when no label matches.`);
+  if (!isPlainObject(raw.routing) || raw.routing.default === undefined)
+    fail(`"routing.default" is required — name the adapter (or ordered list of adapters) to use when no label matches.`);
 
   const adapters = {};
   for (const [name, adapter] of Object.entries(raw.adapters)) {
@@ -123,6 +123,12 @@ export function normalizeConfig(raw, file = CONFIG_PATH) {
       fail(`adapter "${name}" needs a non-empty "launch" command array.`);
     if ("resume" in adapter && (!Array.isArray(adapter.resume) || adapter.resume.length === 0))
       fail(`adapter "${name}" has a "resume" that is not a non-empty command array.`);
+    if (
+      "requiresEnv" in adapter &&
+      (!Array.isArray(adapter.requiresEnv) ||
+        !adapter.requiresEnv.every((v) => typeof v === "string" && v !== ""))
+    )
+      fail(`adapter "${name}" has a "requiresEnv" that is not an array of non-empty variable names.`);
     if ("model" in adapter && (typeof adapter.model !== "string" || adapter.model === ""))
       fail(`adapter "${name}" has a "model" that is not a non-empty string.`);
     // An adapter that uses the {model} placeholder anywhere it is substituted
@@ -141,19 +147,39 @@ export function normalizeConfig(raw, file = CONFIG_PATH) {
       resume: Array.isArray(adapter.resume) ? adapter.resume.slice() : adapter.launch.slice(),
       promptTemplate: typeof adapter.promptTemplate === "string" ? adapter.promptTemplate : "",
       env: isPlainObject(adapter.env) ? { ...adapter.env } : {},
+      // Environment variables that must be set and non-empty for this adapter to
+      // be considered available. Generic config the loader validates — never an
+      // adapter-specific name baked into the framework.
+      requiresEnv: Array.isArray(adapter.requiresEnv) ? adapter.requiresEnv.slice() : [],
       // Optional: present only when declared, so a model-free adapter is byte-for-byte
       // the shape it was before {model} existed (back-compat).
       ...(hasModel ? { model: adapter.model } : {}),
     };
   }
 
-  if (!(raw.routing.default in adapters))
-    fail(`"routing.default" names "${raw.routing.default}", which is not a defined adapter.`);
-  const labels = isPlainObject(raw.routing.labels) ? raw.routing.labels : {};
-  for (const [label, name] of Object.entries(labels)) {
-    if (!(name in adapters))
-      fail(`routing label "${label}" maps to "${name}", which is not a defined adapter.`);
-  }
+  // A route is an adapter name or a non-empty ordered list of adapter names.
+  // Normalize every route to a list and validate each name resolves to a defined
+  // adapter, naming the offending entry and the bad name on failure.
+  const normalizeRoute = (value, entry) => {
+    if (!Array.isArray(value) && typeof value !== "string")
+      fail(`routing entry ${entry} must be an adapter name or a non-empty array of adapter names.`);
+    const list = Array.isArray(value) ? value : [value];
+    if (list.length === 0)
+      fail(`routing entry ${entry} is an empty list — give at least one adapter name.`);
+    for (const name of list) {
+      if (typeof name !== "string" || name === "")
+        fail(`routing entry ${entry} must list adapter names as non-empty strings.`);
+      if (!(name in adapters))
+        fail(`routing entry ${entry} names "${name}", which is not a defined adapter.`);
+    }
+    return list.slice();
+  };
+
+  const defaultRoute = normalizeRoute(raw.routing.default, "routing.default");
+  const rawLabels = isPlainObject(raw.routing.labels) ? raw.routing.labels : {};
+  const labels = {};
+  for (const [label, value] of Object.entries(rawLabels))
+    labels[label] = normalizeRoute(value, `routing.labels["${label}"]`);
 
   const int = (value, fallback, field, min) => {
     if (value === undefined) return fallback;
@@ -175,7 +201,7 @@ export function normalizeConfig(raw, file = CONFIG_PATH) {
     logRetentionDays: int(raw.logRetentionDays, DEFAULTS.logRetentionDays, "logRetentionDays", 1),
     logDir: str(raw.logDir, DEFAULTS.logDir, "logDir"),
     adapters,
-    routing: { default: raw.routing.default, labels: { ...labels } },
+    routing: { default: defaultRoute, labels: { ...labels } },
   };
 }
 
@@ -234,16 +260,74 @@ export function initConfig(path = CONFIG_PATH) {
   return path;
 }
 
-// Resolve which adapter handles an issue given its labels. The first label (in
-// the order supplied) with a routing entry wins; if none match, the routing
-// default is used. Returns { name, adapter }.
-export function resolveAdapter(config, labels = []) {
-  for (const label of labels) {
-    const name = config.routing.labels[label];
-    if (name) return { name, adapter: config.adapters[name] };
+// Default availability probe: does `exe` resolve to an executable file? An exe
+// containing a path separator is checked at that path directly; a bare name is
+// searched across every PATH entry. Injectable everywhere it is used so tests
+// decide availability offline without a real fleet installed.
+export function executableOnPath(exe, env = process.env) {
+  if (typeof exe !== "string" || exe === "") return false;
+  const isExec = (p) => {
+    try {
+      accessSync(p, fsConstants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (exe.includes("/") || exe.includes("\\")) return isExec(exe);
+  const dirs = String(env.PATH || "").split(pathDelimiter).filter(Boolean);
+  return dirs.some((dir) => isExec(join(dir, exe)));
+}
+
+// Decide whether a single adapter can actually run right now, deterministically
+// and offline-testably: its launch executable must resolve on PATH AND every
+// variable it declares in `requiresEnv` must be set and non-empty. The launch
+// binary is checked first so the reason distinguishes a missing binary from an
+// unset env var. Returns { available, reason }; reason is null when available.
+export function adapterAvailability(adapter, { env = process.env, onPath = executableOnPath } = {}) {
+  const exe = adapter.launch[0];
+  if (!onPath(exe, env))
+    return { available: false, reason: `its launch binary "${exe}" was not found on PATH` };
+  for (const name of adapter.requiresEnv || []) {
+    const value = env[name];
+    if (value === undefined || value === "")
+      return { available: false, reason: `its required environment variable ${name} is unset or empty` };
   }
-  const name = config.routing.default;
-  return { name, adapter: config.adapters[name] };
+  return { available: true, reason: null };
+}
+
+// Resolve which adapter handles an issue given its labels, honoring availability
+// and fallback. The first label (in the order supplied) with a routing entry
+// selects that entry's route; if none match, the default route is used. A route
+// is an ordered list of adapter names (a bare name normalized to a one-element
+// list), and the first adapter in it that is available wins — so a config whose
+// preferred binary is present dispatches exactly as before. Returns
+// { name, adapter, source, route, tried }: on success name/adapter are the
+// winner; when no adapter in the route is available both are null and `tried`
+// lists every adapter with why it was unavailable.
+export function resolveAdapter(config, labels = [], deps = {}) {
+  const { env = process.env, onPath = executableOnPath } = deps;
+  // A route is an ordered list; a bare adapter name is a one-element list. Coerce
+  // here too (not only in normalizeConfig) so an un-normalized config resolves
+  // identically.
+  const asList = (route) => (Array.isArray(route) ? route : [route]);
+  let route = asList(config.routing.default);
+  let source = "routing.default";
+  for (const label of labels) {
+    if (config.routing.labels[label]) {
+      route = asList(config.routing.labels[label]);
+      source = `routing.labels["${label}"]`;
+      break;
+    }
+  }
+  const tried = [];
+  for (const name of route) {
+    const adapter = config.adapters[name];
+    const { available, reason } = adapterAvailability(adapter, { env, onPath });
+    if (available) return { name, adapter, source, route: route.slice(), tried };
+    tried.push({ name, reason });
+  }
+  return { name: null, adapter: null, source, route: route.slice(), tried };
 }
 
 // --- CLI --------------------------------------------------------------------

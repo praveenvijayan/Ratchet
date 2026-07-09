@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { main, loadConfig, normalizeConfig, substitute, resolveAdapter, defaultConfig, headlessFlagWarnings, HEADLESS_PERMISSION_FLAGS, HerdConfigError, DEFAULTS } from "./herd.mjs";
+import { main, loadConfig, normalizeConfig, substitute, resolveAdapter, adapterAvailability, executableOnPath, defaultConfig, headlessFlagWarnings, HEADLESS_PERMISSION_FLAGS, HerdConfigError, DEFAULTS } from "./herd.mjs";
 
 // Run `fn` with cwd set to a fresh temp dir, then clean up — lets CLI-level
 // tests exercise the cwd-relative default config path without side effects.
@@ -126,10 +126,11 @@ inTempDir(() => {
     adapters: { a: { launch: ["a"] }, b: { launch: ["b"] } },
     routing: { default: "a", labels: { hard: "b" } },
   });
-  assert.equal(resolveAdapter(cfg, ["hard"]).name, "b", "a matching label routes to its adapter");
-  assert.equal(resolveAdapter(cfg, ["misc"]).name, "a", "no match falls back to the default");
-  assert.equal(resolveAdapter(cfg, []).name, "a", "no labels falls back to the default");
-  assert.equal(resolveAdapter(cfg, ["misc", "hard"]).name, "b", "the first matching label wins");
+  const up = { onPath: () => true }; // both adapters available — this test is about routing, not availability
+  assert.equal(resolveAdapter(cfg, ["hard"], up).name, "b", "a matching label routes to its adapter");
+  assert.equal(resolveAdapter(cfg, ["misc"], up).name, "a", "no match falls back to the default");
+  assert.equal(resolveAdapter(cfg, [], up).name, "a", "no labels falls back to the default");
+  assert.equal(resolveAdapter(cfg, ["misc", "hard"], up).name, "b", "the first matching label wins");
 }
 
 // Criterion 7: an adapter without a resume command resolves its resume command
@@ -380,11 +381,124 @@ inTempDir(() => {
   }
 }
 
+// Criterion 22 (#151 AC1): a routing entry (default or a labels value) may be an
+// adapter name or a non-empty ordered array of names; a name that is not a
+// defined adapter exits non-zero naming the offending entry and the bad name.
+{
+  const ok = normalizeConfig({
+    adapters: { a: { launch: ["a"] }, b: { launch: ["b"] } },
+    routing: { default: ["a", "b"], labels: { hard: "b" } },
+  });
+  assert.deepEqual(ok.routing.default, ["a", "b"], "an array default is kept as an ordered list");
+  assert.deepEqual(ok.routing.labels.hard, ["b"], "a string label route is normalized to a one-element list");
+
+  assert.throws(
+    () => normalizeConfig({ adapters: { a: { launch: ["a"] } }, routing: { default: ["a", "ghost"] } }, "cfg.json"),
+    (e) => e.message.includes("cfg.json") && /routing\.default/.test(e.message) && /ghost/.test(e.message),
+    "an undefined adapter in a default array is rejected, naming the entry and the name",
+  );
+  assert.throws(
+    () => normalizeConfig({ adapters: { a: { launch: ["a"] } }, routing: { default: "a", labels: { hard: ["a", "ghost"] } } }, "cfg.json"),
+    (e) => e.message.includes(`routing.labels["hard"]`) && /ghost/.test(e.message),
+    "an undefined adapter in a label array is rejected, naming the entry and the name",
+  );
+  assert.throws(
+    () => normalizeConfig({ adapters: { a: { launch: ["a"] } }, routing: { default: [] } }, "cfg.json"),
+    (e) => /routing\.default/.test(e.message) && /empty/.test(e.message),
+    "an empty route list is rejected",
+  );
+}
+
+// Criterion 23 (#151 AC2): an adapter may declare requiresEnv; it is unavailable
+// when its launch binary does not resolve on PATH, or when any requiresEnv var
+// is unset or empty — the reason distinguishes the two.
+{
+  const cfg = normalizeConfig({
+    adapters: { a: { launch: ["a"], requiresEnv: ["TOKEN"] } },
+    routing: { default: "a" },
+  });
+  assert.deepEqual(cfg.adapters.a.requiresEnv, ["TOKEN"], "requiresEnv is normalized onto the adapter");
+
+  const gone = adapterAvailability(cfg.adapters.a, { env: { TOKEN: "x" }, onPath: () => false });
+  assert.equal(gone.available, false, "a launch binary not on PATH makes the adapter unavailable");
+  assert.match(gone.reason, /binary .*not found on PATH/, "the reason names the missing binary");
+
+  const unset = adapterAvailability(cfg.adapters.a, { env: {}, onPath: () => true });
+  assert.equal(unset.available, false, "an unset required env var makes the adapter unavailable");
+  assert.match(unset.reason, /TOKEN is unset or empty/, "the reason names the unset env var");
+  assert.equal(adapterAvailability(cfg.adapters.a, { env: { TOKEN: "" }, onPath: () => true }).available, false, "an empty required env var is also unavailable");
+
+  assert.equal(adapterAvailability(cfg.adapters.a, { env: { TOKEN: "x" }, onPath: () => true }).available, true, "binary present and every requiresEnv set → available");
+
+  assert.throws(
+    () => normalizeConfig({ adapters: { a: { launch: ["a"], requiresEnv: ["", 5] } }, routing: { default: "a" } }, "cfg.json"),
+    (e) => e.message.includes("cfg.json") && /requiresEnv/.test(e.message),
+    "a malformed requiresEnv is rejected, naming the file",
+  );
+}
+
+// Criterion 24 (#151 AC3): resolveAdapter returns the first available adapter in
+// the resolved route; a string entry behaves as a one-element list, so a config
+// whose preferred binary is present dispatches unchanged.
+{
+  const cfg = normalizeConfig({
+    adapters: {
+      a: { launch: ["a"], requiresEnv: ["A_KEY"] },
+      b: { launch: ["b"] },
+      c: { launch: ["c"] },
+    },
+    routing: { default: ["a", "b", "c"], labels: {} },
+  });
+  // a is skipped (A_KEY unset), b wins.
+  const r = resolveAdapter(cfg, [], { env: {}, onPath: () => true });
+  assert.equal(r.name, "b", "the first available adapter in the route wins, skipping the unavailable one");
+  assert.deepEqual(r.tried.map((t) => t.name), ["a"], "the skipped adapter is recorded with its reason");
+
+  // a becomes available once its key is set → the preferred adapter dispatches.
+  assert.equal(resolveAdapter(cfg, [], { env: { A_KEY: "x" }, onPath: () => true }).name, "a", "the preferred adapter wins once available");
+
+  // A string route with a present binary resolves exactly as a one-element list.
+  const one = normalizeConfig({ adapters: { a: { launch: ["a"] } }, routing: { default: "a" } });
+  assert.equal(resolveAdapter(one, [], { onPath: () => true }).name, "a", "a string route with a present binary dispatches unchanged");
+}
+
+// Criterion 25 (#151 AC5): the availability and fallback logic in herd.mjs names
+// no specific CLI, model, or env-var — it stays framework-pure. The whole module
+// is greppable; the new functions add no exception.
+{
+  const src = readFileSync(new URL("./herd.mjs", import.meta.url), "utf8");
+  const BANNED = [
+    "tmux", "zellij", "wezterm", "\\bscreen\\b",
+    "opus", "sonnet", "haiku", "gpt-3", "gpt-4", "gpt-5", "davinci", "gemini", "llama", "mistral",
+    "litellm", "openrouter", "rtk",
+    // No adapter-specific env-var name may be baked into the availability check.
+    "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY",
+  ];
+  for (const token of BANNED)
+    assert.ok(!new RegExp(token, "i").test(src), `herd.mjs must stay framework-pure: it references "${token}"`);
+  // Availability keys off config-supplied names only — requiresEnv is read, never
+  // a literal variable name.
+  assert.match(src, /requiresEnv/, "availability reads requiresEnv from config, not a hardcoded var name");
+}
+
+// Criterion 26 (#151 AC6): each #151 criterion has exactly one test named after
+// it, counted across both herd.test.mjs and herd-dispatch.test.mjs (AC4 lives in
+// the dispatch suite).
+{
+  const here = readFileSync(new URL("./herd.test.mjs", import.meta.url), "utf8");
+  const dispatch = readFileSync(new URL("./herd-dispatch.test.mjs", import.meta.url), "utf8");
+  const both = here + "\n" + dispatch;
+  for (const ac of ["AC1", "AC2", "AC3", "AC4", "AC5"]) {
+    const hits = (both.match(new RegExp(`#151 ${ac}\\)`, "g")) || []).length;
+    assert.equal(hits, 1, `#151 ${ac} has exactly one test named after it`);
+  }
+}
+
 // ── Issue #155: let a herd adapter pin a model so different models dispatch ──
 // {model} is a config-substitution placeholder in the same family as {prompt}
 // and {issue}; an adapter names the model in config and the loader stays pure.
 
-// Criterion 22 (#155 AC1): an adapter may declare a `model`; {model} in its
+// Criterion 32 (#155 AC1): an adapter may declare a `model`; {model} in its
 // launch argv and promptTemplate is substituted exactly as {prompt}/{issue},
 // and every other brace token still passes through verbatim.
 {
@@ -398,7 +512,7 @@ inTempDir(() => {
     },
     routing: { default: "a" },
   });
-  const { adapter } = resolveAdapter(cfg, []);
+  const { adapter } = resolveAdapter(cfg, [], { onPath: () => true });
   assert.equal(adapter.model, "some-model-x", "the declared model normalizes onto the adapter");
   assert.deepEqual(
     substitute(adapter.launch, { prompt: "hi", issue: 7, model: adapter.model }),
@@ -417,7 +531,7 @@ inTempDir(() => {
   );
 }
 
-// Criterion 23 (#155 AC2): an adapter whose launch or promptTemplate uses
+// Criterion 28 (#155 AC2): an adapter whose launch or promptTemplate uses
 // {model} but declares no `model` exits nonzero with a one-line error naming
 // the adapter and the missing field.
 {
@@ -449,7 +563,7 @@ inTempDir(() => {
   });
 }
 
-// Criterion 24 (#155 AC3): two adapters that differ only by `model` both
+// Criterion 29 (#155 AC3): two adapters that differ only by `model` both
 // validate and are independently routable and dispatchable.
 {
   const cfg = normalizeConfig({
@@ -459,8 +573,8 @@ inTempDir(() => {
     },
     routing: { default: "fast", labels: { heavy: "slow" } },
   });
-  assert.equal(resolveAdapter(cfg, ["heavy"]).name, "slow", "a label routes to the slow-model adapter");
-  assert.equal(resolveAdapter(cfg, []).name, "fast", "the default routes to the fast-model adapter");
+  assert.equal(resolveAdapter(cfg, ["heavy"], { onPath: () => true }).name, "slow", "a label routes to the slow-model adapter");
+  assert.equal(resolveAdapter(cfg, [], { onPath: () => true }).name, "fast", "the default routes to the fast-model adapter");
   const argv = (name) =>
     substitute(cfg.adapters[name].launch, { prompt: "p", issue: 1, model: cfg.adapters[name].model });
   assert.deepEqual(argv("fast"), ["orcli", "--model", "model-fast", "p"], "the fast adapter dispatches on its model");
@@ -468,7 +582,7 @@ inTempDir(() => {
   assert.notDeepEqual(argv("fast"), argv("slow"), "adapters differing only by model dispatch distinct commands");
 }
 
-// Criterion 25 (#155 AC4): `model` is optional — an adapter that neither
+// Criterion 30 (#155 AC4): `model` is optional — an adapter that neither
 // declares `model` nor uses {model} loads and dispatches exactly as before.
 {
   const cfg = normalizeConfig({ adapters: { a: { launch: ["cli", "{prompt}", "{issue}"] } }, routing: { default: "a" } });
@@ -482,7 +596,7 @@ inTempDir(() => {
   assert.ok(!("model" in shipped.adapters.claude) && !("model" in shipped.adapters.codex), "the shipped default is model-free and still loads");
 }
 
-// Criterion 26 (#155 AC5): the framework purity test still passes — no specific
+// Criterion 31 (#155 AC5): the framework purity test still passes — no specific
 // model name appears in scripts/herd.mjs; the model lives only in config.
 {
   const src = readFileSync(new URL("./herd.mjs", import.meta.url), "utf8");
@@ -493,7 +607,7 @@ inTempDir(() => {
     assert.ok(!("model" in a), `shipped adapter "${name}" declares no model — the operator names it in config`);
 }
 
-// Criterion 27 (#155 AC6): each #155 criterion above has exactly one test named
+// Criterion 32 (#155 AC6): each #155 criterion above has exactly one test named
 // after it — no missing coverage, no padding.
 {
   const self = readFileSync(new URL("./herd.test.mjs", import.meta.url), "utf8");
@@ -503,4 +617,4 @@ inTempDir(() => {
   }
 }
 
-console.log("PASS herd.test.mjs (27 criteria)");
+console.log("PASS herd.test.mjs (32 criteria)");

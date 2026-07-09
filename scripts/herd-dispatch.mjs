@@ -49,13 +49,17 @@ export function pickNext(ready) {
 
 // Resolve an issue to its concrete dispatch: the routed adapter, the argv with
 // {prompt}/{issue}/{model} substituted, the merged env, and the log file path.
-export function buildDispatch(config, issue) {
-  const { name, adapter } = resolveAdapter(config, labelNames(issue));
-  const prompt = substitute(adapter.promptTemplate || "", { issue: issue.number, model: adapter.model });
+export function buildDispatch(config, issue, deps = {}) {
+  const res = resolveAdapter(config, labelNames(issue), deps);
+  // No adapter in the resolved route is available — the caller must not spawn.
+  // Carry the route and per-adapter reasons so the escalation can name them all.
+  if (!res.adapter)
+    return { unavailable: true, source: res.source, route: res.route, tried: res.tried };
+  const prompt = substitute(res.adapter.promptTemplate || "", { issue: issue.number, model: res.adapter.model });
   return {
-    adapter: name,
-    argv: substitute(adapter.launch, { prompt, issue: issue.number, model: adapter.model }),
-    env: adapter.env || {},
+    adapter: res.name,
+    argv: substitute(res.adapter.launch, { prompt, issue: issue.number, model: res.adapter.model }),
+    env: res.adapter.env || {},
     logFile: `${config.logDir}/issue-${issue.number}.log`,
   };
 }
@@ -173,13 +177,49 @@ export async function dispatchOne(opts) {
     maxWorkers = config.maxWorkers,
     claimTimeoutMs = (config.claimTimeoutSeconds ?? 300) * 1000,
     claimIntervalMs = 1000,
+    env = process.env,
+    onPath,
   } = opts;
 
   const state = readState(statePath);
   const issue = pickNext((ready || []).filter((i) => !(String(i.number) in state)));
   if (!issue) return { dispatched: null, reason: "no-eligible-issue" };
 
-  const plan = buildDispatch(config, issue);
+  const plan = buildDispatch(config, issue, { env, onPath });
+
+  // No adapter in the resolved route is available: do not spawn. Record the
+  // issue as dispatch-failed and escalate with the route and every adapter tried
+  // (each with why it was unavailable), so the operator knows exactly what to fix.
+  if (plan.unavailable) {
+    const detail = plan.tried.map((t) => `${t.name} (${t.reason})`).join("; ");
+    if (dryRun)
+      return { dispatched: null, dryRun: true, plan: { issue: issue.number, adapter: null, unavailable: true, route: plan.route, tried: plan.tried } };
+    state[issue.number] = { adapter: null, pid: null, logFile: null, attempts: 1, status: "dispatch-failed", pr: null };
+    writeState(statePath, state);
+    appendHerdEvent(eventsPath, {
+      now: now(),
+      event: "dispatch",
+      issue: issue.number,
+      adapter: null,
+      pid: null,
+      logFile: null,
+      attempts: 1,
+      status: "dispatch-failed",
+    }, log);
+    appendEscalation(escalationsPath, {
+      now: now(),
+      issue: issue.number,
+      what: `no adapter is available for route ${plan.source} [${plan.route.join(", ")}] — tried ${plan.tried.length} adapter(s): ${detail}. The issue was not dispatched.`,
+      adapter: null,
+      pid: null,
+      logFile: null,
+      attempts: 1,
+      status: "dispatch-failed",
+      action: "install a missing adapter binary or set the missing environment variable(s) named above, or edit the route in .ratchet/herd.json to list an available adapter",
+    }, { eventsPath, warn: log });
+    return { dispatched: issue.number, claimed: false, status: "dispatch-failed", unavailable: true, route: plan.route, tried: plan.tried };
+  }
+
   if (dryRun) {
     log(`herd dry-run: issue #${issue.number} -> ${plan.adapter}: ${plan.argv.join(" ")}`);
     return { dispatched: null, dryRun: true, plan: { issue: issue.number, adapter: plan.adapter, command: plan.argv } };
