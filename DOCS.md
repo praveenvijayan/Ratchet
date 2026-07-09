@@ -1,6 +1,13 @@
 # Ratchet — Complete Documentation
 
-Version 3.5.0 · MIT · https://github.com/praveenvijayan/Ratchet
+Version 3.6.0 · MIT · https://github.com/praveenvijayan/Ratchet
+
+**New in 3.6.0** — a herd route may declare a selection policy. The default stays
+`failover` (first available adapter, unchanged), and `round-robin` cycles
+successive dispatches across the available adapters so workers spread load
+instead of piling onto the first. Rotation is deterministic (a cursor persisted
+in `.ratchet/herd-routing.json`, no `Math.random`) and skips unavailable
+adapters. See §14.
 
 **New in 3.5.0** — the herd emits an adapter-agnostic event stream to
 `.ratchet/events.jsonl` (dispatch, resume, rework, claim/PR detection, worker
