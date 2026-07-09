@@ -180,6 +180,8 @@ scripts/
   herd-dispatch.test.mjs        Regression test for herd dispatcher
   herd-monitor.mjs              ratchet-herd worker monitor: verify/resume/escalate
   herd-monitor.test.mjs         Regression test for herd monitor
+  herd-verify.mjs               ratchet-herd PR verifier: conflict rework/escalate
+  herd-verify.test.mjs          Regression test for herd PR verify
   plan-sync-concurrency.test.mjs Workflow concurrency regression test
   plan-sync.mjs                 Deterministic plan→issue compiler
   plan-sync.test.mjs            Regression test for the compiler

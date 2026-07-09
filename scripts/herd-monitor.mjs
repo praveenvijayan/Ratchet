@@ -23,9 +23,17 @@ import { STATE_FILE, ESCALATIONS_FILE, readState, writeState, appendEscalation, 
 import { spawnWorker, recordExit } from "./herd-dispatch.mjs";
 
 // Statuses the monitor has already resolved — never acted on again.
-// "awaiting-verification" belongs to PR verification (#0055); "escalated" is a
-// human's to clear; "dispatch-failed" was already killed+escalated by dispatch.
-export const TERMINAL_STATUS = new Set(["awaiting-verification", "escalated", "dispatch-failed"]);
+// "awaiting-verification" hands off to PR verification (herd-verify.mjs);
+// "ready-for-review"/"verify-escalated" are that stage's terminal outcomes and
+// must not be dragged back to verification; "escalated" is a human's to clear;
+// "dispatch-failed" was already killed+escalated by dispatch.
+export const TERMINAL_STATUS = new Set([
+  "awaiting-verification",
+  "ready-for-review",
+  "verify-escalated",
+  "escalated",
+  "dispatch-failed",
+]);
 
 // The last `maxLines` lines of a log file, quoted into an escalation so the
 // agent's own final words reach the human. A missing/unreadable file is
