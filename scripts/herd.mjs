@@ -42,6 +42,17 @@ export const DEFAULTS = Object.freeze({
   logRetentionDays: 14,
 });
 
+// The permission/approval-bypass flag each shipped adapter's CLI needs to run
+// headless. A herd worker is non-interactive: nobody can answer the prompt the
+// claim step raises (it touches .git, which both CLIs guard as sensitive), so
+// without this flag the worker stalls, never creates its claim ref, and is
+// killed at claimTimeoutSeconds. Only the two CLIs the framework ships defaults
+// for are known here; a custom adapter is the operator's business, never flagged.
+export const HEADLESS_PERMISSION_FLAGS = Object.freeze({
+  claude: "--dangerously-skip-permissions",
+  codex: "--dangerously-bypass-approvals-and-sandbox",
+});
+
 // Thrown for every operator-facing config problem. The CLI prints `.message` as
 // a single line and exits non-zero — no stack trace ever reaches the user.
 export class HerdConfigError extends Error {
@@ -70,8 +81,8 @@ export function defaultConfig() {
     claimTimeoutSeconds: DEFAULTS.claimTimeoutSeconds,
     logRetentionDays: DEFAULTS.logRetentionDays,
     adapters: {
-      claude: { launch: ["claude", "-p", "{prompt}"], promptTemplate, env: {} },
-      codex: { launch: ["codex", "exec", "{prompt}"], promptTemplate, env: {} },
+      claude: { launch: ["claude", "-p", HEADLESS_PERMISSION_FLAGS.claude, "{prompt}"], promptTemplate, env: {} },
+      codex: { launch: ["codex", "exec", HEADLESS_PERMISSION_FLAGS.codex, "{prompt}"], promptTemplate, env: {} },
     },
     routing: { default: "claude", labels: {} },
   };
@@ -152,9 +163,29 @@ export function normalizeConfig(raw, file = CONFIG_PATH) {
   };
 }
 
+// Warn — never fail — when a shipped adapter's launch omits its headless
+// permission flag. Returns one single-line message per offending adapter (a
+// config written before the flag became a default, or one hand-edited to drop
+// it). Silent for any other adapter name, and for a claude/codex adapter whose
+// launch already carries its flag. Loading such a config still succeeds (exit
+// zero): a deliberately-interactive launch is the operator's call, not an error.
+export function headlessFlagWarnings(config) {
+  const warnings = [];
+  for (const [name, flag] of Object.entries(HEADLESS_PERMISSION_FLAGS)) {
+    const adapter = config.adapters[name];
+    if (adapter && !adapter.launch.includes(flag))
+      warnings.push(
+        `WARNING: adapter "${name}" launch is missing ${flag}; a headless worker will stall on a ` +
+          `permission prompt and fail to claim. Add ${flag} to its launch in ${CONFIG_PATH}.`,
+      );
+  }
+  return warnings;
+}
+
 // Read, parse, validate, and normalize the config at `path`. Throws
 // HerdConfigError with a one-line, file-named message for every failure the
 // operator can cause: missing file, unreadable file, malformed JSON, bad shape.
+// A shipped adapter missing its headless-permission flag is warned, not failed.
 export function loadConfig(path = CONFIG_PATH) {
   if (!existsSync(path))
     throw new HerdConfigError(`${path} not found. Run \`node scripts/herd.mjs init\` to create it.`);
@@ -170,7 +201,9 @@ export function loadConfig(path = CONFIG_PATH) {
   } catch (e) {
     throw new HerdConfigError(`${path} is not valid JSON: ${e.message}`);
   }
-  return normalizeConfig(raw, path);
+  const config = normalizeConfig(raw, path);
+  for (const warning of headlessFlagWarnings(config)) console.warn(warning);
+  return config;
 }
 
 // Write the default config to `path`, refusing to clobber an existing file.
