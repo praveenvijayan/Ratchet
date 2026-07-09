@@ -19,8 +19,18 @@ import {
   pollOnce,
   runLoop,
 } from "./herd-survey.mjs";
+import { dispatchOne } from "./herd-dispatch.mjs";
 
 const NOW = Date.UTC(2026, 6, 9, 12, 0, 0); // fixed clock — no Date.now dependence
+
+// Minimal supervisor config for the dispatch-side integration check below.
+const mkConfig = () => ({
+  maxWorkers: 3,
+  pollSeconds: 60,
+  logDir: "logs",
+  adapters: { claude: { launch: ["claude", "-p", "{prompt}"], promptTemplate: "issue {issue}", env: {} } },
+  routing: { default: "claude", labels: {} },
+});
 
 // A fake `gh` that routes by the survey's own argument shape and records calls.
 function fakeGh({ ready = [], inProgress = [], openPrs = [] } = {}) {
@@ -170,4 +180,79 @@ await inTempDir(async () => {
   assert.ok(logs.some((m) => /ratchet-status/.test(m)), "prints a /ratchet-status diagnosis pointer");
 });
 
-console.log("PASS herd-survey.test.mjs (7 criteria)");
+// --- Issue #137: prune concluded herd state entries so a re-queued issue can
+// dispatch again. One test per acceptance criterion, named after it. ---
+
+// #137 criterion 1: an entry whose tracked PR is merged or closed is removed
+// from the state file after its reconciliation escalation is written.
+await inTempDir(async () => {
+  writeFileSync(
+    "s.json",
+    JSON.stringify({ 20: { adapter: "claude", pid: null, logFile: "x.log", pr: 99, status: "in-review" } }),
+  );
+  const gh = fakeGh({ ready: [], inProgress: [], openPrs: [] }); // PR 99 is not open
+  const r = await pollOnce({ gh, isAlive: () => false, now: NOW, statePath: "s.json", escalationsPath: "e.md", log: () => {} });
+  const esc = readFileSync("e.md", "utf8");
+  assert.match(esc, /#20/, "the reconciliation escalation is written for the concluded entry");
+  const after = JSON.parse(readFileSync("s.json", "utf8"));
+  assert.equal(after[20], undefined, "the entry whose PR concluded is removed from the state file");
+  assert.equal(r.pruned, 1, "the removal is counted");
+});
+
+// #137 criterion 2: an issue whose worker died, whose entry was reconciled
+// away, and which returns to state:ready is dispatched again on a later poll
+// instead of being skipped.
+await inTempDir(async () => {
+  writeFileSync(
+    "s.json",
+    JSON.stringify({ 30: { adapter: "claude", pid: 999999, logFile: "y.log", pr: null, status: "working" } }),
+  );
+  const gh = fakeGh({ ready: [{ number: 30 }], inProgress: [], openPrs: [] });
+  const ready = [{ number: 30, createdAt: "2026-01-01", labels: [{ name: "priority:high" }] }];
+  const disp = () =>
+    dispatchOne({
+      config: mkConfig(), ready, statePath: "s.json", escalationsPath: "e.md",
+      gh, isAlive: () => false, now: () => NOW, dryRun: true, log: () => {},
+    });
+
+  const before = await disp();
+  assert.equal(before.reason, "no-eligible-issue", "while the stale entry sits in state, dispatch skips the re-queued issue");
+
+  await pollOnce({ gh, isAlive: () => false, now: NOW, statePath: "s.json", escalationsPath: "e.md", log: () => {} });
+
+  const after = await disp();
+  assert.equal(after.plan?.issue, 30, "after the dead entry is pruned, the re-queued issue dispatches instead of being skipped");
+});
+
+// #137 criterion 3: an entry with a live worker pid or an open PR is never
+// removed.
+await inTempDir(async () => {
+  writeFileSync(
+    "s.json",
+    JSON.stringify({
+      40: { adapter: "claude", pid: 1234, logFile: "a.log", pr: null, status: "working" },
+      41: { adapter: "codex", pid: null, logFile: "b.log", pr: 7, status: "in-review" },
+    }),
+  );
+  const gh = fakeGh({ ready: [], inProgress: [], openPrs: [{ number: 7, headRefName: "agent/issue-41" }] });
+  const r = await pollOnce({ gh, isAlive: (pid) => pid === 1234, now: NOW, statePath: "s.json", escalationsPath: "e.md", log: () => {} });
+  const after = JSON.parse(readFileSync("s.json", "utf8"));
+  assert.ok(after[40], "an entry with a live worker pid is retained");
+  assert.ok(after[41], "an entry tracking an open PR is retained");
+  assert.equal(r.pruned, 0, "nothing is pruned when every entry is live or open");
+});
+
+// #137 criterion 4: the poll summary line reports how many entries were pruned
+// this pass.
+await inTempDir(async () => {
+  const logs = [];
+  writeFileSync(
+    "s.json",
+    JSON.stringify({ 50: { adapter: "claude", pid: 999999, logFile: "z.log", pr: null, status: "working" } }),
+  );
+  const gh = fakeGh({ ready: [], inProgress: [], openPrs: [] });
+  await pollOnce({ gh, isAlive: () => false, now: NOW, statePath: "s.json", escalationsPath: "e.md", log: (m) => logs.push(m) });
+  assert.ok(logs.some((m) => /1 concluded entry pruned/.test(m)), "the poll summary line reports the pruned count");
+});
+
+console.log("PASS herd-survey.test.mjs (7 criteria + issue #137: 4 criteria)");
