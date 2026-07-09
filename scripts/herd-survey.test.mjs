@@ -7,19 +7,20 @@
 // Zero dependencies. Run:  node scripts/herd-survey.test.mjs
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, mkdtempSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   surveyReality,
   reconcileState,
   readState,
- formatEscalation,
- appendEscalation,
- appendHerdEvent,
- HERD_EVENT_TYPES,
- pollOnce,
- runLoop,
+  formatEscalation,
+  appendEscalation,
+  appendHerdEvent,
+  HERD_EVENT_TYPES,
+  pollOnce,
+  pruneLogs,
+  runLoop,
 } from "./herd-survey.mjs";
 import { dispatchOne, recordExit } from "./herd-dispatch.mjs";
 import { monitorOnce } from "./herd-monitor.mjs";
@@ -357,4 +358,152 @@ await inTempDir(async () => {
   }
 }
 
-console.log("PASS herd-survey.test.mjs (7 criteria + issue #137: 4 criteria + issue #143: 5 criteria)");
+// --- Issue #138: detect and escalate stale agent/issue-N claim branches that
+// block re-work. One test per acceptance criterion, named after it. AC2 (the
+// dispatch-timeout re-check) lives in herd-dispatch.test.mjs. ---
+
+// A `gh` that also answers the stale-claim ref list (matching-refs) with the
+// given claim-ref issue numbers, on top of the survey's ready/in-progress/PR.
+function fakeGhWithRefs({ ready = [], inProgress = [], openPrs = [], claimRefs = [], refsThrow = false } = {}) {
+  return async (args) => {
+    if (args[0] === "api" && String(args[1]).includes("matching-refs")) {
+      if (refsThrow) throw new Error("transient network blip");
+      return claimRefs.map((n) => ({ ref: `refs/heads/agent/issue-${n}` }));
+    }
+    if (args[0] === "pr") return openPrs;
+    if (args.includes("state:ready")) return ready;
+    if (args.includes("state:in-progress")) return inProgress;
+    return [];
+  };
+}
+
+// #138 AC1) A claim ref agent/issue-<N> on origin whose issue has no live worker
+// in the state file and no open PR is escalated as a stale claim, naming the ref
+// and the exact command that deletes it.
+await inTempDir(async () => {
+  const gh = fakeGhWithRefs({ claimRefs: [77] }); // ref present, no worker, no PR
+  const r = await pollOnce({ gh, isAlive: () => false, now: NOW, statePath: "s.json", escalationsPath: "e.md", log: () => {} });
+  assert.equal(r.staleEscalated, 1, "the stale claim ref is escalated");
+  const esc = readFileSync("e.md", "utf8");
+  assert.match(esc, /stale claim ref agent\/issue-77 on origin/, "the escalation names the stale ref");
+  assert.match(
+    esc,
+    /gh api -X DELETE repos\/\{owner\}\/\{repo\}\/git\/refs\/heads\/agent\/issue-77/,
+    "the escalation includes the exact delete command",
+  );
+});
+
+// #138 AC3) A ref with a live worker or an open PR is never flagged: a live-pid
+// state entry (issue 40) and an open-PR-backed ref (issue 41) both pass.
+await inTempDir(async () => {
+  writeFileSync(
+    "s.json",
+    JSON.stringify({ 40: { adapter: "claude", pid: 1234, logFile: "a.log", pr: null, status: "working" } }),
+  );
+  const gh = fakeGhWithRefs({ claimRefs: [40, 41], openPrs: [{ number: 7, headRefName: "agent/issue-41" }] });
+  const r = await pollOnce({ gh, isAlive: (pid) => pid === 1234, now: NOW, statePath: "s.json", escalationsPath: "e.md", log: () => {} });
+  assert.equal(r.staleEscalated, 0, "neither a live-worker ref nor an open-PR ref is flagged");
+  assert.ok(!existsSync("e.md"), "no stale-claim escalation is written for backed refs");
+});
+
+// #138 AC4) A transient gh failure while checking refs never produces a
+// stale-claim escalation on its own — the poll still completes and logs a skip.
+await inTempDir(async () => {
+  const logs = [];
+  const gh = fakeGhWithRefs({ refsThrow: true }); // survey succeeds, ref list fails
+  const r = await pollOnce({ gh, isAlive: () => false, now: NOW, statePath: "s.json", escalationsPath: "e.md", log: (m) => logs.push(m) });
+  assert.equal(r.ok, true, "the poll completes despite the ref-list failure");
+  assert.equal(r.staleEscalated, 0, "a transient ref-list failure escalates nothing");
+  assert.ok(!existsSync("e.md"), "no stale-claim escalation is written on a transient blip");
+  assert.ok(logs.some((m) => /stale-claim ref check failed/.test(m)), "logs that stale detection was skipped this poll");
+});
+
+// #138 AC5) Each stale ref is escalated once, not re-escalated every poll: two
+// consecutive polls over the same stale ref append exactly one escalation.
+await inTempDir(async () => {
+  const gh = fakeGhWithRefs({ claimRefs: [88] });
+  const opts = { gh, isAlive: () => false, now: NOW, statePath: "s.json", escalationsPath: "e.md", log: () => {} };
+  const r1 = await pollOnce(opts);
+  const r2 = await pollOnce(opts);
+  assert.equal(r1.staleEscalated, 1, "escalated on the poll that first saw it");
+  assert.equal(r2.staleEscalated, 0, "not re-escalated on the next poll");
+  const esc = readFileSync("e.md", "utf8");
+  assert.equal((esc.match(/^## /gm) || []).length, 1, "exactly one escalation block despite two polls");
+});
+
+// #138 AC6) Every criterion above has exactly one test named after it — AC1–AC5
+// each appear exactly once across this file and herd-dispatch.test.mjs (AC2).
+{
+  const survey = readFileSync(new URL("./herd-survey.test.mjs", import.meta.url), "utf8");
+  const dispatch = readFileSync(new URL("./herd-dispatch.test.mjs", import.meta.url), "utf8");
+  const both = survey + dispatch;
+  for (const ac of ["AC1", "AC2", "AC3", "AC4", "AC5"]) {
+    const hits = (both.match(new RegExp(`#138 ${ac}\\)`, "g")) || []).length;
+    assert.equal(hits, 1, `#138 ${ac} has exactly one test named after it`);
+  }
+}
+
+// --- Issue #139: bound worker log growth with a retention knob. One test per
+// acceptance criterion, named after it. ---
+
+// Criterion 8 (#139 AC2): a log file older than the retention window whose
+// issue has no live worker in the state file is deleted during the poll.
+await inTempDir(async () => {
+  const logDir = ".ratchet/logs";
+  mkdirSync(logDir, { recursive: true });
+  const stale = join(logDir, "issue-1.log");
+  writeFileSync(stale, "output from a worker that is long gone");
+  const twentyDaysAgo = (NOW - 20 * 86400 * 1000) / 1000; // seconds, for utimes
+  utimesSync(stale, twentyDaysAgo, twentyDaysAgo);
+
+  // A dead worker still on record: reconcile clears its pid, so it is not live.
+  writeFileSync("s.json", JSON.stringify({ 1: { adapter: "claude", pid: 999999, logFile: stale, status: "working" } }));
+  const gh = fakeGh({ ready: [], inProgress: [], openPrs: [] });
+  const r = await pollOnce({
+    gh, isAlive: () => false, now: NOW, statePath: "s.json", escalationsPath: "e.md",
+    log: () => {}, config: { logDir, logRetentionDays: 14 },
+  });
+  assert.equal(existsSync(stale), false, "the stale log of an issue with no live worker is deleted during the poll");
+  assert.equal(r.prunedLogs, 1, "the poll reports the one pruned log");
+});
+
+// Criterion 9 (#139 AC3): a log referenced by a live worker's state entry is
+// never deleted, regardless of age.
+await inTempDir(async () => {
+  const logDir = ".ratchet/logs";
+  mkdirSync(logDir, { recursive: true });
+  const liveLog = join(logDir, "issue-2.log");
+  writeFileSync(liveLog, "output from a worker that is still running");
+  const ancient = (NOW - 999 * 86400 * 1000) / 1000; // far past any retention window
+  utimesSync(liveLog, ancient, ancient);
+
+  const state = { 2: { adapter: "claude", pid: 4242, logFile: liveLog, status: "working" } };
+  const pruned = pruneLogs({ logDir, retentionDays: 14, state, isAlive: (pid) => pid === 4242, now: NOW });
+  assert.equal(pruned, 0, "an ancient log owned by a live worker is not pruned");
+  assert.equal(existsSync(liveLog), true, "the live worker's log survives regardless of its age");
+});
+
+// Criterion 10 (#139 AC4): the poll summary line reports how many log files
+// were pruned this pass.
+await inTempDir(async () => {
+  const logDir = ".ratchet/logs";
+  mkdirSync(logDir, { recursive: true });
+  for (const n of [1, 2]) {
+    const f = join(logDir, `issue-${n}.log`);
+    writeFileSync(f, "stale");
+    const old = (NOW - 30 * 86400 * 1000) / 1000;
+    utimesSync(f, old, old);
+  }
+  const logs = [];
+  const gh = fakeGh({ ready: [], inProgress: [], openPrs: [] });
+  const r = await pollOnce({
+    gh, isAlive: () => false, now: NOW, statePath: "s.json", escalationsPath: "e.md",
+    log: (m) => logs.push(m), config: { logDir, logRetentionDays: 14 },
+  });
+  assert.equal(r.prunedLogs, 2, "both stale logs are pruned this pass");
+  const summary = logs.find((m) => /log file\(s\) pruned/.test(m));
+  assert.ok(summary, "a poll summary line is printed");
+  assert.match(summary, /2 log file\(s\) pruned/, "the summary line reports the number pruned this pass");
+});
+
+console.log("PASS herd-survey.test.mjs (7 criteria + issue #137: 4 criteria + issue #143: 5 criteria + issue #138: 5 criteria + issue #139: 3 criteria)");

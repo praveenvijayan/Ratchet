@@ -12,8 +12,8 @@
 // live worker. Every outside-world call is injectable, so the whole loop is
 // exercised offline with no network and no spawned CLIs. Zero dependencies.
 
-import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync, readdirSync, statSync, rmSync } from "node:fs";
+import { dirname, basename, join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -50,6 +50,56 @@ export function isPidAlive(pid) {
   } catch (e) {
     return e.code === "EPERM";
   }
+}
+
+// The exact command a human runs to delete a stale claim ref on origin, freeing
+// the issue for re-work. It is the mirror of the atomic claim in AGENTS.md §2
+// (which *creates* refs/heads/agent/issue-<N>). Shared so the survey and the
+// dispatcher quote the identical command — an operator copies one string.
+export function deleteRefCommand(issue) {
+  return `gh api -X DELETE repos/{owner}/{repo}/git/refs/heads/agent/issue-${issue}`;
+}
+
+// List the claim refs agent/issue-<N> present on origin, as issue numbers.
+// Uses GitHub's matching-refs prefix query, which returns [] (not 404) when no
+// ref matches. Throws on a gh failure so the caller can skip stale detection
+// this poll rather than escalate on a transient blip. `gh` is injected.
+export async function listClaimRefs(gh) {
+  const refs = await gh(["api", "repos/{owner}/{repo}/git/matching-refs/heads/agent/issue-?per_page=100"]);
+  const issues = [];
+  for (const r of refs || []) {
+    const m = /^refs\/heads\/agent\/issue-(\d+)$/.exec((r && r.ref) || "");
+    if (m) issues.push(Number(m[1]));
+  }
+  return issues;
+}
+
+// Does the claim ref agent/issue-<N> resolve on origin right now? True only on a
+// definitive success; a 404 (absent) or any transient gh error reads as false,
+// so a caller never invents a stale ref it could not confirm. `gh` is injected.
+export async function claimRefPresent(gh, issue) {
+  try {
+    await gh(["api", `repos/{owner}/{repo}/git/ref/heads/agent/issue-${issue}`]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Given the claim refs on origin plus current reality, return the issues whose
+// ref is stale: no live worker in the state file AND no open PR. A ref backed by
+// a live worker (a legitimate in-flight claim) or an open PR is never returned.
+// Pure — the caller owns gh, dedup, and escalation. `openPrHeads` is the set of
+// open PR head refs; `isAlive` probes a pid.
+export function findStaleClaims(claimIssues, state, openPrHeads, isAlive) {
+  const stale = [];
+  for (const issue of claimIssues) {
+    const entry = state[String(issue)];
+    const liveWorker = !!entry && entry.pid != null && isAlive(entry.pid);
+    const hasOpenPr = openPrHeads.has(`agent/issue-${issue}`);
+    if (!liveWorker && !hasOpenPr) stale.push(issue);
+  }
+  return stale;
 }
 
 // Survey the world in one pass: the ready queue, the in-progress issues, and
@@ -178,6 +228,51 @@ export function appendEscalation(path, entry, { eventsPath = EVENTS_FILE, warn =
   );
 }
 
+// Delete worker log files in `logDir` that are older than `retentionDays` and
+// whose issue has no live worker in `state`. A log referenced by a live worker
+// (pid alive) is kept regardless of age — its file is being written right now.
+// Call after reconcileState so dead/concluded pids are already cleared and no
+// longer protect their logs. Only `*.log` files are considered, so the state
+// and escalation files are never touched. Every filesystem hiccup (a missing
+// directory, a file that vanishes mid-pass, an unremovable file) is swallowed
+// so a poll never crashes on log hygiene; it simply prunes what it can and
+// retries the rest next poll. Returns the count of files deleted.
+export function pruneLogs({ logDir, retentionDays, state, isAlive = isPidAlive, now = Date.now() }) {
+  if (!logDir || !existsSync(logDir)) return 0;
+  const protectedLogs = new Set(
+    Object.values(state || {})
+      .filter((e) => e && e.pid != null && isAlive(e.pid) && e.logFile)
+      .map((e) => basename(e.logFile)),
+  );
+  const cutoff = now - retentionDays * 86400 * 1000;
+  let names;
+  try {
+    names = readdirSync(logDir);
+  } catch {
+    return 0; // logDir disappeared between the existsSync check and the read
+  }
+  let pruned = 0;
+  for (const name of names) {
+    if (!name.endsWith(".log")) continue;
+    if (protectedLogs.has(name)) continue;
+    const full = join(logDir, name);
+    let st;
+    try {
+      st = statSync(full);
+    } catch {
+      continue; // file vanished (e.g. a concurrent poll pruned it) — skip
+    }
+    if (!st.isFile() || st.mtimeMs >= cutoff) continue;
+    try {
+      rmSync(full);
+      pruned++;
+    } catch {
+      /* unremovable (permissions, race) — leave it for the next poll */
+    }
+  }
+  return pruned;
+}
+
 // One supervisor pass: survey, reconcile the state file, escalate anomalies,
 // prune the concluded/dead entries those escalations describe (so a re-queued
 // issue is no longer skipped forever), report a one-line summary, and point at
@@ -192,6 +287,8 @@ export async function pollOnce({
   escalationsPath = ESCALATIONS_FILE,
   eventsPath = EVENTS_FILE,
   log = console.log,
+  config = null,
+  prune = pruneLogs,
 }) {
   let reality;
   try {
@@ -236,15 +333,73 @@ export async function pollOnce({
       pruned += 1;
     }
   }
+
+  // Stale claim refs. A branch agent/issue-<N> left on origin by a dead worker
+  // (it raced the kill, or simply died) keeps the issue claimed forever: every
+  // future claim 422s and the worker refuses the issue, with no signal to the
+  // operator. The supervisor never deletes branches — it detects the ref, and
+  // escalates naming it and the exact delete command. A gh failure listing refs
+  // skips detection this poll, so a transient blip never fabricates a stale
+  // claim. Each stale ref is escalated once: a `stale-claim` sentinel entry
+  // remembers it (and makes dispatch skip the issue while the ref still blocks
+  // it), cleared once the ref is gone so a genuine recurrence re-escalates.
+  let staleEscalated = 0;
+  let claimIssues = null;
+  try {
+    claimIssues = await listClaimRefs(gh);
+  } catch (e) {
+    log(`herd: stale-claim ref check failed: ${e.message}; skipping stale detection this poll.`);
+  }
+  if (claimIssues != null) {
+    const openPrHeads = new Set(reality.openPrs.map((p) => p.headRefName));
+    const stale = new Set(findStaleClaims(claimIssues, state, openPrHeads, isAlive));
+    for (const [issue, entry] of Object.entries(state)) {
+      if (entry.status === "stale-claim" && !stale.has(Number(issue))) delete state[issue];
+    }
+    for (const issue of stale) {
+      if (state[String(issue)]?.status === "stale-claim") continue; // already escalated once
+      const del = deleteRefCommand(issue);
+      appendEscalation(escalationsPath, {
+        now: stamp,
+        issue,
+        what:
+          `stale claim ref agent/issue-${issue} on origin: no live worker and no open PR, yet the ref still holds the claim, ` +
+          `so every future worker 422s and refuses the issue. Delete it to free the issue: ${del}`,
+        logFile: null,
+        action: `run \`${del}\` to delete the stale claim ref, then re-queue the issue if its work is unfinished`,
+      });
+      state[String(issue)] = { adapter: null, pid: null, logFile: null, attempts: 0, status: "stale-claim", pr: null };
+      staleEscalated += 1;
+    }
+  }
+
   writeState(statePath, state);
+
+  // Log hygiene runs after the state is reconciled and written: dead and
+  // concluded entries are gone, so only genuinely live workers now protect
+  // their logs. Skipped when no config is supplied (logDir/logRetentionDays
+  // live there).
+  const prunedLogs = config
+    ? prune({ logDir: config.logDir, retentionDays: config.logRetentionDays, state, isAlive, now: stamp })
+    : 0;
 
   const liveWorkers = Object.values(state).filter((e) => e.pid != null && isAlive(e.pid)).length;
   const idle = reality.ready.length === 0 && liveWorkers === 0;
+
+  // One summary line per pass, so an operator watching the poll sees its shape —
+  // including how many concluded state entries and stale log files it pruned.
   log(
     `herd: poll — ${reality.ready.length} ready, ${reality.inProgress.length} in-progress, ` +
       `${openPrNumbers.size} open PRs, ${liveWorkers} live workers, ` +
-      `${pruned} concluded ${pruned === 1 ? "entry" : "entries"} pruned.`,
+      `${pruned} concluded ${pruned === 1 ? "entry" : "entries"} pruned, ` +
+      `${prunedLogs} log file(s) pruned.`,
   );
+  if (staleEscalated) {
+    log(
+      `herd: escalated ${staleEscalated} stale claim ${staleEscalated === 1 ? "ref" : "refs"} ` +
+        `(agent/issue-<N> on origin with no live worker and no open PR) — see ${escalationsPath}.`,
+    );
+  }
   if (idle) {
     log(
       "herd: no state:ready issues and no live workers. Run /ratchet-status to diagnose the " +
@@ -259,7 +414,9 @@ export async function pollOnce({
     openPrs: openPrNumbers.size,
     reconciled: changes.length,
     pruned,
+    staleEscalated,
     liveWorkers,
+    prunedLogs,
     idle,
   };
 }

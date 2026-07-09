@@ -709,6 +709,7 @@ configuration, not committed framework.
   "reworkCap": 2,               // resume attempts before an issue is escalated, never retried again
   "logDir": ".ratchet/logs",    // where per-worker logs are written
   "claimTimeoutSeconds": 300,   // how long to wait for a worker to create its claim ref before killing it as dispatch-failed
+  "logRetentionDays": 14,       // days a worker log survives after its worker is gone; the poll prunes older logs whose issue has no live worker
 
   // Required. Each key is an adapter *name* (a CLI, never a model).
   "adapters": {
@@ -812,6 +813,18 @@ each pass lives in `.ratchet/herd-state.json` — an issue→worker map (adapter
 pid, log file, attempts, status, PR) reconciled against `gh` and process
 liveness every poll, so a stale pid or a concluded PR can never masquerade as a
 live worker.
+
+### Log retention: bounding `logDir` growth
+
+Worker logs append per dispatch and per resume, and stream-json adapters
+multiply their size, so an unpruned `logDir` grows without bound. Each poll
+deletes `*.log` files older than `logRetentionDays` (default 14) whose issue has
+**no live worker** in the state file; a log of a still-running worker is kept
+regardless of age. The poll summary line reports how many logs it pruned that
+pass, and every filesystem hiccup is swallowed so log hygiene never crashes a
+poll. Set `logRetentionDays` in `.ratchet/herd.json`; a non-positive or
+non-integer value is rejected on load with a one-line error naming the file and
+field.
 
 ### Events: `.ratchet/events.jsonl`
 

@@ -325,4 +325,48 @@ await inTempDir(async () => {
   assert.equal(entry.pid, 5150, "the live pid is stored");
 });
 
-console.log("PASS herd-dispatch.test.mjs (8 checks for #105/#126 + 3 for #127)");
+// --- Issue #138: detect and escalate stale agent/issue-N claim branches. ---
+
+// #138 AC2) The dispatch-timeout escalation re-checks the ref after the kill;
+// when the killed worker created it anyway (raced the timeout), the escalation
+// says so and includes the exact delete command. The gh stub 404s throughout
+// the claim wait (so the worker never "claims") and then resolves the ref once
+// the kill has fired — modelling a worker that created the ref around SIGTERM.
+await inTempDir(async () => {
+  let killed = false;
+  let t = 0;
+  const now = () => t;
+  const sleep = (ms) => ((t += ms), Promise.resolve());
+  const gh = async () => {
+    if (!killed) throw new Error("404 Not Found"); // ref absent during the wait
+    return { ref: "refs/heads/agent/issue-8" }; // worker created it around the kill
+  };
+  const r = await dispatchOne({
+    config: mkConfig(),
+    ready: [{ number: 8, labels: [] }],
+    statePath: "s.json",
+    escalationsPath: "esc.md",
+    spawn: () => 4242,
+    gh,
+    isAlive: () => false,
+    kill: () => {
+      killed = true;
+    },
+    now,
+    sleep,
+    log: () => {},
+    claimTimeoutMs: 3000,
+    claimIntervalMs: 1000,
+  });
+  assert.equal(r.claimed, false, "the claim window still times out");
+  assert.equal(r.staleRef, true, "the post-kill ref re-check finds the ref the killed worker left");
+  const esc = readFileSync("esc.md", "utf8");
+  assert.match(esc, /created anyway/, "the escalation says the killed worker created the ref anyway");
+  assert.match(
+    esc,
+    /gh api -X DELETE repos\/\{owner\}\/\{repo\}\/git\/refs\/heads\/agent\/issue-8/,
+    "the escalation includes the exact delete command",
+  );
+});
+
+console.log("PASS herd-dispatch.test.mjs (8 checks for #105/#126 + 3 for #127 + 1 for #138)");
