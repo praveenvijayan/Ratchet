@@ -1,6 +1,11 @@
 # Ratchet — Complete Documentation
 
-Version 3.3.6 · MIT · https://github.com/praveenvijayan/Ratchet
+Version 3.4.0 · MIT · https://github.com/praveenvijayan/Ratchet
+
+**New in 3.4.0** — the `ratchet-herd` fleet supervisor (config, survey,
+dispatch, monitor, verify, the `/ratchet-herd` skill, docs, and the cross-agent
+skill-parity guard) ships as an optional headless lane that launches and
+watches multiple workers across ready issues. See §14.
 
 Ratchet is a continuous, GitHub-native software-delivery loop run by coding
 agents (Claude Code, GPT Codex, or Google Antigravity) with a human reviewing
