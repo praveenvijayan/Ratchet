@@ -58,7 +58,11 @@ export function buildDispatch(config, issue) {
 
 // Spawn a detached worker, redirecting stdout+stderr to logFile (creating its
 // directory), with `env` merged over the current environment. Returns the pid.
-export function spawnWorker(argv, env, logFile) {
+// The optional `onExit(code, signal)` fires when the child exits while this
+// supervisor is still alive — the monitor uses it (via recordExit) to tell a
+// clean exit from a crash. It never re-refs the child, so it can't keep the
+// supervisor running.
+export function spawnWorker(argv, env, logFile, onExit) {
   mkdirSync(dirname(logFile), { recursive: true });
   const fd = openSync(logFile, "a");
   try {
@@ -67,11 +71,27 @@ export function spawnWorker(argv, env, logFile) {
       stdio: ["ignore", fd, fd],
       env: { ...process.env, ...env },
     });
+    if (typeof onExit === "function") child.once("exit", onExit);
     child.unref();
     return child.pid;
   } finally {
     closeSync(fd);
   }
+}
+
+// Record a worker's process exit into the state file: its exit code (null for a
+// signal-kill / unknown) and signal, and clear the pid. The monitor reads
+// exitCode to tell a clean stop (0) from a crash. Fired from the spawn's `exit`
+// listener, so it re-reads the file to avoid clobbering a concurrent poll write
+// and no-ops if the entry was already reconciled away.
+export function recordExit(path, issue, code, signal) {
+  const state = readState(path);
+  const entry = state[issue];
+  if (!entry) return;
+  entry.exitCode = code == null ? null : Number(code);
+  entry.exitSignal = signal || null;
+  entry.pid = null;
+  writeState(path, state);
 }
 
 export async function surveyReady(gh) {
@@ -138,7 +158,8 @@ export async function dispatchOne(opts) {
   const live = liveWorkers(state, isAlive);
   if (live >= maxWorkers) return { dispatched: null, reason: "at-capacity", live, maxWorkers };
 
-  const pid = spawnFn(plan.argv, plan.env, plan.logFile);
+  const onExit = (code, signal) => recordExit(statePath, issue.number, code, signal);
+  const pid = spawnFn(plan.argv, plan.env, plan.logFile, onExit);
   state[issue.number] = { adapter: plan.adapter, pid, logFile: plan.logFile, attempts: 1, status: "dispatched", pr: null };
   writeState(statePath, state);
 

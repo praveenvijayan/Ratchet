@@ -18,6 +18,7 @@ import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runLoop, pollOnce, ghJson } from "./herd-survey.mjs";
 import { dispatchOne, surveyReady } from "./herd-dispatch.mjs";
+import { monitorOnce } from "./herd-monitor.mjs";
 
 // Config location, relative to the repo root (the supervisor's cwd).
 export const CONFIG_PATH = ".ratchet/herd.json";
@@ -239,6 +240,14 @@ if (isMain) {
     const dryRun = argv.includes("--dry-run");
     const step = async (o) => {
       await pollOnce(o);
+      // Monitor exited workers (verify / resume / escalate) before dispatching,
+      // so a concluded worker frees a slot this same pass. Skipped on --dry-run,
+      // which must never spawn (a resume is a spawn).
+      if (!dryRun) {
+        await monitorOnce({ ...o, config }).catch((e) => {
+          o.log(`herd: monitor failed: ${e.message}; continuing to dispatch.`);
+        });
+      }
       const ready = await surveyReady(o.gh).catch((e) => {
         o.log(`herd: dispatch survey failed: ${e.message}; skipping dispatch this poll.`);
         return [];
