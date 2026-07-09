@@ -12,8 +12,8 @@
 // live worker. Every outside-world call is injectable, so the whole loop is
 // exercised offline with no network and no spawned CLIs. Zero dependencies.
 
-import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync, readdirSync, statSync, rmSync } from "node:fs";
+import { dirname, basename, join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -114,6 +114,51 @@ export function appendEscalation(path, entry) {
   appendFileSync(path, formatEscalation(entry) + "\n");
 }
 
+// Delete worker log files in `logDir` that are older than `retentionDays` and
+// whose issue has no live worker in `state`. A log referenced by a live worker
+// (pid alive) is kept regardless of age — its file is being written right now.
+// Call after reconcileState so dead/concluded pids are already cleared and no
+// longer protect their logs. Only `*.log` files are considered, so the state
+// and escalation files are never touched. Every filesystem hiccup (a missing
+// directory, a file that vanishes mid-pass, an unremovable file) is swallowed
+// so a poll never crashes on log hygiene; it simply prunes what it can and
+// retries the rest next poll. Returns the count of files deleted.
+export function pruneLogs({ logDir, retentionDays, state, isAlive = isPidAlive, now = Date.now() }) {
+  if (!logDir || !existsSync(logDir)) return 0;
+  const protectedLogs = new Set(
+    Object.values(state || {})
+      .filter((e) => e && e.pid != null && isAlive(e.pid) && e.logFile)
+      .map((e) => basename(e.logFile)),
+  );
+  const cutoff = now - retentionDays * 86400 * 1000;
+  let names;
+  try {
+    names = readdirSync(logDir);
+  } catch {
+    return 0; // logDir disappeared between the existsSync check and the read
+  }
+  let pruned = 0;
+  for (const name of names) {
+    if (!name.endsWith(".log")) continue;
+    if (protectedLogs.has(name)) continue;
+    const full = join(logDir, name);
+    let st;
+    try {
+      st = statSync(full);
+    } catch {
+      continue; // file vanished (e.g. a concurrent poll pruned it) — skip
+    }
+    if (!st.isFile() || st.mtimeMs >= cutoff) continue;
+    try {
+      rmSync(full);
+      pruned++;
+    } catch {
+      /* unremovable (permissions, race) — leave it for the next poll */
+    }
+  }
+  return pruned;
+}
+
 // One supervisor pass: survey, reconcile the state file, escalate anomalies,
 // and point at /ratchet-status when the fleet is idle. A failed `gh` call logs
 // one line and returns { ok: false } so the loop retries next poll instead of
@@ -125,6 +170,8 @@ export async function pollOnce({
   statePath = STATE_FILE,
   escalationsPath = ESCALATIONS_FILE,
   log = console.log,
+  config = null,
+  prune = pruneLogs,
 }) {
   let reality;
   try {
@@ -149,6 +196,13 @@ export async function pollOnce({
     });
   }
 
+  // Log hygiene runs after reconcile: dead and concluded pids are cleared
+  // above, so only genuinely live workers now protect their logs. Skipped when
+  // no config is supplied (logDir/logRetentionDays live there).
+  const prunedLogs = config
+    ? prune({ logDir: config.logDir, retentionDays: config.logRetentionDays, state, isAlive, now: stamp })
+    : 0;
+
   const liveWorkers = Object.values(state).filter((e) => e.pid != null && isAlive(e.pid)).length;
   const idle = reality.ready.length === 0 && liveWorkers === 0;
   if (idle) {
@@ -158,6 +212,14 @@ export async function pollOnce({
     );
   }
 
+  // One summary line per pass, so an operator watching the poll sees the shape
+  // of each pass — including how many stale log files this pass pruned.
+  log(
+    `herd: poll — ${reality.ready.length} ready, ${reality.inProgress.length} in-progress, ` +
+      `${openPrNumbers.size} open PR(s), ${liveWorkers} live worker(s), ` +
+      `${changes.length} reconciled, ${prunedLogs} log file(s) pruned.`,
+  );
+
   return {
     ok: true,
     ready: reality.ready.length,
@@ -165,6 +227,7 @@ export async function pollOnce({
     openPrs: openPrNumbers.size,
     reconciled: changes.length,
     liveWorkers,
+    prunedLogs,
     idle,
   };
 }

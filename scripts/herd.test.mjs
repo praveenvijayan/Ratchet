@@ -273,4 +273,35 @@ const promptTemplates = () => {
   }
 }
 
-console.log("PASS herd.test.mjs (15 criteria)");
+// Criterion 16 (#139 AC1): logRetentionDays is an optional knob with a sensible
+// default; a non-positive or non-integer value exits non-zero with a one-line
+// error naming the file and the field.
+{
+  const base = { adapters: { a: { launch: ["a"] } }, routing: { default: "a" } };
+  const cfg = normalizeConfig(base);
+  assert.equal(cfg.logRetentionDays, DEFAULTS.logRetentionDays, "omitted logRetentionDays takes the default");
+  assert.ok(
+    Number.isInteger(cfg.logRetentionDays) && cfg.logRetentionDays > 0,
+    "the default is a sensible positive integer of days",
+  );
+
+  assert.equal(
+    normalizeConfig({ ...base, logRetentionDays: 30 }).logRetentionDays,
+    30,
+    "an explicit logRetentionDays is kept",
+  );
+
+  for (const bad of [0, -5, 1.5]) {
+    assert.throws(
+      () => normalizeConfig({ ...base, logRetentionDays: bad }, "cfg.json"),
+      (e) =>
+        e instanceof HerdConfigError &&
+        e.message.includes("cfg.json") &&
+        /logRetentionDays/.test(e.message) &&
+        !e.message.includes("\n"),
+      `logRetentionDays=${bad} rejected, naming file and field on one line`,
+    );
+  }
+}
+
+console.log("PASS herd.test.mjs (16 criteria)");

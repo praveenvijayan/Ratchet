@@ -34,6 +34,12 @@ export const DEFAULTS = Object.freeze({
   // (agent/issue-<N>) before killing it as dispatch-failed. Long enough for an
   // agent CLI to cold-start and reach the claim step — minutes, not seconds.
   claimTimeoutSeconds: 300,
+  // How many days a worker log survives after its worker is gone. Logs append
+  // per dispatch and resume and stream-json adapters multiply their size, so an
+  // unpruned logDir grows without bound; the poll deletes logs older than this
+  // whose issue has no live worker. A log of a still-live worker is kept
+  // regardless of age.
+  logRetentionDays: 14,
 });
 
 // Thrown for every operator-facing config problem. The CLI prints `.message` as
@@ -62,6 +68,7 @@ export function defaultConfig() {
     reworkCap: DEFAULTS.reworkCap,
     logDir: DEFAULTS.logDir,
     claimTimeoutSeconds: DEFAULTS.claimTimeoutSeconds,
+    logRetentionDays: DEFAULTS.logRetentionDays,
     adapters: {
       claude: { launch: ["claude", "-p", "{prompt}"], promptTemplate, env: {} },
       codex: { launch: ["codex", "exec", "{prompt}"], promptTemplate, env: {} },
@@ -138,6 +145,7 @@ export function normalizeConfig(raw, file = CONFIG_PATH) {
     pollSeconds: int(raw.pollSeconds, DEFAULTS.pollSeconds, "pollSeconds", 1),
     reworkCap: int(raw.reworkCap, DEFAULTS.reworkCap, "reworkCap", 0),
     claimTimeoutSeconds: int(raw.claimTimeoutSeconds, DEFAULTS.claimTimeoutSeconds, "claimTimeoutSeconds", 1),
+    logRetentionDays: int(raw.logRetentionDays, DEFAULTS.logRetentionDays, "logRetentionDays", 1),
     logDir: str(raw.logDir, DEFAULTS.logDir, "logDir"),
     adapters,
     routing: { default: raw.routing.default, labels: { ...labels } },
@@ -252,7 +260,7 @@ if (isMain) {
       : config.maxWorkers;
     const dryRun = argv.includes("--dry-run");
     const step = async (o) => {
-      await pollOnce(o);
+      await pollOnce({ ...o, config });
       // Monitor exited workers (verify / resume / escalate) before dispatching,
       // so a concluded worker frees a slot this same pass. Skipped on --dry-run,
       // which must never spawn (a resume is a spawn).

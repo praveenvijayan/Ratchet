@@ -7,7 +7,7 @@
 // Zero dependencies. Run:  node scripts/herd-survey.test.mjs
 
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdtempSync, rmSync, mkdirSync, utimesSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -17,6 +17,7 @@ import {
   formatEscalation,
   appendEscalation,
   pollOnce,
+  pruneLogs,
   runLoop,
 } from "./herd-survey.mjs";
 
@@ -170,4 +171,64 @@ await inTempDir(async () => {
   assert.ok(logs.some((m) => /ratchet-status/.test(m)), "prints a /ratchet-status diagnosis pointer");
 });
 
-console.log("PASS herd-survey.test.mjs (7 criteria)");
+// Criterion 8 (#139 AC2): a log file older than the retention window whose
+// issue has no live worker in the state file is deleted during the poll.
+await inTempDir(async () => {
+  const logDir = ".ratchet/logs";
+  mkdirSync(logDir, { recursive: true });
+  const stale = join(logDir, "issue-1.log");
+  writeFileSync(stale, "output from a worker that is long gone");
+  const twentyDaysAgo = (NOW - 20 * 86400 * 1000) / 1000; // seconds, for utimes
+  utimesSync(stale, twentyDaysAgo, twentyDaysAgo);
+
+  // A dead worker still on record: reconcile clears its pid, so it is not live.
+  writeFileSync("s.json", JSON.stringify({ 1: { adapter: "claude", pid: 999999, logFile: stale, status: "working" } }));
+  const gh = fakeGh({ ready: [], inProgress: [], openPrs: [] });
+  const r = await pollOnce({
+    gh, isAlive: () => false, now: NOW, statePath: "s.json", escalationsPath: "e.md",
+    log: () => {}, config: { logDir, logRetentionDays: 14 },
+  });
+  assert.equal(existsSync(stale), false, "the stale log of an issue with no live worker is deleted during the poll");
+  assert.equal(r.prunedLogs, 1, "the poll reports the one pruned log");
+});
+
+// Criterion 9 (#139 AC3): a log referenced by a live worker's state entry is
+// never deleted, regardless of age.
+await inTempDir(async () => {
+  const logDir = ".ratchet/logs";
+  mkdirSync(logDir, { recursive: true });
+  const liveLog = join(logDir, "issue-2.log");
+  writeFileSync(liveLog, "output from a worker that is still running");
+  const ancient = (NOW - 999 * 86400 * 1000) / 1000; // far past any retention window
+  utimesSync(liveLog, ancient, ancient);
+
+  const state = { 2: { adapter: "claude", pid: 4242, logFile: liveLog, status: "working" } };
+  const pruned = pruneLogs({ logDir, retentionDays: 14, state, isAlive: (pid) => pid === 4242, now: NOW });
+  assert.equal(pruned, 0, "an ancient log owned by a live worker is not pruned");
+  assert.equal(existsSync(liveLog), true, "the live worker's log survives regardless of its age");
+});
+
+// Criterion 10 (#139 AC4): the poll summary line reports how many log files
+// were pruned this pass.
+await inTempDir(async () => {
+  const logDir = ".ratchet/logs";
+  mkdirSync(logDir, { recursive: true });
+  for (const n of [1, 2]) {
+    const f = join(logDir, `issue-${n}.log`);
+    writeFileSync(f, "stale");
+    const old = (NOW - 30 * 86400 * 1000) / 1000;
+    utimesSync(f, old, old);
+  }
+  const logs = [];
+  const gh = fakeGh({ ready: [], inProgress: [], openPrs: [] });
+  const r = await pollOnce({
+    gh, isAlive: () => false, now: NOW, statePath: "s.json", escalationsPath: "e.md",
+    log: (m) => logs.push(m), config: { logDir, logRetentionDays: 14 },
+  });
+  assert.equal(r.prunedLogs, 2, "both stale logs are pruned this pass");
+  const summary = logs.find((m) => /log file\(s\) pruned/.test(m));
+  assert.ok(summary, "a poll summary line is printed");
+  assert.match(summary, /2 log file\(s\) pruned/, "the summary line reports the number pruned this pass");
+});
+
+console.log("PASS herd-survey.test.mjs (10 criteria)");
