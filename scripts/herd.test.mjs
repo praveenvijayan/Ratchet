@@ -6,7 +6,7 @@
 // Zero dependencies. Run:  node scripts/herd.test.mjs
 
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { main, loadConfig, normalizeConfig, substitute, resolveAdapter, adapterAvailability, executableOnPath, defaultConfig, headlessFlagWarnings, HEADLESS_PERMISSION_FLAGS, HerdConfigError, DEFAULTS } from "./herd.mjs";
@@ -617,12 +617,111 @@ inTempDir(() => {
   }
 }
 
+// ── Issue #152: document an opencode/OpenRouter fallback adapter ──────────────
+// opencode is pure config, like every herd adapter. These tests exercise the
+// documented claude→codex→opencode route against a *real* stub opencode binary,
+// so availability — not a mock — decides dispatch.
+
+// The documented opencode adapter plus the claude→codex→opencode chain, as one
+// normalized config.
+const opencodeDocConfig = () =>
+  normalizeConfig({
+    adapters: {
+      claude: { launch: ["claude", "-p", HEADLESS_PERMISSION_FLAGS.claude, "{prompt}"], promptTemplate: "p" },
+      codex: { launch: ["codex", "exec", HEADLESS_PERMISSION_FLAGS.codex, "{prompt}"], promptTemplate: "p" },
+      opencode: {
+        launch: ["opencode", "run", "--model", "openrouter/{model}", "{prompt}"],
+        model: "anthropic/claude-3.5-sonnet",
+        requiresEnv: ["OPENROUTER_API_KEY"],
+        promptTemplate: "p",
+      },
+    },
+    routing: { default: ["claude", "codex", "opencode"] },
+  });
+
+// Run `fn(binDir)` with a throwaway dir holding an executable `opencode` stub and
+// nothing else — so PATH=binDir means opencode resolves while claude/codex do not.
+function withStubOpencode(fn) {
+  const dir = mkdtempSync(join(tmpdir(), "herd-bin-"));
+  try {
+    const exe = join(dir, "opencode");
+    writeFileSync(exe, "#!/bin/sh\nexit 0\n");
+    chmodSync(exe, 0o755);
+    return fn(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// Criterion 33 (#152 AC1): DOCS.md carries a copy-ready opencode adapter block —
+// opencode run headless against OpenRouter, requiresEnv ["OPENROUTER_API_KEY"] —
+// alongside a routing.default chain claude → codex → opencode.
+{
+  const docs = readFileSync(new URL("../DOCS.md", import.meta.url), "utf8");
+  assert.ok(docs.includes('"opencode": {'), "DOCS.md defines an opencode adapter block");
+  assert.ok(docs.includes('"opencode", "run"'), "the opencode launch uses opencode's headless run subcommand");
+  assert.ok(docs.includes('"requiresEnv": ["OPENROUTER_API_KEY"]'), "the opencode adapter gates on OPENROUTER_API_KEY via requiresEnv");
+  assert.ok(docs.includes('"default": ["claude", "codex", "opencode"]'), "DOCS.md shows the claude → codex → opencode routing.default chain");
+}
+
+// Criterion 34 (#152 AC2): DOCS.md calls out that the opencode launch runs fully
+// non-interactive — it never blocks on an approval/permission prompt for
+// git/shell/filesystem actions (the headless-claim failure mode).
+{
+  const docs = readFileSync(new URL("../DOCS.md", import.meta.url), "utf8");
+  assert.ok(docs.includes("opencode must run fully non-interactive"), "the docs call the opencode launch fully non-interactive");
+  assert.ok(docs.includes("without\npausing for a permission or approval prompt") || docs.includes("without pausing for a permission or approval prompt"), "the docs say it never pauses for a permission or approval prompt");
+  assert.ok(docs.includes("the headless-claim failure mode"), "the docs tie a blocking prompt to the headless-claim failure mode");
+}
+
+// Criterion 35 (#152 AC3): with OPENROUTER_API_KEY unset, the claude→codex→
+// opencode route treats opencode as unavailable and dispatches no opencode
+// worker — verified against a real stub opencode binary on PATH.
+withStubOpencode((binDir) => {
+  const cfg = opencodeDocConfig();
+  // Only the stub opencode is on PATH (claude/codex absent) and the key is unset.
+  const r = resolveAdapter(cfg, [], { env: { PATH: binDir }, onPath: executableOnPath });
+  assert.notEqual(r.name, "opencode", "no opencode worker is dispatched while OPENROUTER_API_KEY is unset");
+  assert.equal(r.name, null, "no adapter in the route is available, so nothing is dispatched");
+  assert.ok(
+    r.tried.some((t) => t.name === "opencode" && /OPENROUTER_API_KEY/.test(t.reason)),
+    "opencode is recorded unavailable because its required key is unset",
+  );
+});
+
+// Criterion 36 (#152 AC4): with claude and codex absent from PATH and
+// OPENROUTER_API_KEY set, the same route dispatches the opencode worker.
+withStubOpencode((binDir) => {
+  const cfg = opencodeDocConfig();
+  const r = resolveAdapter(cfg, [], { env: { PATH: binDir, OPENROUTER_API_KEY: "sk-test" }, onPath: executableOnPath });
+  assert.equal(r.name, "opencode", "opencode wins once claude/codex are off PATH and its key is set");
+  assert.deepEqual(r.tried.map((t) => t.name), ["claude", "codex"], "claude and codex were tried and skipped as unavailable");
+});
+
+// Criterion 37 (#152 AC5): the framework stays pure — scripts/herd.mjs names
+// neither "opencode" nor "openrouter"; they appear only in config and docs.
+{
+  const src = readFileSync(new URL("./herd.mjs", import.meta.url), "utf8");
+  for (const token of ["opencode", "openrouter"])
+    assert.ok(!new RegExp(token, "i").test(src), `herd.mjs must stay framework-pure: it names "${token}"`);
+}
+
+// Criterion 38 (#152 AC6): each #152 criterion above has exactly one test named
+// after it — no missing coverage, no padding.
+{
+  const self = readFileSync(new URL("./herd.test.mjs", import.meta.url), "utf8");
+  for (const ac of ["AC1", "AC2", "AC3", "AC4", "AC5"]) {
+    const hits = (self.match(new RegExp(`#152 ${ac}\\)`, "g")) || []).length;
+    assert.equal(hits, 1, `#152 ${ac} has exactly one test named after it`);
+  }
+}
+
 // ── Issue #156: distribute herd dispatch across adapters (round-robin) ──
 // A route may opt into a round-robin policy so successive workers spread across
 // the available adapters instead of always piling onto the first. The default
 // stays failover, so existing configs are byte-for-byte unchanged in behaviour.
 
-// Criterion 33 (#156 AC1): a route may declare its selection policy; with none
+// Criterion 39 (#156 AC1): a route may declare its selection policy; with none
 // declared the policy stays "failover" (first available, unchanged), so existing
 // configs behave identically — no rotation.
 {
@@ -645,7 +744,7 @@ inTempDir(() => {
   );
 }
 
-// Criterion 35 (#156 AC3): round-robin skips adapters that are unavailable (per
+// Criterion 41 (#156 AC3): round-robin skips adapters that are unavailable (per
 // the availability check) and never blocks on them — with the middle adapter
 // down, the rotation cycles only the two available ones.
 {
@@ -664,7 +763,7 @@ inTempDir(() => {
   assert.ok(!picks.includes("b"), "the unavailable adapter is never chosen");
 }
 
-// Criterion 36 (#156 AC4): when exactly one adapter in the route is available,
+// Criterion 42 (#156 AC4): when exactly one adapter in the route is available,
 // every worker uses it with no error — rotation degrades gracefully to that one
 // adapter instead of erroring or stalling.
 {
@@ -681,7 +780,7 @@ inTempDir(() => {
   }
 }
 
-// Criterion 37 (#156 AC5): an unknown policy value exits nonzero with a one-line
+// Criterion 43 (#156 AC5): an unknown policy value exits nonzero with a one-line
 // error naming the route and the bad policy — enforced at the loader and surfaced
 // by the CLI.
 {
@@ -706,7 +805,7 @@ inTempDir(() => {
   });
 }
 
-// Criterion 38 (#156 AC6): the selection policy names no specific CLI or model —
+// Criterion 44 (#156 AC6): the selection policy names no specific CLI or model —
 // "failover" and "round-robin" are generic policy names, so herd.mjs stays
 // framework-pure.
 {
@@ -721,7 +820,7 @@ inTempDir(() => {
   assert.match(src, /round-robin/, "round-robin is a generic policy name, not a CLI or model");
 }
 
-// Criterion 39 (#156 AC7): each #156 criterion has exactly one test named after
+// Criterion 45 (#156 AC7): each #156 criterion has exactly one test named after
 // it, counted across herd.test.mjs and herd-dispatch.test.mjs (AC2 lives in the
 // dispatch suite where round-robin dispatch is exercised end to end).
 {
@@ -734,4 +833,4 @@ inTempDir(() => {
   }
 }
 
-console.log("PASS herd.test.mjs (39 criteria)");
+console.log("PASS herd.test.mjs (45 criteria)");
