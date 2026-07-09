@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 // herd-dispatch.test.mjs — the criteria are the test plan. One test per
 // acceptance criterion of issue #105 (dispatch with claim-window
-// serialization), exercised through herd-dispatch.mjs's public interface.
+// serialization); criteria 4, 5, and 8 track issue #126, which moved the claim
+// signal from the state:ready label to the server-side branch ref
+// agent/issue-<N>. Exercised through herd-dispatch.mjs's public interface.
 // Offline: spawn, gh, kill, clock, and sleep are injected. Criterion 2 drives a
 // real detached spawn against a stub adapter CLI written into a temp dir.
 // Zero dependencies. Run:  node scripts/herd-dispatch.test.mjs
@@ -98,24 +100,29 @@ await inTempDir(async () => {
   assert.equal(r2.reason, "at-capacity", "--max lowers the cap below config.maxWorkers");
 });
 
-// Criterion 4: after spawning a worker, the next dispatch waits until that issue
-// leaves state:ready (polling gh with a bounded timeout).
+// Criterion 4 (issue #126): waitForClaim reports claimed as soon as the server
+// ref agent/issue-<N> exists, even while state:ready is still on the issue —
+// the ref is the claim, the label only reports.
 {
   let calls = 0;
-  const gh = async () => {
+  const seen = [];
+  const gh = async (args) => {
     calls++;
-    return { labels: calls < 3 ? [{ name: "state:ready" }] : [{ name: "state:in-progress" }] };
+    seen.push(args.join(" "));
+    if (calls < 3) throw new Error("404 Not Found"); // ref not created yet
+    return { ref: "refs/heads/agent/issue-5" }; // the worker created its claim ref
   };
   let t = 0;
   const now = () => t;
   const sleep = (ms) => ((t += ms), Promise.resolve());
   const r = await waitForClaim({ gh, issue: 5, timeoutMs: 10000, intervalMs: 1000, now, sleep });
-  assert.equal(r.claimed, true, "returns claimed once the issue leaves state:ready");
-  assert.ok(calls >= 3, "polled gh until the label changed");
+  assert.equal(r.claimed, true, "returns claimed once the claim ref resolves");
+  assert.ok(calls >= 3, "polled until the ref existed");
+  assert.ok(seen.every((a) => /git\/ref\/heads\/agent\/issue-5/.test(a)), "polls the branch ref, never the label");
 }
 
-// Criterion 5: a claim-window timeout kills the worker, marks it
-// dispatch-failed in the state file, and appends an escalation.
+// Criterion 5 (issue #126): a worker that has not created the claim ref by the
+// timeout is killed, marked dispatch-failed, and escalated with its log named.
 await inTempDir(async () => {
   let killed = null;
   let t = 0;
@@ -127,7 +134,9 @@ await inTempDir(async () => {
     statePath: "s.json",
     escalationsPath: "esc.md",
     spawn: () => 4242,
-    gh: async () => ({ labels: [{ name: "state:ready" }] }), // never claims
+    gh: async () => {
+      throw new Error("404 Not Found"); // the claim ref is never created
+    },
     isAlive: () => false,
     kill: (pid) => {
       killed = pid;
@@ -141,7 +150,45 @@ await inTempDir(async () => {
   assert.equal(r.claimed, false, "the claim window times out");
   assert.equal(killed, 4242, "the un-claiming worker is killed");
   assert.equal(readState("s.json")["8"].status, "dispatch-failed", "marked dispatch-failed in the state file");
-  assert.match(readFileSync("esc.md", "utf8"), /did not claim/, "an escalation is appended");
+  const esc = readFileSync("esc.md", "utf8");
+  assert.match(esc, /did not claim/, "an escalation is appended");
+  assert.match(esc, /issue-8\.log/, "the escalation names the worker's log file");
+});
+
+// Criterion 8 (issue #126): a transient gh failure while polling counts as
+// still waiting — never a claim, and never a dispatch failure.
+await inTempDir(async () => {
+  let killed = false;
+  let calls = 0;
+  let t = 0;
+  const now = () => t;
+  const sleep = (ms) => ((t += ms), Promise.resolve());
+  const gh = async () => {
+    calls++;
+    if (calls <= 2) throw new Error("transient network blip"); // must not end the wait
+    return { ref: "refs/heads/agent/issue-9" }; // ref appears after the blips
+  };
+  const r = await dispatchOne({
+    config: mkConfig(),
+    ready: [{ number: 9, labels: [] }],
+    statePath: "s.json",
+    escalationsPath: "esc.md",
+    spawn: () => 777,
+    gh,
+    isAlive: () => false,
+    kill: () => {
+      killed = true;
+    },
+    now,
+    sleep,
+    log: () => {},
+    claimTimeoutMs: 60000,
+    claimIntervalMs: 1000,
+  });
+  assert.equal(r.claimed, true, "keeps waiting through the blip, then sees the claim ref");
+  assert.equal(killed, false, "a transient failure never kills the worker");
+  assert.equal(readState("s.json")["9"].status, "dispatched", "never marked dispatch-failed on a transient blip");
+  assert.ok(!existsSync("esc.md"), "no escalation for a transient blip");
 });
 
 // Criterion 6: an issue already present in the state file is never dispatched a
@@ -175,4 +222,4 @@ await inTempDir(async () => {
   assert.ok(!existsSync("s.json"), "no worker spawned and no state written");
 });
 
-console.log("PASS herd-dispatch.test.mjs (7 criteria)");
+console.log("PASS herd-dispatch.test.mjs (8 checks)");

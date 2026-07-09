@@ -103,19 +103,23 @@ const defaultKill = (pid) => process.kill(pid, "SIGTERM");
 const liveWorkers = (state, isAlive) =>
   Object.values(state).filter((e) => e.pid != null && isAlive(e.pid)).length;
 
-// Poll gh until the issue leaves state:ready (the worker claimed it) or the
-// bounded timeout elapses. A transient gh error is treated as "still waiting"
-// so a blip never counts as a claim. Returns { claimed }.
+// Poll the server for the worker's claim ref (agent/issue-<N>) until it exists
+// or the bounded timeout elapses. Per AGENTS.md §2 the atomic claim *is* that
+// branch ref — labels only report, and the state:ready flip happens later in
+// the worker's run, so waiting on the label SIGTERMs a correctly-claiming
+// worker. Any gh failure — a 404 for the not-yet-created ref or a transient
+// blip — is treated as "still waiting", so it never counts as a claim and
+// never (on its own) as a dispatch failure. Returns { claimed }.
 export async function waitForClaim({ gh, issue, timeoutMs, intervalMs = 1000, now = () => Date.now(), sleep = defaultSleep }) {
+  const ref = `repos/{owner}/{repo}/git/ref/heads/agent/issue-${issue}`;
   const start = now();
   for (;;) {
-    let labels = null;
     try {
-      labels = labelNames(await gh(["issue", "view", String(issue), "--json", "labels"]));
+      await gh(["api", ref]);
+      return { claimed: true }; // the ref resolves -> the worker claimed the issue
     } catch {
-      labels = null; // transient — keep waiting until the timeout
+      // ref not created yet (404) or a transient gh error — keep waiting
     }
-    if (labels && !labels.includes("state:ready")) return { claimed: true };
     if (now() - start >= timeoutMs) return { claimed: false };
     await sleep(intervalMs);
   }
@@ -141,7 +145,7 @@ export async function dispatchOne(opts) {
     kill = defaultKill,
     dryRun = false,
     maxWorkers = config.maxWorkers,
-    claimTimeoutMs = 60000,
+    claimTimeoutMs = (config.claimTimeoutSeconds ?? 300) * 1000,
     claimIntervalMs = 1000,
   } = opts;
 
