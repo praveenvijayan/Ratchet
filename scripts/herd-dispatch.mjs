@@ -22,6 +22,8 @@ import {
   writeState,
   appendEscalation,
   isPidAlive,
+  claimRefPresent,
+  deleteRefCommand,
 } from "./herd-survey.mjs";
 
 const PRIORITY_RANK = { "priority:high": 0, "priority:medium": 1, "priority:low": 2 };
@@ -207,14 +209,23 @@ export async function dispatchOne(opts) {
       after[issue.number].pid = null;
       writeState(statePath, after);
     }
-    appendEscalation(escalationsPath, {
-      now: now(),
-      issue: issue.number,
-      what: `worker did not claim the issue within ${Math.round(claimTimeoutMs / 1000)}s — the claim signal, the branch ref agent/issue-${issue.number} on origin, never appeared; killed pid ${pid}`,
-      logFile: plan.logFile,
-      action: "inspect the log; the adapter CLI may be missing, misconfigured, or failing to claim",
-    });
-    return { dispatched: issue.number, claimed: false, status: "dispatch-failed" };
+    // The kill can race the worker: a worker can create its claim ref right
+    // around the SIGTERM, leaving a ref no live worker backs — itself a stale
+    // claim. Re-check origin after the kill so we don't report "the ref never
+    // appeared" when it actually exists, and hand the operator the same delete
+    // command the survey's stale-claim escalation uses. A 404 or transient gh
+    // error reads as absent, keeping the plain timeout message.
+    const sec = Math.round(claimTimeoutMs / 1000);
+    const refLeft = await claimRefPresent(gh, issue.number);
+    const del = deleteRefCommand(issue.number);
+    const what = refLeft
+      ? `worker did not claim the issue within ${sec}s so it was killed (pid ${pid}), but the claim ref agent/issue-${issue.number} on origin was created anyway — the killed worker raced the timeout and left a stale claim that 422s every future worker. Delete it: ${del}`
+      : `worker did not claim the issue within ${sec}s — the claim signal, the branch ref agent/issue-${issue.number} on origin, never appeared; killed pid ${pid}`;
+    const action = refLeft
+      ? `run \`${del}\` to delete the stale claim ref the killed worker left, then inspect the log; the adapter CLI may be misconfigured`
+      : "inspect the log; the adapter CLI may be missing, misconfigured, or failing to claim";
+    appendEscalation(escalationsPath, { now: now(), issue: issue.number, what, logFile: plan.logFile, action });
+    return { dispatched: issue.number, claimed: false, status: "dispatch-failed", staleRef: refLeft };
   }
   return { dispatched: issue.number, claimed: true, pid, adapter: plan.adapter };
 }
