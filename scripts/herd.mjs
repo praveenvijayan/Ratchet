@@ -16,7 +16,8 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync, realpathSync } from "node:fs";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runLoop, ghJson } from "./herd-survey.mjs";
+import { runLoop, pollOnce, ghJson } from "./herd-survey.mjs";
+import { dispatchOne, surveyReady } from "./herd-dispatch.mjs";
 
 // Config location, relative to the repo root (the supervisor's cwd).
 export const CONFIG_PATH = ".ratchet/herd.json";
@@ -216,9 +217,11 @@ if (isMain) {
   const argv = process.argv.slice(2);
   const cmd = argv[0];
   if (cmd === undefined || cmd === "run") {
-    // Supervisor: validate the config, then poll. `--once` does a single pass
-    // and exits; otherwise it keeps polling every pollSeconds. Never merges,
-    // approves, closes, or labels anything — it observes and escalates.
+    // Supervisor: validate the config, then poll. Each pass surveys/reconciles
+    // (pollOnce) and dispatches at most one worker. `--once` does a single pass;
+    // `--dry-run` prints the plan without spawning (and implies a single pass);
+    // `--max <n>` overrides maxWorkers. Never merges, approves, closes, or
+    // labels anything — it observes, dispatches, and escalates.
     let config;
     try {
       config = loadConfig();
@@ -229,7 +232,20 @@ if (isMain) {
       }
       throw e;
     }
-    runLoop({ gh: ghJson, once: argv.includes("--once"), pollSeconds: config.pollSeconds }).then(
+    const maxIdx = argv.indexOf("--max");
+    const maxWorkers = maxIdx >= 0 && Number.isInteger(Number(argv[maxIdx + 1]))
+      ? Number(argv[maxIdx + 1])
+      : config.maxWorkers;
+    const dryRun = argv.includes("--dry-run");
+    const step = async (o) => {
+      await pollOnce(o);
+      const ready = await surveyReady(o.gh).catch((e) => {
+        o.log(`herd: dispatch survey failed: ${e.message}; skipping dispatch this poll.`);
+        return [];
+      });
+      await dispatchOne({ ...o, config, ready, dryRun, maxWorkers });
+    };
+    runLoop({ gh: ghJson, log: console.log, once: argv.includes("--once") || dryRun, pollSeconds: config.pollSeconds, step }).then(
       () => process.exit(0),
       (e) => {
         console.error(`herd: supervisor stopped on an unexpected error: ${e.message}`);
