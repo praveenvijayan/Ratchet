@@ -6,7 +6,7 @@
 // Zero dependencies. Run:  node scripts/herd.test.mjs
 
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { main, loadConfig, normalizeConfig, substitute, resolveAdapter, defaultConfig, headlessFlagWarnings, HEADLESS_PERMISSION_FLAGS, HerdConfigError, DEFAULTS } from "./herd.mjs";
@@ -380,4 +380,127 @@ inTempDir(() => {
   }
 }
 
-console.log("PASS herd.test.mjs (21 criteria)");
+// ── Issue #155: let a herd adapter pin a model so different models dispatch ──
+// {model} is a config-substitution placeholder in the same family as {prompt}
+// and {issue}; an adapter names the model in config and the loader stays pure.
+
+// Criterion 22 (#155 AC1): an adapter may declare a `model`; {model} in its
+// launch argv and promptTemplate is substituted exactly as {prompt}/{issue},
+// and every other brace token still passes through verbatim.
+{
+  const cfg = normalizeConfig({
+    adapters: {
+      a: {
+        launch: ["cli", "--model", "{model}", "{prompt}"],
+        promptTemplate: "use {model} on issue {issue}",
+        model: "some-model-x",
+      },
+    },
+    routing: { default: "a" },
+  });
+  const { adapter } = resolveAdapter(cfg, []);
+  assert.equal(adapter.model, "some-model-x", "the declared model normalizes onto the adapter");
+  assert.deepEqual(
+    substitute(adapter.launch, { prompt: "hi", issue: 7, model: adapter.model }),
+    ["cli", "--model", "some-model-x", "hi"],
+    "{model} substitutes in the launch argv exactly like {prompt}/{issue}",
+  );
+  assert.equal(
+    substitute(adapter.promptTemplate, { issue: 7, model: adapter.model }),
+    "use some-model-x on issue 7",
+    "{model} substitutes in the promptTemplate too",
+  );
+  assert.equal(
+    substitute("keep {other} literal, pin {model}", { model: "some-model-x" }),
+    "keep {other} literal, pin some-model-x",
+    "every other brace token still passes through verbatim while {model} substitutes",
+  );
+}
+
+// Criterion 23 (#155 AC2): an adapter whose launch or promptTemplate uses
+// {model} but declares no `model` exits nonzero with a one-line error naming
+// the adapter and the missing field.
+{
+  for (const bad of [
+    { adapters: { a: { launch: ["cli", "{model}"] } }, routing: { default: "a" } },
+    { adapters: { a: { launch: ["cli"], promptTemplate: "run on {model}" } }, routing: { default: "a" } },
+  ]) {
+    assert.throws(
+      () => normalizeConfig(bad, "cfg.json"),
+      (e) =>
+        e instanceof HerdConfigError &&
+        e.message.includes("cfg.json") &&
+        /"a"/.test(e.message) &&
+        /model/.test(e.message) &&
+        !e.message.includes("\n"),
+      "a {model} adapter with no model field is rejected on one line naming the adapter and field",
+    );
+  }
+  // And the loader turns that into a nonzero process exit.
+  inTempDir(() => {
+    mkdirSync(".ratchet", { recursive: true });
+    writeFileSync(
+      ".ratchet/herd.json",
+      JSON.stringify({ adapters: { a: { launch: ["cli", "{model}"] } }, routing: { default: "a" } }),
+    );
+    const r = capture(() => main(["run"]));
+    assert.equal(r.code, 1, "a {model} adapter with no model exits nonzero");
+    assert.ok(!r.err.includes("\n"), "the error is a single line");
+  });
+}
+
+// Criterion 24 (#155 AC3): two adapters that differ only by `model` both
+// validate and are independently routable and dispatchable.
+{
+  const cfg = normalizeConfig({
+    adapters: {
+      fast: { launch: ["orcli", "--model", "{model}", "{prompt}"], model: "model-fast" },
+      slow: { launch: ["orcli", "--model", "{model}", "{prompt}"], model: "model-slow" },
+    },
+    routing: { default: "fast", labels: { heavy: "slow" } },
+  });
+  assert.equal(resolveAdapter(cfg, ["heavy"]).name, "slow", "a label routes to the slow-model adapter");
+  assert.equal(resolveAdapter(cfg, []).name, "fast", "the default routes to the fast-model adapter");
+  const argv = (name) =>
+    substitute(cfg.adapters[name].launch, { prompt: "p", issue: 1, model: cfg.adapters[name].model });
+  assert.deepEqual(argv("fast"), ["orcli", "--model", "model-fast", "p"], "the fast adapter dispatches on its model");
+  assert.deepEqual(argv("slow"), ["orcli", "--model", "model-slow", "p"], "the slow adapter dispatches on its model");
+  assert.notDeepEqual(argv("fast"), argv("slow"), "adapters differing only by model dispatch distinct commands");
+}
+
+// Criterion 25 (#155 AC4): `model` is optional — an adapter that neither
+// declares `model` nor uses {model} loads and dispatches exactly as before.
+{
+  const cfg = normalizeConfig({ adapters: { a: { launch: ["cli", "{prompt}", "{issue}"] } }, routing: { default: "a" } });
+  assert.ok(!("model" in cfg.adapters.a), "a model-free adapter carries no model field (unchanged shape)");
+  assert.deepEqual(
+    substitute(cfg.adapters.a.launch, { prompt: "hi", issue: 9, model: cfg.adapters.a.model }),
+    ["cli", "hi", "9"],
+    "a model-free adapter dispatches exactly as before — undefined model is harmless",
+  );
+  const shipped = normalizeConfig(defaultConfig());
+  assert.ok(!("model" in shipped.adapters.claude) && !("model" in shipped.adapters.codex), "the shipped default is model-free and still loads");
+}
+
+// Criterion 26 (#155 AC5): the framework purity test still passes — no specific
+// model name appears in scripts/herd.mjs; the model lives only in config.
+{
+  const src = readFileSync(new URL("./herd.mjs", import.meta.url), "utf8");
+  for (const token of ["opus", "sonnet", "haiku", "gpt-3", "gpt-4", "gpt-5", "davinci", "gemini", "llama", "mistral"])
+    assert.ok(!new RegExp(token, "i").test(src), `herd.mjs names no model ("${token}") — models live only in config`);
+  const { adapters } = defaultConfig();
+  for (const [name, a] of Object.entries(adapters))
+    assert.ok(!("model" in a), `shipped adapter "${name}" declares no model — the operator names it in config`);
+}
+
+// Criterion 27 (#155 AC6): each #155 criterion above has exactly one test named
+// after it — no missing coverage, no padding.
+{
+  const self = readFileSync(new URL("./herd.test.mjs", import.meta.url), "utf8");
+  for (const ac of ["AC1", "AC2", "AC3", "AC4", "AC5"]) {
+    const hits = (self.match(new RegExp(`#155 ${ac}\\)`, "g")) || []).length;
+    assert.equal(hits, 1, `#155 ${ac} has exactly one test named after it`);
+  }
+}
+
+console.log("PASS herd.test.mjs (27 criteria)");

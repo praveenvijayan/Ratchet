@@ -48,13 +48,13 @@ export function pickNext(ready) {
 }
 
 // Resolve an issue to its concrete dispatch: the routed adapter, the argv with
-// {prompt}/{issue} substituted, the merged env, and the log file path.
+// {prompt}/{issue}/{model} substituted, the merged env, and the log file path.
 export function buildDispatch(config, issue) {
   const { name, adapter } = resolveAdapter(config, labelNames(issue));
-  const prompt = substitute(adapter.promptTemplate || "", { issue: issue.number });
+  const prompt = substitute(adapter.promptTemplate || "", { issue: issue.number, model: adapter.model });
   return {
     adapter: name,
-    argv: substitute(adapter.launch, { prompt, issue: issue.number }),
+    argv: substitute(adapter.launch, { prompt, issue: issue.number, model: adapter.model }),
     env: adapter.env || {},
     logFile: `${config.logDir}/issue-${issue.number}.log`,
   };

@@ -85,7 +85,7 @@ export function buildRework(config, entry, issue, pr) {
   const command = Array.isArray(adapter.resume) && adapter.resume.length ? adapter.resume : adapter.launch;
   const prompt = REWORK_PROMPT.replaceAll("{pr}", String(pr)).replaceAll("{issue}", String(issue));
   return {
-    argv: substitute(command, { prompt, issue }),
+    argv: substitute(command, { prompt, issue, model: adapter.model }),
     env: adapter.env || {},
     logFile: entry.logFile || `${config.logDir}/issue-${issue}.log`,
   };
