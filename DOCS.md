@@ -239,6 +239,7 @@ side effects. Invoke as `/name` in Claude Code or Antigravity, or `/skills` /
 | `/ratchet-metrics` | To inspect loop health | Read-only report from GitHub data: cycle time, rework rate, stale-claim sweeps, and queue depth by state. |
 | `/ratchet-memory` | Periodically (e.g. quarterly) | Prunes and dedupes `memory/MEMORY.md`, verifies issue/PR links, stops for review. |
 | `/ratchet-map` | When structure drifts | Regenerates the coarse codebase map `memory/ARCHITECTURE.md` (language-agnostic), stops for review. |
+| `/ratchet-herd` | To run the fleet supervisor | Validates `.ratchet/herd.json` (init hint when missing, starting nothing), then starts `scripts/herd.mjs` if none is running or attaches to a running one and summarizes its state — live workers, attempts, pending escalations. Thin convenience over the script. |
 | `/ratchet-update` | To upgrade | Pulls newer framework files onto a review branch; never touches project-owned files. |
 | `/ratchet-uninstall` | To remove Ratchet | Removes framework files (keeps your `memory/` and plans by default) and offers GitHub-side cleanup; never deletes issues or branch protection. |
 
