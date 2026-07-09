@@ -49,6 +49,7 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 | 4o    | test: docs-refresh              | `node scripts/docs-refresh.test.mjs`              | exit 0 |
 | 4p    | test: ratchet-init-skill        | `node scripts/ratchet-init-skill.test.mjs`        | exit 0 |
 | 4q    | test: gates-coverage            | `node scripts/gates-coverage.test.mjs`            | exit 0 |
+| 4s    | test: herd                      | `node scripts/herd.test.mjs`                      | exit 0 |
 | 4r    | test-coverage                   | `node scripts/gates-coverage.mjs`                 | exit 0 |
 | 5     | build       | TODO: build command               | —              |
 | 6     | audit       | TODO: audit command               | —              |
