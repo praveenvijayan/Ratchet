@@ -134,6 +134,16 @@ picking the next `state:ready` issue as if the in-progress one did not exist.
 On an explicit human handoff, overwrite `.ratchet-owner` with your own
 OWNER_ID before resuming.
 
+**A supervisor dispatch is an explicit human handoff.** When `ratchet-herd`
+(the headless fleet supervisor — see DOCS.md §14) launches you on an issue, the
+prompt you received *is* your human handoff for this ownership rule: the human
+who started the supervisor is delegating the issue to you through it. Treat a
+dispatched or resumed issue exactly as you would a human handing it to you in
+chat — overwrite `.ratchet-owner` with your OWNER_ID and proceed. This never
+weakens the guard against foreign work: only a worker the supervisor actually
+dispatched onto *this* issue is covered; stumbling across some other agent's
+in-flight issue is still foreign, dispatch or no dispatch.
+
 `--ff-only` discipline still applies whenever you integrate `main`; never branch
 from another agent's branch. Then set label `state:in-progress` and self-assign.
 Labels never claim anything; they report — the ref is the claim.

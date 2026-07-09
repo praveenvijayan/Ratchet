@@ -152,7 +152,7 @@ README.md                       Overview and quick start
 LICENSE                         MIT
 .ratchet-version                Installed framework version
 .env.example                    PAT documentation for local runs
-.gitignore                      Ignores .env and .ratchet/ runtime state
+.gitignore                      Ignores .env and .ratchet/ runtime state (incl. herd .ratchet/logs/ and .ratchet/herd-state.json)
 setup.sh                        Mirror skills into each tool's location
 
 plan/
@@ -660,11 +660,157 @@ gh secret set FACTORY_PAT          # enable workflow chaining
 /ratchet-map                       # regenerate memory/ARCHITECTURE.md
 /ratchet-update [vX.Y.Z]           # upgrade the framework
 /ratchet-uninstall                 # remove Ratchet (files via PR; data kept by default)
+
+# Fleet supervisor (optional, ratchet-herd)
+node scripts/herd.mjs init         # write a default .ratchet/herd.json
+node scripts/herd.mjs run          # survey → dispatch → monitor → verify, one issue per worker
 ```
 
 ---
 
-## 14. Glossary
+## 14. The herd supervisor (`ratchet-herd`)
+
+`ratchet-herd` is an **optional**, headless fleet supervisor: it runs the loop
+of §2 across *many* issues at once by launching one agent CLI per ready issue,
+watching each worker to a PR, and escalating anything it cannot resolve to a
+human. It is a convenience layer on top of the same GitHub-native protocol —
+nothing else in Ratchet depends on it, and a single agent driving `/ratchet-next`
+by hand needs none of it. The supervisor lives in `scripts/herd*.mjs` and, like
+the rest of the framework, is **project-agnostic and pure**: which agent CLIs
+exist, their flags, prompt wording, and environment are never in the code — they
+live entirely in one per-operator config file, `.ratchet/herd.json`.
+
+### The config file: `.ratchet/herd.json`
+
+Created by `node scripts/herd.mjs init` (which refuses to overwrite an existing
+file) and edited by hand. Running the supervisor with no config exits non-zero
+with a one-line hint to run `init`. Because it sits under the gitignored
+`.ratchet/` directory, it is local to each operator — like `.env`, it is
+configuration, not committed framework.
+
+```jsonc
+{
+  // Optional top-level knobs — omit any to take the default shown.
+  "maxWorkers": 3,              // most workers alive at once (one issue each)
+  "pollSeconds": 60,            // seconds between survey passes
+  "reworkCap": 2,               // resume attempts before an issue is escalated, never retried again
+  "logDir": ".ratchet/logs",    // where per-worker logs are written
+
+  // Required. Each key is an adapter *name* (a CLI, never a model).
+  "adapters": {
+    "claude": {
+      "launch": ["claude", "-p", "{prompt}"],
+      "promptTemplate": "Pick up issue {issue} and take it to a PR, following AGENTS.md.",
+      "env": {}
+    },
+    "codex": {
+      "launch": ["codex", "exec", "{prompt}"],
+      "promptTemplate": "Pick up issue {issue} and take it to a PR, following AGENTS.md.",
+      "env": {}
+    }
+  },
+
+  // Required. Which adapter handles an issue.
+  "routing": {
+    "default": "claude",         // used when no label matches; must name a defined adapter
+    "labels": { "rust": "codex" }// optional label → adapter overrides
+  }
+}
+```
+
+Malformed JSON, an empty `adapters` object, or `routing` without a valid
+`default` each exit non-zero with a one-line error naming the file and the
+problem — no stack trace ever reaches the operator.
+
+### The adapter contract
+
+An adapter tells the supervisor how to start and restart one worker CLI:
+
+- **`launch`** (required) — a non-empty command array, run to start a worker on
+  a fresh issue.
+- **`resume`** (optional) — the command array used to nudge an existing worker's
+  issue forward after a rework signal. **Omit it and the adapter resumes exactly
+  the way it launches** — `resume` defaults to `launch`.
+- **`promptTemplate`** (optional string) — the instruction handed to the worker.
+  The supervisor renders it, then substitutes the result wherever the command
+  array contains `{prompt}`.
+- **`env`** (optional object) — see the env passthrough below.
+
+**Substitution is deliberately tiny: only `{prompt}` and `{issue}` are
+replaced**, in both prompt templates and command arrays. `{issue}` becomes the
+issue number; `{prompt}` becomes the rendered `promptTemplate`. **Every other
+brace token — `{model}`, `{branch}`, `${SHELL_VAR}` — passes through
+byte-for-byte**, so an adapter can carry literal braces a CLI needs without the
+supervisor mangling them.
+
+### Env passthrough — routing workers through a local proxy
+
+Each adapter's `env` map is merged into that worker's process environment
+**untouched** (over the supervisor's own environment); Ratchet never reads or
+interprets a value. This is the seam for anything a worker needs in its
+environment but the framework should stay ignorant of — for example, routing a
+worker's traffic through a local proxy by pointing the standard proxy variables
+at it:
+
+```jsonc
+"adapters": {
+  "claude": {
+    "launch": ["claude", "-p", "{prompt}"],
+    "env": {
+      "HTTPS_PROXY": "http://127.0.0.1:8080",
+      "HTTP_PROXY": "http://127.0.0.1:8080"
+    }
+  }
+}
+```
+
+The supervisor forwards these verbatim; naming and running the proxy is entirely
+the operator's business.
+
+### Escalations: `.ratchet/herd-escalations.md`
+
+When the supervisor cannot resolve something on its own, it **escalates instead
+of improvising**: it appends a factual, human-readable block to
+`.ratchet/herd-escalations.md` and leaves the decision to a person. Each block
+has a fixed shape:
+
+```markdown
+## 2026-07-09T11:00:01.000Z — issue #142
+- What happened: worker exited 0 but opened no PR
+- Log file: .ratchet/logs/issue-142.log
+- Suggested action: review the log and re-queue the issue if its work is unfinished
+```
+
+Escalation triggers include: a worker that exits without opening a PR (its log
+tail is quoted), an issue that has hit `reworkCap` (never retried again), an
+adapter that has disappeared from the config, and any case where reconciled
+reality contradicts the state file. The runtime state the supervisor rebuilds
+each pass lives in `.ratchet/herd-state.json` — an issue→worker map (adapter,
+pid, log file, attempts, status, PR) reconciled against `gh` and process
+liveness every poll, so a stale pid or a concluded PR can never masquerade as a
+live worker.
+
+### Supervisor invariants
+
+These hold no matter what the config says:
+
+- **It never merges, approves, closes, or labels** a PR or an issue. Every one
+  of the two human jobs — writing plans and reviewing PRs — stays with the
+  human. The supervisor only observes, dispatches, and escalates.
+- **One issue, one worker.** At most `maxWorkers` run at once, and each owns a
+  single issue; dispatch uses the same server-side branch-ref claim as a solo
+  agent (§2), so two workers can never collide on one issue.
+- **Escalation over improvisation.** When reality and the state file disagree,
+  or a worker's outcome is ambiguous, the supervisor writes an escalation for a
+  human rather than guessing.
+- **A dispatch is a human handoff.** A worker the supervisor launches onto an
+  issue treats the prompt it received as an explicit human handoff for the
+  ownership rule (see AGENTS.md step 2) — the operator who started the
+  supervisor is delegating that issue through it.
+
+---
+
+## 15. Glossary
 
 - **Claim** — creating the branch `agent/issue-<N>`; an atomic, GitHub-native
   lock on an issue.

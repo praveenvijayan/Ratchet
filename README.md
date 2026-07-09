@@ -84,6 +84,12 @@ queue depth), **`/ratchet-memory`** (prune & dedupe `memory/MEMORY.md`),
 **`/ratchet-update`** (pull a newer framework version, project files untouched),
 **`/ratchet-uninstall`** (cleanly remove Ratchet; keeps your data by default).
 
+An **optional** headless fleet supervisor, **`ratchet-herd`** (`node
+scripts/herd.mjs run`), runs the same loop across many issues at once — one
+agent CLI per ready issue, watched to a PR — with adapters, prompts, and env
+configured per operator in `.ratchet/herd.json`. It never merges or reviews;
+anything it can't resolve is escalated to a human. See DOCS.md §14.
+
 ## Install
 
 1. Copy this kit into your repo (or "Use this template"), and commit it.
