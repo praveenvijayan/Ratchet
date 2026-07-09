@@ -703,6 +703,7 @@ configuration, not committed framework.
   "pollSeconds": 60,            // seconds between survey passes
   "reworkCap": 2,               // resume attempts before an issue is escalated, never retried again
   "logDir": ".ratchet/logs",    // where per-worker logs are written
+  "claimTimeoutSeconds": 300,   // how long to wait for a worker to create its claim ref before killing it as dispatch-failed
 
   // Required. Each key is an adapter *name* (a CLI, never a model).
   "adapters": {
@@ -790,9 +791,11 @@ has a fixed shape:
 ```
 
 Escalation triggers include: a worker that exits without opening a PR (its log
-tail is quoted), an issue that has hit `reworkCap` (never retried again), an
-adapter that has disappeared from the config, and any case where reconciled
-reality contradicts the state file. The runtime state the supervisor rebuilds
+tail is quoted), a worker that does not create its claim ref
+(`agent/issue-<N>`) within `claimTimeoutSeconds` — killed and marked
+dispatch-failed, its log named — an issue that has hit `reworkCap` (never
+retried again), an adapter that has disappeared from the config, and any case
+where reconciled reality contradicts the state file. The runtime state the supervisor rebuilds
 each pass lives in `.ratchet/herd-state.json` — an issue→worker map (adapter,
 pid, log file, attempts, status, PR) reconciled against `gh` and process
 liveness every poll, so a stale pid or a concluded PR can never masquerade as a
