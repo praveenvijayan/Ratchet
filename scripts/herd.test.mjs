@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { main, loadConfig, normalizeConfig, substitute, resolveAdapter, HerdConfigError, DEFAULTS } from "./herd.mjs";
+import { main, loadConfig, normalizeConfig, substitute, resolveAdapter, defaultConfig, HerdConfigError, DEFAULTS } from "./herd.mjs";
 
 // Run `fn` with cwd set to a fresh temp dir, then clean up — lets CLI-level
 // tests exercise the cwd-relative default config path without side effects.
@@ -195,4 +195,82 @@ inTempDir(() => {
   }
 }
 
-console.log("PASS herd.test.mjs (10 criteria)");
+// ── Issue #132: pin the herd worker prompt to its dispatched issue ──
+// The default promptTemplate is data in herd.json; defaultConfig() is its
+// single source of truth. Every criterion below is asserted against the string
+// defaultConfig() writes, for both shipped adapters.
+const promptTemplates = () => {
+  const { adapters } = defaultConfig();
+  return Object.entries(adapters).map(([name, a]) => [name, a.promptTemplate]);
+};
+
+// Criterion 11 (#132 AC1): the default promptTemplate tells the worker issue
+// {issue} is its entire assignment — skip AGENTS.md's pick step and never
+// claim, work on, or fall through to any other issue.
+{
+  for (const [name, t] of promptTemplates()) {
+    assert.match(t, /\{issue\} is your entire assignment/i, `${name}: names {issue} as the whole assignment`);
+    assert.match(t, /skip AGENTS\.md's pick step/i, `${name}: tells the worker to skip AGENTS.md's pick step`);
+    assert.match(
+      t,
+      /never claim, work on, or fall\s+through to any other issue/i,
+      `${name}: forbids claiming/working/falling through to another issue`,
+    );
+  }
+}
+
+// Criterion 12 (#132 AC2): the template treats an existing agent/issue-{issue}
+// branch as this same assignment — resume it per AGENTS.md's resume rules —
+// never as a foreign claim that triggers exit or fall-through.
+{
+  for (const [name, t] of promptTemplates()) {
+    assert.match(t, /agent\/issue-\{issue\} branch is your own prior claim/i, `${name}: the branch is the worker's own claim`);
+    assert.match(t, /resume it under AGENTS\.md's resume rules/i, `${name}: resume per AGENTS.md, not re-claim`);
+    assert.match(t, /never as a foreign claim/i, `${name}: the branch is not treated as foreign`);
+  }
+}
+
+// Criterion 13 (#132 AC3): a worker whose issue already has a PR opened by
+// someone else is told to exit without touching any branch, worktree, or issue.
+{
+  for (const [name, t] of promptTemplates()) {
+    assert.match(
+      t,
+      /pull request opened by someone else, exit immediately/i,
+      `${name}: a foreign PR means exit immediately`,
+    );
+    assert.match(
+      t,
+      /without touching any branch, worktree, or other issue/i,
+      `${name}: exit touches nothing`,
+    );
+  }
+}
+
+// Criterion 14 (#132 AC4): the promptTemplate examples in DOCS.md match the new
+// default verbatim — both shipped adapters carry the exact string, and the old
+// "Pick up issue" default is gone from the docs.
+{
+  const docs = readFileSync(new URL("../DOCS.md", import.meta.url), "utf8");
+  const templates = promptTemplates().map(([, t]) => t);
+  for (const t of templates)
+    assert.ok(docs.includes(`"promptTemplate": ${JSON.stringify(t)}`), "DOCS.md shows the default promptTemplate verbatim");
+  assert.equal(
+    (docs.match(/"promptTemplate": "Issue \{issue\} is your entire assignment/g) || []).length,
+    templates.length,
+    "DOCS.md carries one verbatim example per shipped adapter",
+  );
+  assert.ok(!docs.includes("Pick up issue {issue} and take it to a PR"), "the old promptTemplate default is gone from DOCS.md");
+}
+
+// Criterion 15 (#132 AC5): every #132 criterion above has exactly one test
+// named after it — this file declares criteria 11–14 once each, no padding.
+{
+  const self = readFileSync(new URL("./herd.test.mjs", import.meta.url), "utf8");
+  for (const ac of ["AC1", "AC2", "AC3", "AC4"]) {
+    const hits = (self.match(new RegExp(`#132 ${ac}\\)`, "g")) || []).length;
+    assert.equal(hits, 1, `#132 ${ac} has exactly one test named after it`);
+  }
+}
+
+console.log("PASS herd.test.mjs (15 criteria)");

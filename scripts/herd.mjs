@@ -49,7 +49,13 @@ export class HerdConfigError extends Error {
 // models — the supervisor never interprets them; editing this file is how an
 // operator adds, removes, or re-flags agents without touching the framework.
 export function defaultConfig() {
-  const promptTemplate = "Pick up issue {issue} and take it to a PR, following AGENTS.md.";
+  const promptTemplate =
+    "Issue {issue} is your entire assignment: take only issue {issue} to a PR, following AGENTS.md. " +
+    "Skip AGENTS.md's pick step — do not survey the ready queue, and never claim, work on, or fall " +
+    "through to any other issue. An existing agent/issue-{issue} branch is your own prior claim on " +
+    "this same assignment: resume it under AGENTS.md's resume rules, never as a foreign claim to exit " +
+    "or fall through from. If issue {issue} already has a pull request opened by someone else, exit " +
+    "immediately without touching any branch, worktree, or other issue.";
   return {
     maxWorkers: DEFAULTS.maxWorkers,
     pollSeconds: DEFAULTS.pollSeconds,

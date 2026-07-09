@@ -714,12 +714,12 @@ configuration, not committed framework.
   "adapters": {
     "claude": {
       "launch": ["claude", "-p", "{prompt}"],
-      "promptTemplate": "Pick up issue {issue} and take it to a PR, following AGENTS.md.",
+      "promptTemplate": "Issue {issue} is your entire assignment: take only issue {issue} to a PR, following AGENTS.md. Skip AGENTS.md's pick step — do not survey the ready queue, and never claim, work on, or fall through to any other issue. An existing agent/issue-{issue} branch is your own prior claim on this same assignment: resume it under AGENTS.md's resume rules, never as a foreign claim to exit or fall through from. If issue {issue} already has a pull request opened by someone else, exit immediately without touching any branch, worktree, or other issue.",
       "env": {}
     },
     "codex": {
       "launch": ["codex", "exec", "{prompt}"],
-      "promptTemplate": "Pick up issue {issue} and take it to a PR, following AGENTS.md.",
+      "promptTemplate": "Issue {issue} is your entire assignment: take only issue {issue} to a PR, following AGENTS.md. Skip AGENTS.md's pick step — do not survey the ready queue, and never claim, work on, or fall through to any other issue. An existing agent/issue-{issue} branch is your own prior claim on this same assignment: resume it under AGENTS.md's resume rules, never as a foreign claim to exit or fall through from. If issue {issue} already has a pull request opened by someone else, exit immediately without touching any branch, worktree, or other issue.",
       "env": {}
     }
   },
@@ -747,7 +747,14 @@ An adapter tells the supervisor how to start and restart one worker CLI:
   the way it launches** — `resume` defaults to `launch`.
 - **`promptTemplate`** (optional string) — the instruction handed to the worker.
   The supervisor renders it, then substitutes the result wherever the command
-  array contains `{prompt}`.
+  array contains `{prompt}`. The default pins the worker to the dispatched issue:
+  it is that worker's entire assignment, so the worker skips AGENTS.md's pick
+  step and never falls through to another issue (a fall-through leaves the
+  dispatched issue's claim ref uncreated, so the supervisor SIGTERMs the worker
+  at `claimTimeoutSeconds`). **Changing `defaultConfig()` only affects future
+  `herd init` runs** — an existing `.ratchet/herd.json` keeps whatever template
+  it was created with, so update the `promptTemplate` in yours by hand to pick
+  up this behaviour.
 - **`env`** (optional object) — see the env passthrough below.
 
 **Substitution is deliberately tiny: only `{prompt}` and `{issue}` are
