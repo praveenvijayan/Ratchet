@@ -160,9 +160,11 @@ export function pruneLogs({ logDir, retentionDays, state, isAlive = isPidAlive, 
 }
 
 // One supervisor pass: survey, reconcile the state file, escalate anomalies,
-// and point at /ratchet-status when the fleet is idle. A failed `gh` call logs
-// one line and returns { ok: false } so the loop retries next poll instead of
-// crashing. Injectable deps keep it fully offline in tests.
+// prune the concluded/dead entries those escalations describe (so a re-queued
+// issue is no longer skipped forever), report a one-line summary, and point at
+// /ratchet-status when the fleet is idle. A failed `gh` call logs one line and
+// returns { ok: false } so the loop retries next poll instead of crashing.
+// Injectable deps keep it fully offline in tests.
 export async function pollOnce({
   gh,
   isAlive = isPidAlive,
@@ -183,7 +185,6 @@ export async function pollOnce({
 
   const openPrNumbers = new Set(reality.openPrs.map((p) => Number(p.number)));
   const { state, changes } = reconcileState(readState(statePath), { openPrNumbers }, isAlive);
-  writeState(statePath, state);
 
   const stamp = now ?? Date.now();
   for (const c of changes) {
@@ -196,15 +197,43 @@ export async function pollOnce({
     });
   }
 
-  // Log hygiene runs after reconcile: dead and concluded pids are cleared
-  // above, so only genuinely live workers now protect their logs. Skipped when
-  // no config is supplied (logDir/logRetentionDays live there).
+  // Prune each reconciled entry only after its escalation is written. A stale
+  // entry left in the state file makes dispatchOne skip that issue forever, so a
+  // re-queued issue could never be picked up again. Remove an entry only when
+  // its worker is gone (pid cleared or dead) AND it tracks no open PR — a live
+  // worker or an open PR is always retained, no matter what was flagged.
+  let pruned = 0;
+  for (const c of changes) {
+    const e = state[c.issue];
+    if (!e) continue;
+    const workerGone = e.pid == null || !isAlive(e.pid);
+    const prConcluded = e.pr == null || !openPrNumbers.has(Number(e.pr));
+    if (workerGone && prConcluded) {
+      delete state[c.issue];
+      pruned += 1;
+    }
+  }
+  writeState(statePath, state);
+
+  // Log hygiene runs after the state is reconciled and written: dead and
+  // concluded entries are gone, so only genuinely live workers now protect
+  // their logs. Skipped when no config is supplied (logDir/logRetentionDays
+  // live there).
   const prunedLogs = config
     ? prune({ logDir: config.logDir, retentionDays: config.logRetentionDays, state, isAlive, now: stamp })
     : 0;
 
   const liveWorkers = Object.values(state).filter((e) => e.pid != null && isAlive(e.pid)).length;
   const idle = reality.ready.length === 0 && liveWorkers === 0;
+
+  // One summary line per pass, so an operator watching the poll sees its shape —
+  // including how many concluded state entries and stale log files it pruned.
+  log(
+    `herd: poll — ${reality.ready.length} ready, ${reality.inProgress.length} in-progress, ` +
+      `${openPrNumbers.size} open PRs, ${liveWorkers} live workers, ` +
+      `${pruned} concluded ${pruned === 1 ? "entry" : "entries"} pruned, ` +
+      `${prunedLogs} log file(s) pruned.`,
+  );
   if (idle) {
     log(
       "herd: no state:ready issues and no live workers. Run /ratchet-status to diagnose the " +
@@ -212,20 +241,13 @@ export async function pollOnce({
     );
   }
 
-  // One summary line per pass, so an operator watching the poll sees the shape
-  // of each pass — including how many stale log files this pass pruned.
-  log(
-    `herd: poll — ${reality.ready.length} ready, ${reality.inProgress.length} in-progress, ` +
-      `${openPrNumbers.size} open PR(s), ${liveWorkers} live worker(s), ` +
-      `${changes.length} reconciled, ${prunedLogs} log file(s) pruned.`,
-  );
-
   return {
     ok: true,
     ready: reality.ready.length,
     inProgress: reality.inProgress.length,
     openPrs: openPrNumbers.size,
     reconciled: changes.length,
+    pruned,
     liveWorkers,
     prunedLogs,
     idle,
