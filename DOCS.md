@@ -604,7 +604,7 @@ files (`GATES.md` plus everything under `memory/`) live outside it.
 ```
 
 It pulls only framework paths (skills, workflows, the whole `scripts/` tree,
-`AGENTS.md`/`DOCS.md`, pointers, `setup.sh`, `plan/README.md`, `.env.example`),
+`AGENTS.md`/`DOCS.md`, pointers, `setup.sh`, `plan/README.md`),
 re-syncs the skill mirrors, bumps `.ratchet-version`, and stops for you to
 review the diff and open a PR. It never touches the project-owned set:
 
@@ -613,7 +613,7 @@ review the diff and open a PR. It never touches the project-owned set:
 | `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `DOCS.md` | `GATES.md` (config) |
 | `.agents/`, `.claude/`, `plugin/`, `.claude-plugin/` | `memory/` (`USER.md`, `ARCHITECTURE.md`, `MEMORY.md`) |
 | `.github/workflows/`, `scripts/*`, `setup.sh` | your `plan/*.md` issue files |
-| `plan/README.md`, `.env.example` | `.env`, `README.md`, `LICENSE`, `.gitignore`, your code |
+| `plan/README.md` | `.env`, `.env.example`, `README.md`, `LICENSE`, `.gitignore`, your code |
 
 `.ratchet-version` records the installed version. Pinning an update to a tag
 (`/ratchet-update v1.2.0`) only works for a version the upstream has actually
