@@ -174,6 +174,8 @@ scripts/
   gates-table.mjs               Shared parser for the GATES.md markdown table
   herd.mjs                      ratchet-herd config loader, validator, init
   herd.test.mjs                 Regression test for herd config
+  herd-survey.mjs               ratchet-herd survey/reconcile poll loop
+  herd-survey.test.mjs          Regression test for herd survey loop
   plan-sync-concurrency.test.mjs Workflow concurrency regression test
   plan-sync.mjs                 Deterministic plan→issue compiler
   plan-sync.test.mjs            Regression test for the compiler
