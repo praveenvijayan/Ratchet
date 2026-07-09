@@ -617,4 +617,121 @@ inTempDir(() => {
   }
 }
 
-console.log("PASS herd.test.mjs (32 criteria)");
+// ── Issue #156: distribute herd dispatch across adapters (round-robin) ──
+// A route may opt into a round-robin policy so successive workers spread across
+// the available adapters instead of always piling onto the first. The default
+// stays failover, so existing configs are byte-for-byte unchanged in behaviour.
+
+// Criterion 33 (#156 AC1): a route may declare its selection policy; with none
+// declared the policy stays "failover" (first available, unchanged), so existing
+// configs behave identically — no rotation.
+{
+  const cfg = normalizeConfig({
+    adapters: { a: { launch: ["a"], requiresEnv: ["A_KEY"] }, b: { launch: ["b"] } },
+    routing: { default: ["a", "b"], labels: {} },
+  });
+  assert.equal(cfg.routing.policies["routing.default"], "failover", "a route with no declared policy defaults to failover");
+  assert.equal(
+    resolveAdapter(cfg, [], { env: {}, onPath: () => true }).name,
+    "b",
+    "failover skips the unavailable preferred adapter and takes the first available — unchanged from before",
+  );
+  // Failover never rotates: the same first-available adapter wins every call
+  // regardless of a stale cursor, so an existing config dispatches identically.
+  assert.equal(
+    resolveAdapter(cfg, [], { env: { A_KEY: "x" }, onPath: () => true, cursors: { "routing.default": 1 } }).name,
+    "a",
+    "failover always returns the first available adapter, ignoring any rotation cursor",
+  );
+}
+
+// Criterion 35 (#156 AC3): round-robin skips adapters that are unavailable (per
+// the availability check) and never blocks on them — with the middle adapter
+// down, the rotation cycles only the two available ones.
+{
+  const cfg = normalizeConfig({
+    adapters: { a: { launch: ["a"] }, b: { launch: ["b"], requiresEnv: ["B_KEY"] }, c: { launch: ["c"] } },
+    routing: { default: { adapters: ["a", "b", "c"], policy: "round-robin" }, labels: {} },
+  });
+  const cursors = {};
+  const picks = [];
+  for (let i = 0; i < 4; i++) {
+    const r = resolveAdapter(cfg, [], { env: {}, onPath: () => true, cursors }); // B_KEY unset -> b unavailable
+    picks.push(r.name);
+    cursors[r.cursorKey] = r.nextCursor;
+  }
+  assert.deepEqual(picks, ["a", "c", "a", "c"], "round-robin skips the unavailable adapter every round and cycles the rest");
+  assert.ok(!picks.includes("b"), "the unavailable adapter is never chosen");
+}
+
+// Criterion 36 (#156 AC4): when exactly one adapter in the route is available,
+// every worker uses it with no error — rotation degrades gracefully to that one
+// adapter instead of erroring or stalling.
+{
+  const cfg = normalizeConfig({
+    adapters: { a: { launch: ["a"] }, b: { launch: ["b"], requiresEnv: ["B_KEY"] } },
+    routing: { default: { adapters: ["a", "b"], policy: "round-robin" }, labels: {} },
+  });
+  const cursors = {};
+  for (let i = 0; i < 3; i++) {
+    const r = resolveAdapter(cfg, [], { env: {}, onPath: () => true, cursors }); // only a is available
+    assert.equal(r.name, "a", "the single available adapter is chosen every time");
+    assert.ok(r.adapter, "a concrete adapter resolves — no error, no null");
+    cursors[r.cursorKey] = r.nextCursor;
+  }
+}
+
+// Criterion 37 (#156 AC5): an unknown policy value exits nonzero with a one-line
+// error naming the route and the bad policy — enforced at the loader and surfaced
+// by the CLI.
+{
+  assert.throws(
+    () => normalizeConfig({ adapters: { a: { launch: ["a"] } }, routing: { default: { adapters: ["a"], policy: "bogus" } } }, "cfg.json"),
+    (e) => e instanceof HerdConfigError && /routing\.default/.test(e.message) && /bogus/.test(e.message),
+    "an unknown default-route policy is rejected, naming the entry and the bad policy",
+  );
+  assert.throws(
+    () => normalizeConfig({ adapters: { a: { launch: ["a"] } }, routing: { default: "a", labels: { herd: { adapters: ["a"], policy: "spread" } } } }, "cfg.json"),
+    (e) => e.message.includes(`routing.labels["herd"]`) && /spread/.test(e.message),
+    "an unknown label-route policy is rejected, naming the label entry and the bad policy",
+  );
+  inTempDir(() => {
+    mkdirSync(".ratchet", { recursive: true });
+    writeFileSync(".ratchet/herd.json", JSON.stringify({ adapters: { a: { launch: ["a"] } }, routing: { default: { adapters: ["a"], policy: "bogus" } } }));
+    const r = capture(() => main(["run"]));
+    assert.equal(r.code, 1, "an unknown policy makes the supervisor exit nonzero");
+    assert.match(r.err, /routing\.default/, "the CLI error names the route");
+    assert.match(r.err, /bogus/, "the CLI error names the bad policy");
+    assert.ok(!r.err.includes("\n"), "the error is a single line");
+  });
+}
+
+// Criterion 38 (#156 AC6): the selection policy names no specific CLI or model —
+// "failover" and "round-robin" are generic policy names, so herd.mjs stays
+// framework-pure.
+{
+  const src = readFileSync(new URL("./herd.mjs", import.meta.url), "utf8");
+  for (const token of [
+    "tmux", "zellij", "wezterm",
+    "opus", "sonnet", "haiku", "gpt-4", "gpt-5", "gemini", "llama", "mistral",
+    "litellm", "openrouter", "rtk",
+    "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY",
+  ])
+    assert.ok(!new RegExp(token, "i").test(src), `herd.mjs selection policy stays framework-pure: it references "${token}"`);
+  assert.match(src, /round-robin/, "round-robin is a generic policy name, not a CLI or model");
+}
+
+// Criterion 39 (#156 AC7): each #156 criterion has exactly one test named after
+// it, counted across herd.test.mjs and herd-dispatch.test.mjs (AC2 lives in the
+// dispatch suite where round-robin dispatch is exercised end to end).
+{
+  const here = readFileSync(new URL("./herd.test.mjs", import.meta.url), "utf8");
+  const dispatch = readFileSync(new URL("./herd-dispatch.test.mjs", import.meta.url), "utf8");
+  const both = here + "\n" + dispatch;
+  for (const ac of ["AC1", "AC2", "AC3", "AC4", "AC5", "AC6", "AC7"]) {
+    const hits = (both.match(new RegExp(`#156 ${ac}\\)`, "g")) || []).length;
+    assert.equal(hits, 1, `#156 ${ac} has exactly one test named after it`);
+  }
+}
+
+console.log("PASS herd.test.mjs (39 criteria)");

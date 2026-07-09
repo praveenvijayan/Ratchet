@@ -418,4 +418,37 @@ await inTempDir(async () => {
   assert.match(esc, /pi \(.*PI_KEY is unset or empty.*\)/, "pi's reason is its unset env var");
 });
 
-console.log("PASS herd-dispatch.test.mjs (8 checks for #105/#126 + 3 for #127 + 1 for #138 + 1 for #151)");
+// #156 AC2) Under a round-robin policy, successive dispatches to the same route
+// cycle through the available adapters in order before any adapter repeats. The
+// rotation cursor is carried across dispatchOne calls in its own routing state
+// file, so the order is deterministic and reproducible offline.
+await inTempDir(async () => {
+  const config = mkConfig({
+    maxWorkers: 10, // let every worker stay "live" so none is rejected at capacity
+    adapters: {
+      a: { launch: ["a"], promptTemplate: "", env: {} },
+      b: { launch: ["b"], promptTemplate: "", env: {} },
+      c: { launch: ["c"], promptTemplate: "", env: {} },
+    },
+    routing: { default: { adapters: ["a", "b", "c"], policy: "round-robin" }, labels: {} },
+  });
+  const common = {
+    escalationsPath: "e.md", statePath: "s.json", routingPath: "r.json",
+    spawn: () => 4242, isAlive: () => true,
+    gh: async () => ({}), // any resolving ref means the worker claimed the issue
+    now: () => NOW, sleep: async () => {}, log: () => {}, onPath: () => true,
+  };
+  const picks = [];
+  for (const number of [10, 11, 12, 13]) {
+    const r = await dispatchOne({ ...common, config, ready: [{ number, labels: [] }] });
+    picks.push(r.adapter);
+  }
+  assert.deepEqual(picks, ["a", "b", "c", "a"], "successive dispatches cycle the adapters in order, then repeat");
+  assert.equal(
+    JSON.parse(readFileSync("r.json", "utf8"))["routing.default"],
+    1,
+    "the rotation cursor persists in the routing state file (advanced to a's index after the 4th dispatch)",
+  );
+});
+
+console.log("PASS herd-dispatch.test.mjs (8 checks for #105/#126 + 3 for #127 + 1 for #138 + 1 for #151 + 1 for #156)");

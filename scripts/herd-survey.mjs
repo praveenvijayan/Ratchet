@@ -20,6 +20,12 @@ import { promisify } from "node:util";
 export const STATE_FILE = ".ratchet/herd-state.json";
 export const ESCALATIONS_FILE = ".ratchet/herd-escalations.md";
 export const EVENTS_FILE = ".ratchet/events.jsonl";
+// Round-robin rotation cursors, one per route source (e.g. "routing.default").
+// Kept in its own file — not the issue-keyed herd-state map — so it never shows
+// up as a phantom worker row anywhere state is iterated. A plain string→cursor
+// map; the deterministic form of "spread work across adapters" that avoids
+// Math.random, so a supervisor's dispatch order is reproducible offline.
+export const ROUTING_FILE = ".ratchet/herd-routing.json";
 export const HERD_EVENT_TYPES = Object.freeze([
   "dispatch",
   "resume",
@@ -128,6 +134,23 @@ export function readState(path = STATE_FILE) {
 export function writeState(path, state) {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, JSON.stringify(state, null, 2) + "\n");
+}
+
+// Read the round-robin rotation cursors, tolerating a missing or corrupt file by
+// returning {} — a fresh rotation simply starts every route at index 0.
+export function readRouting(path = ROUTING_FILE) {
+  if (!existsSync(path)) return {};
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+export function writeRouting(path, cursors) {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify(cursors, null, 2) + "\n");
 }
 
 export function formatHerdEvent({ now = Date.now(), event, issue, adapter, pid, logFile, attempts, pr, status }) {
