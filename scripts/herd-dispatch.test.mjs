@@ -59,7 +59,7 @@ async function until(pred, attempts = 80, ms = 25) {
   ];
   assert.equal(pickNext(ready).number, 2, "highest priority, oldest first wins");
   assert.equal(pickNext([]), null, "no ready issues -> null");
-  const plan = buildDispatch(mkConfig(), { number: 2, labels: [] });
+  const plan = buildDispatch(mkConfig(), { number: 2, labels: [] }, { onPath: () => true });
   assert.equal(plan.adapter, "claude", "adapter resolved via config routing");
   assert.deepEqual(plan.argv, ["claude", "-p", "issue 2"], "prompt and issue substituted into argv");
 }
@@ -89,7 +89,7 @@ await inTempDir(async () => {
   const noSpawn = () => {
     throw new Error("must not spawn at capacity");
   };
-  const common = { escalationsPath: "e.md", spawn: noSpawn, isAlive: () => true, gh: async () => ({ labels: [] }), now: () => NOW, sleep: async () => {}, log: () => {} };
+  const common = { escalationsPath: "e.md", spawn: noSpawn, isAlive: () => true, gh: async () => ({ labels: [] }), now: () => NOW, sleep: async () => {}, log: () => {}, onPath: () => true };
 
   writeFileSync("full.json", JSON.stringify({ 1: { pid: 11 }, 2: { pid: 12 }, 3: { pid: 13 } }));
   const r1 = await dispatchOne({ ...common, config: mkConfig(), ready: [{ number: 9, labels: [] }], statePath: "full.json" });
@@ -129,6 +129,7 @@ await inTempDir(async () => {
   const now = () => t;
   const sleep = (ms) => ((t += ms), Promise.resolve());
   const r = await dispatchOne({
+    onPath: () => true,
     config: mkConfig(),
     ready: [{ number: 8, labels: [] }],
     statePath: "s.json",
@@ -164,6 +165,7 @@ await inTempDir(async () => {
   const now = () => t;
   const sleep = (ms) => ((t += ms), Promise.resolve());
   await dispatchOne({
+    onPath: () => true,
     config: mkConfig(),
     ready: [{ number: 8, labels: [] }],
     statePath: "s.json",
@@ -200,6 +202,7 @@ await inTempDir(async () => {
     return { ref: "refs/heads/agent/issue-9" }; // ref appears after the blips
   };
   const r = await dispatchOne({
+    onPath: () => true,
     config: mkConfig(),
     ready: [{ number: 9, labels: [] }],
     statePath: "s.json",
@@ -230,6 +233,7 @@ await inTempDir(async () => {
   };
   writeFileSync("s.json", JSON.stringify({ 5: { pid: 11, status: "dispatched" } }));
   const r = await dispatchOne({
+    onPath: () => true,
     config: mkConfig(), ready: [{ number: 5, labels: [] }], statePath: "s.json", escalationsPath: "e.md",
     spawn: noSpawn, isAlive: () => true, gh: async () => ({ labels: [] }), now: () => NOW, sleep: async () => {}, log: () => {},
   });
@@ -244,6 +248,7 @@ await inTempDir(async () => {
     throw new Error("dry-run must not spawn");
   };
   const r = await dispatchOne({
+    onPath: () => true,
     config: mkConfig(), ready: [{ number: 6, labels: [{ name: "priority:high" }] }], statePath: "s.json", escalationsPath: "e.md",
     spawn: noSpawn, isAlive: () => true, gh: async () => ({ labels: [] }), now: () => NOW, sleep: async () => {}, log: (m) => logs.push(m), dryRun: true,
   });
@@ -275,6 +280,7 @@ await inTempDir(async () => {
 await inTempDir(async () => {
   let waited = false;
   const r = await dispatchOne({
+    onPath: () => true,
     config: mkConfig(),
     ready: [{ number: 8, labels: [] }],
     statePath: "s.json",
@@ -305,6 +311,7 @@ await inTempDir(async () => {
 await inTempDir(async () => {
   let calls = 0;
   const r = await dispatchOne({
+    onPath: () => true,
     config: mkConfig(),
     ready: [{ number: 9, labels: [] }],
     statePath: "s.json",
@@ -342,6 +349,7 @@ await inTempDir(async () => {
     return { ref: "refs/heads/agent/issue-8" }; // worker created it around the kill
   };
   const r = await dispatchOne({
+    onPath: () => true,
     config: mkConfig(),
     ready: [{ number: 8, labels: [] }],
     statePath: "s.json",
@@ -369,4 +377,45 @@ await inTempDir(async () => {
   );
 });
 
-console.log("PASS herd-dispatch.test.mjs (8 checks for #105/#126 + 3 for #127 + 1 for #138)");
+// --- Issue #151: fall back to the next available adapter; escalate when none is. ---
+
+// #151 AC4) When no adapter in the resolved route is available, the issue is not
+// dispatched: no worker spawns, it is marked dispatch-failed, and one escalation
+// names the route and every adapter tried, each with why it was unavailable
+// (missing binary vs unset env var).
+await inTempDir(async () => {
+  const config = mkConfig({
+    adapters: {
+      claude: { launch: ["claude", "-p", "{prompt}"], promptTemplate: "issue {issue}", env: {}, requiresEnv: [] },
+      pi: { launch: ["pi", "{prompt}"], promptTemplate: "issue {issue}", env: {}, requiresEnv: ["PI_KEY"] },
+    },
+    routing: { default: ["claude", "pi"], labels: {} },
+  });
+  const noSpawn = () => {
+    throw new Error("must not spawn when no adapter is available");
+  };
+  const r = await dispatchOne({
+    config,
+    ready: [{ number: 8, labels: [] }],
+    statePath: "s.json",
+    escalationsPath: "esc.md",
+    spawn: noSpawn,
+    gh: async () => ({ labels: [] }),
+    isAlive: () => false,
+    now: () => NOW,
+    sleep: async () => {},
+    log: () => {},
+    // claude's binary is absent from PATH; pi's binary is present but PI_KEY is unset.
+    env: {},
+    onPath: (exe) => exe === "pi",
+  });
+  assert.equal(r.dispatched, 8, "the unavailable-route issue is reported, but");
+  assert.equal(r.unavailable, true, "it is flagged unavailable, not dispatched to a worker");
+  assert.equal(readState("s.json")["8"].status, "dispatch-failed", "the issue is marked dispatch-failed, not spawned");
+  const esc = readFileSync("esc.md", "utf8");
+  assert.match(esc, /no adapter is available for route routing\.default \[claude, pi\]/, "the escalation names the route and its adapters in order");
+  assert.match(esc, /claude \(.*binary .*not found on PATH.*\)/, "claude's reason is its missing binary");
+  assert.match(esc, /pi \(.*PI_KEY is unset or empty.*\)/, "pi's reason is its unset env var");
+});
+
+console.log("PASS herd-dispatch.test.mjs (8 checks for #105/#126 + 3 for #127 + 1 for #138 + 1 for #151)");
