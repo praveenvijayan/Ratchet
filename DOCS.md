@@ -172,6 +172,8 @@ scripts/
   gates-coverage.mjs            Guard: every *.test.mjs runs in a GATES.md row
   gates-coverage.test.mjs       Regression test for the coverage guard
   gates-table.mjs               Shared parser for the GATES.md markdown table
+  herd.mjs                      ratchet-herd config loader, validator, init
+  herd.test.mjs                 Regression test for herd config
   plan-sync-concurrency.test.mjs Workflow concurrency regression test
   plan-sync.mjs                 Deterministic plan→issue compiler
   plan-sync.test.mjs            Regression test for the compiler
