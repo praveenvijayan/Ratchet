@@ -57,12 +57,18 @@ export function buildDispatch(config, issue) {
 }
 
 // Spawn a detached worker, redirecting stdout+stderr to logFile (creating its
-// directory), with `env` merged over the current environment. Returns the pid.
+// directory), with `env` merged over the current environment. Returns the pid,
+// or `undefined` when the launch command never started (a missing or
+// unexecutable binary yields no pid synchronously) — the caller treats that
+// null pid as a spawn failure.
 // The optional `onExit(code, signal)` fires when the child exits while this
 // supervisor is still alive — the monitor uses it (via recordExit) to tell a
 // clean exit from a crash. It never re-refs the child, so it can't keep the
 // supervisor running.
-export function spawnWorker(argv, env, logFile, onExit) {
+// A failed spawn also emits `error` asynchronously; with no listener that
+// becomes an uncaught exception that kills the supervisor. We always attach one
+// so the process survives, and forward it to the optional `onError(err)`.
+export function spawnWorker(argv, env, logFile, onExit, onError) {
   mkdirSync(dirname(logFile), { recursive: true });
   const fd = openSync(logFile, "a");
   try {
@@ -70,6 +76,9 @@ export function spawnWorker(argv, env, logFile, onExit) {
       detached: true,
       stdio: ["ignore", fd, fd],
       env: { ...process.env, ...env },
+    });
+    child.once("error", (err) => {
+      if (typeof onError === "function") onError(err);
     });
     if (typeof onExit === "function") child.once("exit", onExit);
     child.unref();
@@ -160,6 +169,24 @@ export async function dispatchOne(opts) {
 
   const onExit = (code, signal) => recordExit(statePath, issue.number, code, signal);
   const pid = spawnFn(plan.argv, plan.env, plan.logFile, onExit);
+
+  // A missing or unexecutable adapter binary never starts, so spawn returns no
+  // pid. Don't crash the supervisor and don't enter the claim wait for a worker
+  // that isn't there: record the issue as dispatch-failed with its pid cleared,
+  // then escalate with enough to fix it — the adapter, the command, the log.
+  if (pid == null) {
+    state[issue.number] = { adapter: plan.adapter, pid: null, logFile: plan.logFile, attempts: 1, status: "dispatch-failed", pr: null };
+    writeState(statePath, state);
+    appendEscalation(escalationsPath, {
+      now: now(),
+      issue: issue.number,
+      what: `worker spawn failed for adapter "${plan.adapter}" — the launch command never started (missing or unexecutable binary). Command: ${plan.argv.join(" ")}`,
+      logFile: plan.logFile,
+      action: "check the adapter's launch command in .ratchet/herd.json; the CLI may be missing from PATH or not executable",
+    });
+    return { dispatched: issue.number, claimed: false, status: "dispatch-failed", spawnFailed: true };
+  }
+
   state[issue.number] = { adapter: plan.adapter, pid, logFile: plan.logFile, attempts: 1, status: "dispatched", pr: null };
   writeState(statePath, state);
 
