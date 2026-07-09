@@ -1,6 +1,11 @@
 # Ratchet — Complete Documentation
 
-Version 3.4.1 · MIT · https://github.com/praveenvijayan/Ratchet
+Version 3.5.0 · MIT · https://github.com/praveenvijayan/Ratchet
+
+**New in 3.5.0** — the herd emits an adapter-agnostic event stream to
+`.ratchet/events.jsonl` (dispatch, resume, rework, claim/PR detection, worker
+exit/kill, escalation), so observability no longer depends on parsing any one
+adapter's log format. See §14.
 
 **New in 3.4.1** — a herd worker whose adapter binary is missing or unexecutable
 no longer crashes the supervisor: the spawn failure marks the issue
