@@ -48,17 +48,17 @@ export function pickNext(ready) {
 }
 
 // Resolve an issue to its concrete dispatch: the routed adapter, the argv with
-// {prompt}/{issue} substituted, the merged env, and the log file path.
+// {prompt}/{issue}/{model} substituted, the merged env, and the log file path.
 export function buildDispatch(config, issue, deps = {}) {
   const res = resolveAdapter(config, labelNames(issue), deps);
   // No adapter in the resolved route is available — the caller must not spawn.
   // Carry the route and per-adapter reasons so the escalation can name them all.
   if (!res.adapter)
     return { unavailable: true, source: res.source, route: res.route, tried: res.tried };
-  const prompt = substitute(res.adapter.promptTemplate || "", { issue: issue.number });
+  const prompt = substitute(res.adapter.promptTemplate || "", { issue: issue.number, model: res.adapter.model });
   return {
     adapter: res.name,
-    argv: substitute(res.adapter.launch, { prompt, issue: issue.number }),
+    argv: substitute(res.adapter.launch, { prompt, issue: issue.number, model: res.adapter.model }),
     env: res.adapter.env || {},
     logFile: `${config.logDir}/issue-${issue.number}.log`,
   };

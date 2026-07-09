@@ -88,13 +88,14 @@ export function defaultConfig() {
   };
 }
 
-// Substitute ONLY {prompt} and {issue}. Every other brace token — {other},
-// {model}, ${bar} — passes through byte-for-byte. Accepts a string or a command
-// array (each element rendered); a key not supplied is left verbatim.
+// Substitute ONLY {prompt}, {issue}, and {model}. Every other brace token —
+// {other}, ${bar} — passes through byte-for-byte. Accepts a string or a command
+// array (each element rendered); a key not supplied (or supplied as undefined,
+// e.g. a model-free adapter) is left verbatim.
 export function substitute(template, vars = {}) {
   const render = (s) =>
-    String(s).replace(/\{(prompt|issue)\}/g, (whole, key) =>
-      Object.prototype.hasOwnProperty.call(vars, key) ? String(vars[key]) : whole,
+    String(s).replace(/\{(prompt|issue|model)\}/g, (whole, key) =>
+      Object.prototype.hasOwnProperty.call(vars, key) && vars[key] !== undefined ? String(vars[key]) : whole,
     );
   return Array.isArray(template) ? template.map(render) : render(template);
 }
@@ -128,6 +129,18 @@ export function normalizeConfig(raw, file = CONFIG_PATH) {
         !adapter.requiresEnv.every((v) => typeof v === "string" && v !== ""))
     )
       fail(`adapter "${name}" has a "requiresEnv" that is not an array of non-empty variable names.`);
+    if ("model" in adapter && (typeof adapter.model !== "string" || adapter.model === ""))
+      fail(`adapter "${name}" has a "model" that is not a non-empty string.`);
+    // An adapter that uses the {model} placeholder anywhere it is substituted
+    // (launch, resume, or promptTemplate) must declare the model it stands for.
+    const hasModel = typeof adapter.model === "string" && adapter.model !== "";
+    const usesModel = [
+      ...adapter.launch,
+      ...(Array.isArray(adapter.resume) ? adapter.resume : []),
+      typeof adapter.promptTemplate === "string" ? adapter.promptTemplate : "",
+    ].some((part) => /\{model\}/.test(String(part)));
+    if (usesModel && !hasModel)
+      fail(`adapter "${name}" uses {model} but declares no "model" field.`);
     adapters[name] = {
       launch: adapter.launch.slice(),
       // No distinct resume command → resume the same way it launches.
@@ -138,6 +151,9 @@ export function normalizeConfig(raw, file = CONFIG_PATH) {
       // be considered available. Generic config the loader validates — never an
       // adapter-specific name baked into the framework.
       requiresEnv: Array.isArray(adapter.requiresEnv) ? adapter.requiresEnv.slice() : [],
+      // Optional: present only when declared, so a model-free adapter is byte-for-byte
+      // the shape it was before {model} existed (back-compat).
+      ...(hasModel ? { model: adapter.model } : {}),
     };
   }
 

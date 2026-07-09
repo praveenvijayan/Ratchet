@@ -70,9 +70,9 @@ export function buildResume(config, entry, issue) {
   const adapter = config.adapters[entry.adapter];
   if (!adapter) return null;
   const command = Array.isArray(adapter.resume) && adapter.resume.length ? adapter.resume : adapter.launch;
-  const prompt = substitute(adapter.promptTemplate || "", { issue });
+  const prompt = substitute(adapter.promptTemplate || "", { issue, model: adapter.model });
   return {
-    argv: substitute(command, { prompt, issue }),
+    argv: substitute(command, { prompt, issue, model: adapter.model }),
     env: adapter.env || {},
     logFile: entry.logFile || `${config.logDir}/issue-${issue}.log`,
   };
