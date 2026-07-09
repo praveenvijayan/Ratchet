@@ -721,12 +721,12 @@ configuration, not committed framework.
   // Required. Each key is an adapter *name* (a CLI, never a model).
   "adapters": {
     "claude": {
-      "launch": ["claude", "-p", "{prompt}"],
+      "launch": ["claude", "-p", "--dangerously-skip-permissions", "{prompt}"],
       "promptTemplate": "Issue {issue} is your entire assignment: take only issue {issue} to a PR, following AGENTS.md. Skip AGENTS.md's pick step — do not survey the ready queue, and never claim, work on, or fall through to any other issue. An existing agent/issue-{issue} branch is your own prior claim on this same assignment: resume it under AGENTS.md's resume rules, never as a foreign claim to exit or fall through from. If issue {issue} already has a pull request opened by someone else, exit immediately without touching any branch, worktree, or other issue.",
       "env": {}
     },
     "codex": {
-      "launch": ["codex", "exec", "{prompt}"],
+      "launch": ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "{prompt}"],
       "promptTemplate": "Issue {issue} is your entire assignment: take only issue {issue} to a PR, following AGENTS.md. Skip AGENTS.md's pick step — do not survey the ready queue, and never claim, work on, or fall through to any other issue. An existing agent/issue-{issue} branch is your own prior claim on this same assignment: resume it under AGENTS.md's resume rules, never as a foreign claim to exit or fall through from. If issue {issue} already has a pull request opened by someone else, exit immediately without touching any branch, worktree, or other issue.",
       "env": {}
     }
@@ -749,7 +749,16 @@ problem — no stack trace ever reaches the operator.
 An adapter tells the supervisor how to start and restart one worker CLI:
 
 - **`launch`** (required) — a non-empty command array, run to start a worker on
-  a fresh issue.
+  a fresh issue. A herd worker is non-interactive, so a headless CLI must run
+  with its permission/approval prompts bypassed — otherwise the claim step
+  (which touches `.git`) blocks on a prompt nobody can answer, the worker never
+  creates its claim ref, and the supervisor kills it at `claimTimeoutSeconds` as
+  `dispatch-failed`. The shipped `claude` and `codex` defaults carry the right
+  flag (`--dangerously-skip-permissions` and
+  `--dangerously-bypass-approvals-and-sandbox`). Loading a `claude` or `codex`
+  adapter whose `launch` omits that flag prints a one-line `WARNING` and
+  continues — a config predating this default only needs the flag added by hand.
+  A custom adapter is never second-guessed.
 - **`resume`** (optional) — the command array used to nudge an existing worker's
   issue forward after a rework signal. **Omit it and the adapter resumes exactly
   the way it launches** — `resume` defaults to `launch`.
@@ -784,7 +793,7 @@ at it:
 ```jsonc
 "adapters": {
   "claude": {
-    "launch": ["claude", "-p", "{prompt}"],
+    "launch": ["claude", "-p", "--dangerously-skip-permissions", "{prompt}"],
     "env": {
       "HTTPS_PROXY": "http://127.0.0.1:8080",
       "HTTP_PROXY": "http://127.0.0.1:8080"

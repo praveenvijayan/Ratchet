@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { main, loadConfig, normalizeConfig, substitute, resolveAdapter, defaultConfig, HerdConfigError, DEFAULTS } from "./herd.mjs";
+import { main, loadConfig, normalizeConfig, substitute, resolveAdapter, defaultConfig, headlessFlagWarnings, HEADLESS_PERMISSION_FLAGS, HerdConfigError, DEFAULTS } from "./herd.mjs";
 
 // Run `fn` with cwd set to a fresh temp dir, then clean up — lets CLI-level
 // tests exercise the cwd-relative default config path without side effects.
@@ -304,4 +304,80 @@ const promptTemplates = () => {
   }
 }
 
-console.log("PASS herd.test.mjs (16 criteria)");
+// Criterion 17 (#149 AC1): `init` writes a claude adapter whose launch carries
+// --dangerously-skip-permissions, so a headless claude worker can claim.
+inTempDir(() => {
+  capture(() => main(["init"]));
+  const written = JSON.parse(readFileSync(".ratchet/herd.json", "utf8"));
+  assert.ok(
+    written.adapters.claude.launch.includes("--dangerously-skip-permissions"),
+    "init's claude launch carries --dangerously-skip-permissions",
+  );
+});
+
+// Criterion 18 (#149 AC2): `init` writes a codex adapter whose launch carries
+// codex's documented non-interactive approval-bypass flag.
+inTempDir(() => {
+  capture(() => main(["init"]));
+  const written = JSON.parse(readFileSync(".ratchet/herd.json", "utf8"));
+  assert.ok(
+    written.adapters.codex.launch.includes("--dangerously-bypass-approvals-and-sandbox"),
+    "init's codex launch carries --dangerously-bypass-approvals-and-sandbox",
+  );
+});
+
+// Criterion 19 (#149 AC3): loading a config whose claude/codex launch omits its
+// headless-permission flag prints a one-line WARNING naming the adapter and the
+// missing flag, and continues (returns the normalized config, exit zero).
+inTempDir(() => {
+  const p = "cfg.json";
+  writeFileSync(
+    p,
+    JSON.stringify({ adapters: { claude: { launch: ["claude", "-p", "{prompt}"] } }, routing: { default: "claude" } }),
+  );
+  const warns = [];
+  const orig = console.warn;
+  console.warn = (...a) => warns.push(a.join(" "));
+  let cfg;
+  try {
+    cfg = loadConfig(p);
+  } finally {
+    console.warn = orig;
+  }
+  assert.ok(cfg && cfg.adapters.claude, "load continues and returns the normalized config (exit zero)");
+  assert.equal(warns.length, 1, "exactly one warning for the one offending adapter");
+  assert.match(warns[0], /^WARNING/, "the line is a WARNING");
+  assert.match(warns[0], /claude/, "the warning names the adapter");
+  assert.match(warns[0], /--dangerously-skip-permissions/, "the warning names the missing flag");
+  assert.ok(!warns[0].includes("\n"), "the warning is a single line");
+});
+
+// Criterion 20 (#149 AC4): the warning is silent for any adapter that is not
+// claude or codex, and for a claude/codex adapter whose launch already carries
+// its flag (including the shipped init default).
+{
+  const other = normalizeConfig({ adapters: { myagent: { launch: ["myagent", "run"] } }, routing: { default: "myagent" } });
+  assert.deepEqual(headlessFlagWarnings(other), [], "a non-claude/codex adapter is never warned");
+
+  const armed = normalizeConfig({
+    adapters: {
+      claude: { launch: ["claude", "-p", HEADLESS_PERMISSION_FLAGS.claude, "{prompt}"] },
+      codex: { launch: ["codex", "exec", HEADLESS_PERMISSION_FLAGS.codex, "{prompt}"] },
+    },
+    routing: { default: "claude" },
+  });
+  assert.deepEqual(headlessFlagWarnings(armed), [], "a shipped adapter already carrying its flag is silent");
+  assert.deepEqual(headlessFlagWarnings(normalizeConfig(defaultConfig())), [], "the init default carries both flags, so it is silent");
+}
+
+// Criterion 21 (#149 AC5): each #149 criterion above has exactly one test named
+// after it — no missing coverage, no padding.
+{
+  const self = readFileSync(new URL("./herd.test.mjs", import.meta.url), "utf8");
+  for (const ac of ["AC1", "AC2", "AC3", "AC4"]) {
+    const hits = (self.match(new RegExp(`#149 ${ac}\\)`, "g")) || []).length;
+    assert.equal(hits, 1, `#149 ${ac} has exactly one test named after it`);
+  }
+}
+
+console.log("PASS herd.test.mjs (21 criteria)");
