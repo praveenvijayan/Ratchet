@@ -155,6 +155,37 @@ await inTempDir(async () => {
   assert.match(esc, /issue-8\.log/, "the escalation names the worker's log file");
 });
 
+// Criterion (issue #133): the dispatch-timeout escalation's `what` names the
+// exact missing signal — the agent/issue-<N> ref on origin — alongside the
+// timeout in seconds and the killed pid, so an operator reading escalations.md
+// knows what "claim" was being waited on and where to look for it.
+await inTempDir(async () => {
+  let t = 0;
+  const now = () => t;
+  const sleep = (ms) => ((t += ms), Promise.resolve());
+  await dispatchOne({
+    config: mkConfig(),
+    ready: [{ number: 8, labels: [] }],
+    statePath: "s.json",
+    escalationsPath: "esc.md",
+    spawn: () => 4242,
+    gh: async () => {
+      throw new Error("404 Not Found"); // the claim ref is never created
+    },
+    isAlive: () => false,
+    kill: () => {},
+    now,
+    sleep,
+    log: () => {},
+    claimTimeoutMs: 3000,
+    claimIntervalMs: 1000,
+  });
+  const esc = readFileSync("esc.md", "utf8");
+  assert.match(esc, /agent\/issue-8 on origin/, "the `what` names the exact missing signal: the agent/issue-<N> ref on origin");
+  assert.match(esc, /within 3s/, "the `what` names the timeout in seconds");
+  assert.match(esc, /killed pid 4242/, "the `what` names the killed pid");
+});
+
 // Criterion 8 (issue #126): a transient gh failure while polling counts as
 // still waiting — never a claim, and never a dispatch failure.
 await inTempDir(async () => {

@@ -210,7 +210,7 @@ export async function dispatchOne(opts) {
     appendEscalation(escalationsPath, {
       now: now(),
       issue: issue.number,
-      what: `worker did not claim the issue within ${Math.round(claimTimeoutMs / 1000)}s; killed pid ${pid}`,
+      what: `worker did not claim the issue within ${Math.round(claimTimeoutMs / 1000)}s — the claim signal, the branch ref agent/issue-${issue.number} on origin, never appeared; killed pid ${pid}`,
       logFile: plan.logFile,
       action: "inspect the log; the adapter CLI may be missing, misconfigured, or failing to claim",
     });
