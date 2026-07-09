@@ -813,6 +813,24 @@ pid, log file, attempts, status, PR) reconciled against `gh` and process
 liveness every poll, so a stale pid or a concluded PR can never masquerade as a
 live worker.
 
+### Events: `.ratchet/events.jsonl`
+
+The supervisor also appends machine-readable lifecycle events to
+`.ratchet/events.jsonl`. This is the stable source for dashboards,
+notifications, and metrics; adapter logs remain drill-down detail, not state.
+Each line is one JSON object with:
+
+- `ts` — ISO-8601 timestamp.
+- `event` — one of `dispatch`, `resume`, `rework`, `claim-detected`,
+  `pr-detected`, `worker-exit`, `worker-kill`, `escalation`.
+- `issue` — issue number.
+- Worker-scoped fields when known: `adapter`, `pid`, `logFile`, `attempts`,
+  plus `pr` or `status` when relevant.
+
+The file is append-only across supervisor restarts. If writing the event stream
+fails, the supervisor prints one warning naming `.ratchet/events.jsonl` and
+keeps polling; observability must never stop dispatch.
+
 ### Supervisor invariants
 
 These hold no matter what the config says:

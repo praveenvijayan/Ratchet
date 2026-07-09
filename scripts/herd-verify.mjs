@@ -20,7 +20,7 @@
 // outside-world call is injectable, so it runs offline in tests. Zero deps.
 
 import { substitute } from "./herd.mjs";
-import { STATE_FILE, ESCALATIONS_FILE, readState, writeState, appendEscalation } from "./herd-survey.mjs";
+import { STATE_FILE, ESCALATIONS_FILE, EVENTS_FILE, readState, writeState, appendEscalation, appendHerdEvent } from "./herd-survey.mjs";
 import { spawnWorker, recordExit } from "./herd-dispatch.mjs";
 
 // The rework a conflicting PR gets: resolve against main and push the same
@@ -100,6 +100,7 @@ export async function verifyOnce(opts) {
     config,
     statePath = STATE_FILE,
     escalationsPath = ESCALATIONS_FILE,
+    eventsPath = EVENTS_FILE,
     gh,
     spawn: spawnFn = spawnWorker,
     now = () => Date.now(),
@@ -124,7 +125,18 @@ export async function verifyOnce(opts) {
     const escalate = (what, action) => {
       entry.status = "verify-escalated";
       entry.pid = null;
-      appendEscalation(escalationsPath, { now: now(), issue, what, logFile: entry.logFile, action });
+      appendEscalation(escalationsPath, {
+        now: now(),
+        issue,
+        what,
+        adapter: entry.adapter,
+        pid: entry.pid,
+        logFile: entry.logFile,
+        attempts: entry.attempts,
+        pr: entry.pr,
+        status: entry.status,
+        action,
+      }, { eventsPath, warn: log });
     };
     let line;
 
@@ -138,9 +150,14 @@ export async function verifyOnce(opts) {
         now: now(),
         issue,
         what: `PR #${entry.pr} ready for review — passed deterministic checks (no conflicts; Closes #${issue} and a gates section present).`,
+        adapter: entry.adapter,
+        pid: entry.pid,
         logFile: entry.logFile,
+        attempts: entry.attempts,
+        pr: entry.pr,
+        status: entry.status,
         action: `review PR #${entry.pr} and merge it, or request changes — the supervisor never merges or approves`,
-      });
+      }, { eventsPath, warn: log });
       line = `herd: issue #${issue} -> PR #${entry.pr} ready for review`;
     } else if (decision.action === "escalate-body") {
       const missing = decision.missing.join(" and ");
@@ -167,7 +184,7 @@ export async function verifyOnce(opts) {
       } else {
         let pid = null;
         try {
-          pid = spawnFn(rework.argv, rework.env, rework.logFile, (code, signal) => recordExit(statePath, issue, code, signal));
+          pid = spawnFn(rework.argv, rework.env, rework.logFile, (code, signal) => recordExit(statePath, issue, code, signal, { eventsPath, now, warn: log }));
         } catch (e) {
           escalate(`rework spawn for PR #${entry.pr} failed: ${e.message}`, "check the adapter command in .ratchet/herd.json; the resume CLI may be missing or unexecutable");
           line = `herd: issue #${issue} -> escalated (rework spawn failed: ${e.message})`;
@@ -178,6 +195,17 @@ export async function verifyOnce(opts) {
           entry.status = "reworking";
           delete entry.exitCode; // a stale exit must not re-classify the rework run
           delete entry.exitSignal;
+          appendHerdEvent(eventsPath, {
+            now: now(),
+            event: "rework",
+            issue,
+            adapter: entry.adapter,
+            pid,
+            logFile: rework.logFile,
+            attempts: entry.attempts,
+            pr: entry.pr,
+            status: entry.status,
+          }, log);
           line = `herd: issue #${issue} -> rework (PR #${entry.pr} conflicts; attempt ${decision.attempts}/${config.reworkCap}, ${entry.adapter} pid ${pid})`;
         }
       }

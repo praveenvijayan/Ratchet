@@ -19,6 +19,17 @@ import { promisify } from "node:util";
 
 export const STATE_FILE = ".ratchet/herd-state.json";
 export const ESCALATIONS_FILE = ".ratchet/herd-escalations.md";
+export const EVENTS_FILE = ".ratchet/events.jsonl";
+export const HERD_EVENT_TYPES = Object.freeze([
+  "dispatch",
+  "resume",
+  "rework",
+  "claim-detected",
+  "pr-detected",
+  "worker-exit",
+  "worker-kill",
+  "escalation",
+]);
 
 const pexec = promisify(execFile);
 
@@ -69,6 +80,26 @@ export function writeState(path, state) {
   writeFileSync(path, JSON.stringify(state, null, 2) + "\n");
 }
 
+export function formatHerdEvent({ now = Date.now(), event, issue, adapter, pid, logFile, attempts, pr, status }) {
+  if (!HERD_EVENT_TYPES.includes(event)) throw new Error(`unknown herd event type: ${event}`);
+  const line = { ts: new Date(now).toISOString(), event, issue: Number(issue) };
+  for (const [key, value] of Object.entries({ adapter, pid, logFile, attempts, pr, status })) {
+    if (value !== undefined) line[key] = value;
+  }
+  return line;
+}
+
+export function appendHerdEvent(path = EVENTS_FILE, entry, warn = console.warn) {
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    appendFileSync(path, JSON.stringify(formatHerdEvent(entry)) + "\n");
+    return true;
+  } catch (e) {
+    warn(`herd: warning: failed to append event to ${path}: ${e.message}`);
+    return false;
+  }
+}
+
 // Reconcile the state file against reality instead of trusting it: an entry
 // whose tracked PR is no longer open (merged or closed), or whose worker pid is
 // no longer alive, is cleared and flagged. Returns the reconciled state plus
@@ -82,11 +113,29 @@ export function reconcileState(state, reality, isAlive) {
   for (const [issue, entry] of Object.entries(state || {})) {
     const e = { ...entry };
     if (e.pr != null && !openPrs.has(Number(e.pr))) {
-      changes.push({ issue, what: `tracked PR #${e.pr} is no longer open (merged or closed)`, logFile: e.logFile || null });
+      changes.push({
+        issue,
+        what: `tracked PR #${e.pr} is no longer open (merged or closed)`,
+        adapter: e.adapter,
+        pid: e.pid,
+        logFile: e.logFile || null,
+        attempts: e.attempts,
+        pr: e.pr,
+        status: "pr-concluded",
+      });
       e.status = "pr-concluded";
       e.pid = null;
     } else if (e.pid != null && !isAlive(e.pid)) {
-      changes.push({ issue, what: `worker pid ${e.pid} is not alive`, logFile: e.logFile || null });
+      changes.push({
+        issue,
+        what: `worker pid ${e.pid} is not alive`,
+        adapter: e.adapter,
+        pid: e.pid,
+        logFile: e.logFile || null,
+        attempts: e.attempts,
+        pr: e.pr,
+        status: "dead",
+      });
       e.status = "dead";
       e.pid = null;
     }
@@ -109,9 +158,24 @@ export function formatEscalation({ now, issue, what, logFile, action }) {
   ].join("\n");
 }
 
-export function appendEscalation(path, entry) {
+export function appendEscalation(path, entry, { eventsPath = EVENTS_FILE, warn = console.warn } = {}) {
   mkdirSync(dirname(path), { recursive: true });
   appendFileSync(path, formatEscalation(entry) + "\n");
+  appendHerdEvent(
+    eventsPath,
+    {
+      now: entry.now,
+      event: "escalation",
+      issue: entry.issue,
+      adapter: entry.adapter,
+      pid: entry.pid,
+      logFile: entry.logFile,
+      attempts: entry.attempts,
+      pr: entry.pr,
+      status: entry.status,
+    },
+    warn,
+  );
 }
 
 // One supervisor pass: survey, reconcile the state file, escalate anomalies,
@@ -126,6 +190,7 @@ export async function pollOnce({
   now,
   statePath = STATE_FILE,
   escalationsPath = ESCALATIONS_FILE,
+  eventsPath = EVENTS_FILE,
   log = console.log,
 }) {
   let reality;
@@ -145,9 +210,14 @@ export async function pollOnce({
       now: stamp,
       issue: c.issue,
       what: c.what,
+      adapter: c.adapter,
+      pid: c.pid,
       logFile: c.logFile,
+      attempts: c.attempts,
+      pr: c.pr,
+      status: c.status,
       action: "reconciled on startup — review the log and re-queue the issue if its work is unfinished",
-    });
+    }, { eventsPath, warn: log });
   }
 
   // Prune each reconciled entry only after its escalation is written. A stale
