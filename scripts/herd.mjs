@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import { runLoop, pollOnce, ghJson } from "./herd-survey.mjs";
 import { dispatchOne, surveyReady } from "./herd-dispatch.mjs";
 import { monitorOnce } from "./herd-monitor.mjs";
+import { verifyOnce } from "./herd-verify.mjs";
 
 // Config location, relative to the repo root (the supervisor's cwd).
 export const CONFIG_PATH = ".ratchet/herd.json";
@@ -246,6 +247,11 @@ if (isMain) {
       if (!dryRun) {
         await monitorOnce({ ...o, config }).catch((e) => {
           o.log(`herd: monitor failed: ${e.message}; continuing to dispatch.`);
+        });
+        // Verify PRs the monitor just handed off (may dispatch a rework, so it
+        // is a spawn — skipped on --dry-run alongside the monitor).
+        await verifyOnce({ ...o, config }).catch((e) => {
+          o.log(`herd: verify failed: ${e.message}; continuing to dispatch.`);
         });
       }
       const ready = await surveyReady(o.gh).catch((e) => {

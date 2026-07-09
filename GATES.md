@@ -53,6 +53,7 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 | 4t    | test: herd-survey               | `node scripts/herd-survey.test.mjs`               | exit 0 |
 | 4u    | test: herd-dispatch             | `node scripts/herd-dispatch.test.mjs`             | exit 0 |
 | 4v    | test: herd-monitor              | `node scripts/herd-monitor.test.mjs`              | exit 0 |
+| 4w    | test: herd-verify               | `node scripts/herd-verify.test.mjs`               | exit 0 |
 | 4r    | test-coverage                   | `node scripts/gates-coverage.mjs`                 | exit 0 |
 | 5     | build       | TODO: build command               | —              |
 | 6     | audit       | TODO: audit command               | —              |
