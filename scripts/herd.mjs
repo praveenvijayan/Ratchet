@@ -30,6 +30,10 @@ export const DEFAULTS = Object.freeze({
   pollSeconds: 60,
   reworkCap: 2,
   logDir: ".ratchet/logs",
+  // How long the dispatcher waits for a worker to create its claim ref
+  // (agent/issue-<N>) before killing it as dispatch-failed. Long enough for an
+  // agent CLI to cold-start and reach the claim step — minutes, not seconds.
+  claimTimeoutSeconds: 300,
 });
 
 // Thrown for every operator-facing config problem. The CLI prints `.message` as
@@ -51,6 +55,7 @@ export function defaultConfig() {
     pollSeconds: DEFAULTS.pollSeconds,
     reworkCap: DEFAULTS.reworkCap,
     logDir: DEFAULTS.logDir,
+    claimTimeoutSeconds: DEFAULTS.claimTimeoutSeconds,
     adapters: {
       claude: { launch: ["claude", "-p", "{prompt}"], promptTemplate, env: {} },
       codex: { launch: ["codex", "exec", "{prompt}"], promptTemplate, env: {} },
@@ -126,6 +131,7 @@ export function normalizeConfig(raw, file = CONFIG_PATH) {
     maxWorkers: int(raw.maxWorkers, DEFAULTS.maxWorkers, "maxWorkers", 1),
     pollSeconds: int(raw.pollSeconds, DEFAULTS.pollSeconds, "pollSeconds", 1),
     reworkCap: int(raw.reworkCap, DEFAULTS.reworkCap, "reworkCap", 0),
+    claimTimeoutSeconds: int(raw.claimTimeoutSeconds, DEFAULTS.claimTimeoutSeconds, "claimTimeoutSeconds", 1),
     logDir: str(raw.logDir, DEFAULTS.logDir, "logDir"),
     adapters,
     routing: { default: raw.routing.default, labels: { ...labels } },
@@ -258,7 +264,7 @@ if (isMain) {
         o.log(`herd: dispatch survey failed: ${e.message}; skipping dispatch this poll.`);
         return [];
       });
-      await dispatchOne({ ...o, config, ready, dryRun, maxWorkers });
+      await dispatchOne({ ...o, config, ready, dryRun, maxWorkers, claimTimeoutMs: config.claimTimeoutSeconds * 1000 });
     };
     runLoop({ gh: ghJson, log: console.log, once: argv.includes("--once") || dryRun, pollSeconds: config.pollSeconds, step }).then(
       () => process.exit(0),

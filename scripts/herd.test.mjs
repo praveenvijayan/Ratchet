@@ -166,4 +166,33 @@ inTempDir(() => {
   assert.match(gates, /node scripts\/herd\.test\.mjs/, "GATES.md must list herd.test.mjs as a gate");
 }
 
-console.log("PASS herd.test.mjs (9 criteria)");
+// Criterion 10 (issue #126): claimTimeoutSeconds is an optional knob defaulting
+// to minutes (not 60s), long enough for an agent CLI to reach the claim step; a
+// non-positive or non-integer value exits non-zero with a one-line error naming
+// the file and the field.
+{
+  const base = { adapters: { a: { launch: ["a"] } }, routing: { default: "a" } };
+  const cfg = normalizeConfig(base);
+  assert.equal(cfg.claimTimeoutSeconds, DEFAULTS.claimTimeoutSeconds, "omitted claimTimeoutSeconds takes the default");
+  assert.ok(cfg.claimTimeoutSeconds >= 120, "the default is minutes, not the old 60s wall");
+
+  assert.equal(
+    normalizeConfig({ ...base, claimTimeoutSeconds: 90 }).claimTimeoutSeconds,
+    90,
+    "an explicit claimTimeoutSeconds is kept",
+  );
+
+  for (const bad of [0, -5, 1.5]) {
+    assert.throws(
+      () => normalizeConfig({ ...base, claimTimeoutSeconds: bad }, "cfg.json"),
+      (e) =>
+        e instanceof HerdConfigError &&
+        e.message.includes("cfg.json") &&
+        /claimTimeoutSeconds/.test(e.message) &&
+        !e.message.includes("\n"),
+      `claimTimeoutSeconds=${bad} is rejected, naming the file and field on one line`,
+    );
+  }
+}
+
+console.log("PASS herd.test.mjs (10 criteria)");
