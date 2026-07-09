@@ -1,6 +1,11 @@
 # Ratchet — Complete Documentation
 
-Version 3.4.0 · MIT · https://github.com/praveenvijayan/Ratchet
+Version 3.4.1 · MIT · https://github.com/praveenvijayan/Ratchet
+
+**New in 3.4.1** — a herd worker whose adapter binary is missing or unexecutable
+no longer crashes the supervisor: the spawn failure marks the issue
+`dispatch-failed` with its pid cleared and escalates the adapter, command, and
+log file, so the fleet keeps polling. See §14.
 
 **New in 3.4.0** — the `ratchet-herd` fleet supervisor (config, survey,
 dispatch, monitor, verify, the `/ratchet-herd` skill, docs, and the cross-agent
