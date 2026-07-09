@@ -805,6 +805,59 @@ at it:
 The supervisor forwards these verbatim; naming and running the proxy is entirely
 the operator's business.
 
+### A fallback adapter: opencode via OpenRouter
+
+`claude` and `codex` are API-key CLIs; when neither is installed an operator can
+keep the herd moving by falling back to [opencode](https://opencode.ai) driven
+through [OpenRouter](https://openrouter.ai). opencode gives the worker the same
+first-class terminal, filesystem, and git access the AGENTS.md protocol needs,
+and OpenRouter turns a capable model into an `OPENROUTER_API_KEY`-gated backend —
+exactly the `requiresEnv` availability gate above. Add this adapter and put it
+last in the route so it only runs when the preferred CLIs are unavailable:
+
+```jsonc
+"adapters": {
+  // ... your "claude" and "codex" adapters ...
+  "opencode": {
+    // `run` is opencode's non-interactive (headless) subcommand; {model} is
+    // pinned below and {prompt} is the rendered dispatch instruction.
+    "launch": ["opencode", "run", "--model", "openrouter/{model}", "{prompt}"],
+    // Pin a capable model — a weak one will not drive the AGENTS.md protocol.
+    "model": "anthropic/claude-3.5-sonnet",
+    // opencode reaches OpenRouter through this key; unset ⇒ adapter unavailable.
+    "requiresEnv": ["OPENROUTER_API_KEY"]
+    // promptTemplate omitted here for brevity — carry the same dispatch
+    // instruction the "claude"/"codex" adapters above use, or the worker is
+    // dispatched with an empty prompt.
+  }
+},
+"routing": {
+  // Try claude, then codex, then fall back to opencode — the first adapter
+  // whose binary is on PATH and whose requiresEnv vars are all set wins.
+  "default": ["claude", "codex", "opencode"],
+  "labels": {}
+}
+```
+
+**opencode must run fully non-interactive.** `opencode run` is opencode's
+headless mode — unlike the interactive TUI it presents no approval dialog. Just
+as the shipped `claude` and `codex` adapters carry
+`--dangerously-skip-permissions` / `--dangerously-bypass-approvals-and-sandbox`,
+the opencode worker must execute git, shell, and filesystem actions **without
+pausing for a permission or approval prompt**; configure opencode's permissions
+to run autonomously. If it blocks on a prompt nobody can answer, the claim step —
+which touches `.git` — never completes, the worker never creates its
+`agent/issue-<N>` claim ref, and the supervisor kills it at
+`claimTimeoutSeconds` as `dispatch-failed` (**the headless-claim failure mode**
+described under the adapter contract above).
+
+Availability then decides dispatch with no framework change: with
+`OPENROUTER_API_KEY` unset (or the `opencode` binary missing) opencode is
+unavailable, so the route dispatches no opencode worker; and when `claude` and
+`codex` are both absent from `PATH` but `OPENROUTER_API_KEY` is set, the same
+route dispatches the opencode worker. `scripts/herd.mjs` never names opencode or
+OpenRouter — they live only in this config.
+
 ### Escalations: `.ratchet/herd-escalations.md`
 
 When the supervisor cannot resolve something on its own, it **escalates instead
