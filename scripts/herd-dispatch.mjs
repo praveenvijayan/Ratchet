@@ -19,8 +19,11 @@ import {
   STATE_FILE,
   ESCALATIONS_FILE,
   EVENTS_FILE,
+  ROUTING_FILE,
   readState,
   writeState,
+  readRouting,
+  writeRouting,
   appendEscalation,
   appendHerdEvent,
   isPidAlive,
@@ -61,6 +64,12 @@ export function buildDispatch(config, issue, deps = {}) {
     argv: substitute(res.adapter.launch, { prompt, issue: issue.number, model: res.adapter.model }),
     env: res.adapter.env || {},
     logFile: `${config.logDir}/issue-${issue.number}.log`,
+    // Rotation bookkeeping: the caller advances the route's cursor to nextCursor
+    // once it commits to this dispatch, so the next worker on the same route
+    // starts at the following adapter. Only meaningful under round-robin.
+    policy: res.policy,
+    cursorKey: res.cursorKey,
+    nextCursor: res.nextCursor,
   };
 }
 
@@ -166,6 +175,7 @@ export async function dispatchOne(opts) {
     statePath = STATE_FILE,
     escalationsPath = ESCALATIONS_FILE,
     eventsPath = EVENTS_FILE,
+    routingPath = ROUTING_FILE,
     spawn: spawnFn = spawnWorker,
     gh,
     isAlive = isPidAlive,
@@ -185,7 +195,8 @@ export async function dispatchOne(opts) {
   const issue = pickNext((ready || []).filter((i) => !(String(i.number) in state)));
   if (!issue) return { dispatched: null, reason: "no-eligible-issue" };
 
-  const plan = buildDispatch(config, issue, { env, onPath });
+  const cursors = readRouting(routingPath);
+  const plan = buildDispatch(config, issue, { env, onPath, cursors });
 
   // No adapter in the resolved route is available: do not spawn. Record the
   // issue as dispatch-failed and escalate with the route and every adapter tried
@@ -227,6 +238,16 @@ export async function dispatchOne(opts) {
 
   const live = liveWorkers(state, isAlive);
   if (live >= maxWorkers) return { dispatched: null, reason: "at-capacity", live, maxWorkers };
+
+  // Commit to this dispatch: advance the route's round-robin cursor so the next
+  // worker on the same route starts at the following adapter. Written before the
+  // spawn (not after) so a crash mid-spawn still rotates — a broken adapter is
+  // already skipped by the availability check, so never re-pinning it is correct.
+  // Failover leaves the cursor untouched, so its state file stays empty.
+  if (plan.policy === "round-robin") {
+    cursors[plan.cursorKey] = plan.nextCursor;
+    writeRouting(routingPath, cursors);
+  }
 
   const onExit = (code, signal) => recordExit(statePath, issue.number, code, signal, { eventsPath, now, warn: log });
   const pid = spawnFn(plan.argv, plan.env, plan.logFile, onExit);

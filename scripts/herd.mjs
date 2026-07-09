@@ -24,6 +24,14 @@ import { verifyOnce } from "./herd-verify.mjs";
 // Config location, relative to the repo root (the supervisor's cwd).
 export const CONFIG_PATH = ".ratchet/herd.json";
 
+// How a route picks among its adapters. `failover` (the default) takes the first
+// available adapter, unchanged from adapter fallback routing. `round-robin`
+// cycles across the available adapters so successive workers spread load instead
+// of piling onto the first. Both are generic policy names — no CLI or model is
+// named here, so the purity test stays green.
+export const SELECTION_POLICIES = Object.freeze(["failover", "round-robin"]);
+export const DEFAULT_POLICY = "failover";
+
 // Optional top-level fields and the defaults applied when they are omitted.
 export const DEFAULTS = Object.freeze({
   maxWorkers: 3,
@@ -157,13 +165,29 @@ export function normalizeConfig(raw, file = CONFIG_PATH) {
     };
   }
 
-  // A route is an adapter name or a non-empty ordered list of adapter names.
-  // Normalize every route to a list and validate each name resolves to a defined
-  // adapter, naming the offending entry and the bad name on failure.
+  // A route is an adapter name, a non-empty ordered list of adapter names, or an
+  // object `{ adapters: [...], policy }` that also declares how the route picks
+  // among them. Normalize every route to a list plus a selection policy,
+  // validating each name resolves to a defined adapter and the policy is known —
+  // naming the offending entry (and the bad name or policy) on failure. Returns
+  // { list, policy }; the caller keeps the list under routing.default/labels
+  // (unchanged shape) and the policy in routing.policies keyed by the same entry.
   const normalizeRoute = (value, entry) => {
-    if (!Array.isArray(value) && typeof value !== "string")
-      fail(`routing entry ${entry} must be an adapter name or a non-empty array of adapter names.`);
-    const list = Array.isArray(value) ? value : [value];
+    let adaptersValue = value;
+    let policy = DEFAULT_POLICY;
+    if (isPlainObject(value)) {
+      if (value.adapters === undefined)
+        fail(`routing entry ${entry} is an object but has no "adapters" — list the adapter name(s) it routes to.`);
+      adaptersValue = value.adapters;
+      if (value.policy !== undefined) {
+        if (typeof value.policy !== "string" || !SELECTION_POLICIES.includes(value.policy))
+          fail(`routing entry ${entry} has an unknown policy "${value.policy}" — use one of: ${SELECTION_POLICIES.join(", ")}.`);
+        policy = value.policy;
+      }
+    }
+    if (!Array.isArray(adaptersValue) && typeof adaptersValue !== "string")
+      fail(`routing entry ${entry} must be an adapter name, a non-empty array of adapter names, or an object with an "adapters" list.`);
+    const list = Array.isArray(adaptersValue) ? adaptersValue : [adaptersValue];
     if (list.length === 0)
       fail(`routing entry ${entry} is an empty list — give at least one adapter name.`);
     for (const name of list) {
@@ -172,14 +196,21 @@ export function normalizeConfig(raw, file = CONFIG_PATH) {
       if (!(name in adapters))
         fail(`routing entry ${entry} names "${name}", which is not a defined adapter.`);
     }
-    return list.slice();
+    return { list: list.slice(), policy };
   };
 
-  const defaultRoute = normalizeRoute(raw.routing.default, "routing.default");
+  const policies = {};
+  const defaultNorm = normalizeRoute(raw.routing.default, "routing.default");
+  const defaultRoute = defaultNorm.list;
+  policies["routing.default"] = defaultNorm.policy;
   const rawLabels = isPlainObject(raw.routing.labels) ? raw.routing.labels : {};
   const labels = {};
-  for (const [label, value] of Object.entries(rawLabels))
-    labels[label] = normalizeRoute(value, `routing.labels["${label}"]`);
+  for (const [label, value] of Object.entries(rawLabels)) {
+    const source = `routing.labels["${label}"]`;
+    const norm = normalizeRoute(value, source);
+    labels[label] = norm.list;
+    policies[source] = norm.policy;
+  }
 
   const int = (value, fallback, field, min) => {
     if (value === undefined) return fallback;
@@ -201,7 +232,7 @@ export function normalizeConfig(raw, file = CONFIG_PATH) {
     logRetentionDays: int(raw.logRetentionDays, DEFAULTS.logRetentionDays, "logRetentionDays", 1),
     logDir: str(raw.logDir, DEFAULTS.logDir, "logDir"),
     adapters,
-    routing: { default: defaultRoute, labels: { ...labels } },
+    routing: { default: defaultRoute, labels: { ...labels }, policies: { ...policies } },
   };
 }
 
@@ -297,37 +328,68 @@ export function adapterAvailability(adapter, { env = process.env, onPath = execu
 }
 
 // Resolve which adapter handles an issue given its labels, honoring availability
-// and fallback. The first label (in the order supplied) with a routing entry
-// selects that entry's route; if none match, the default route is used. A route
-// is an ordered list of adapter names (a bare name normalized to a one-element
-// list), and the first adapter in it that is available wins — so a config whose
-// preferred binary is present dispatches exactly as before. Returns
-// { name, adapter, source, route, tried }: on success name/adapter are the
-// winner; when no adapter in the route is available both are null and `tried`
-// lists every adapter with why it was unavailable.
+// and the route's selection policy. The first label (in the order supplied) with
+// a routing entry selects that entry's route; if none match, the default route
+// is used. A route is an ordered list of adapter names (a bare name normalized to
+// a one-element list). Under the default `failover` policy the first available
+// adapter wins — so a config whose preferred binary is present dispatches exactly
+// as before. Under `round-robin` the scan starts at `deps.cursors[source]` and
+// takes the first available adapter at or after it (wrapping), spreading
+// successive dispatches across the available adapters; `nextCursor` is where the
+// next dispatch to this route should resume. Returns
+// { name, adapter, source, route, tried, policy, cursorKey, nextCursor }: on
+// success name/adapter are the winner; when no adapter in the route is available
+// both are null and `tried` lists every adapter with why it was unavailable.
 export function resolveAdapter(config, labels = [], deps = {}) {
-  const { env = process.env, onPath = executableOnPath } = deps;
-  // A route is an ordered list; a bare adapter name is a one-element list. Coerce
-  // here too (not only in normalizeConfig) so an un-normalized config resolves
-  // identically.
-  const asList = (route) => (Array.isArray(route) ? route : [route]);
-  let route = asList(config.routing.default);
+  const { env = process.env, onPath = executableOnPath, cursors = {} } = deps;
+  // A route may be a list, a bare adapter name, or an object `{ adapters, policy }`
+  // (an un-normalized config). Coerce here too so it resolves identically to a
+  // normalized one.
+  const isRouteObject = (r) => r && typeof r === "object" && !Array.isArray(r) && Array.isArray(r.adapters);
+  const asList = (route) =>
+    Array.isArray(route) ? route : isRouteObject(route) ? route.adapters : [route];
+
   let source = "routing.default";
+  let raw = config.routing.default;
   for (const label of labels) {
     if (config.routing.labels[label]) {
-      route = asList(config.routing.labels[label]);
+      raw = config.routing.labels[label];
       source = `routing.labels["${label}"]`;
       break;
     }
   }
+  const route = asList(raw);
+  // Policy comes from the normalized routing.policies map, or from an object
+  // route on an un-normalized config, defaulting to failover.
+  const policy =
+    (config.routing.policies && config.routing.policies[source]) ||
+    (isRouteObject(raw) ? raw.policy : undefined) ||
+    DEFAULT_POLICY;
+
   const tried = [];
-  for (const name of route) {
+  const start = ((Number(cursors[source]) || 0) % route.length + route.length) % route.length;
+  const order =
+    policy === "round-robin"
+      ? Array.from({ length: route.length }, (_, i) => (start + i) % route.length)
+      : route.map((_, i) => i);
+  for (const idx of order) {
+    const name = route[idx];
     const adapter = config.adapters[name];
     const { available, reason } = adapterAvailability(adapter, { env, onPath });
-    if (available) return { name, adapter, source, route: route.slice(), tried };
+    if (available)
+      return {
+        name,
+        adapter,
+        source,
+        route: route.slice(),
+        tried,
+        policy,
+        cursorKey: source,
+        nextCursor: (idx + 1) % route.length,
+      };
     tried.push({ name, reason });
   }
-  return { name: null, adapter: null, source, route: route.slice(), tried };
+  return { name: null, adapter: null, source, route: route.slice(), tried, policy, cursorKey: source, nextCursor: start };
 }
 
 // --- CLI --------------------------------------------------------------------
