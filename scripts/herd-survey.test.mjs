@@ -7,7 +7,7 @@
 // Zero dependencies. Run:  node scripts/herd-survey.test.mjs
 
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync, mkdtempSync, rmSync, mkdirSync, utimesSync, existsSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, mkdtempSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -16,21 +16,26 @@ import {
   readState,
   formatEscalation,
   appendEscalation,
+  appendHerdEvent,
+  HERD_EVENT_TYPES,
   pollOnce,
   pruneLogs,
   runLoop,
 } from "./herd-survey.mjs";
-import { dispatchOne } from "./herd-dispatch.mjs";
+import { dispatchOne, recordExit } from "./herd-dispatch.mjs";
+import { monitorOnce } from "./herd-monitor.mjs";
+import { verifyOnce } from "./herd-verify.mjs";
 
 const NOW = Date.UTC(2026, 6, 9, 12, 0, 0); // fixed clock — no Date.now dependence
 
 // Minimal supervisor config for the dispatch-side integration check below.
 const mkConfig = () => ({
-  maxWorkers: 3,
-  pollSeconds: 60,
-  logDir: "logs",
-  adapters: { claude: { launch: ["claude", "-p", "{prompt}"], promptTemplate: "issue {issue}", env: {} } },
-  routing: { default: "claude", labels: {} },
+ maxWorkers: 3,
+ pollSeconds: 60,
+ reworkCap: 2,
+ logDir: "logs",
+ adapters: { claude: { launch: ["claude", "-p", "{prompt}"], resume: ["claude", "--resume", "{issue}", "{prompt}"], promptTemplate: "issue {issue}", env: {} } },
+ routing: { default: "claude", labels: {} },
 });
 
 // A fake `gh` that routes by the survey's own argument shape and records calls.
@@ -256,6 +261,103 @@ await inTempDir(async () => {
   assert.ok(logs.some((m) => /1 concluded entry pruned/.test(m)), "the poll summary line reports the pruned count");
 });
 
+const readEvents = (path) => readFileSync(path, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+
+async function produceEventFixture(eventsPath, logs = []) {
+  await dispatchOne({
+    config: mkConfig(), ready: [{ number: 60, createdAt: "2026-01-01", labels: [] }],
+    statePath: "d.json", escalationsPath: "d.md", eventsPath, spawn: () => 600,
+    gh: async () => ({ ref: "refs/heads/agent/issue-60" }), isAlive: () => false,
+    now: () => NOW, sleep: async () => {}, log: (m) => logs.push(m), claimTimeoutMs: 1000,
+  });
+  let t = NOW;
+  await dispatchOne({
+    config: mkConfig(), ready: [{ number: 61, createdAt: "2026-01-02", labels: [] }],
+    statePath: "k.json", escalationsPath: "k.md", eventsPath, spawn: () => 601,
+    gh: async () => { throw new Error("404 Not Found"); }, isAlive: () => false, kill: () => {},
+    now: () => t, sleep: (ms) => ((t += ms), Promise.resolve()), log: (m) => logs.push(m),
+    claimTimeoutMs: 1000, claimIntervalMs: 1000,
+  });
+  writeFileSync("x.json", JSON.stringify({ 62: { adapter: "claude", pid: 602, logFile: "logs/issue-62.log", attempts: 1, status: "dispatched", pr: null } }));
+  recordExit("x.json", 62, 0, null, { eventsPath, now: () => NOW, warn: (m) => logs.push(m) });
+  writeFileSync("p.json", JSON.stringify({ 63: { adapter: "claude", pid: null, logFile: "logs/issue-63.log", attempts: 1, status: "dispatched", pr: null, exitCode: 0 } }));
+  await monitorOnce({
+    config: mkConfig(), statePath: "p.json", escalationsPath: "p.md", eventsPath,
+    gh: async () => [{ number: 63, headRefName: "agent/issue-63" }], isAlive: () => false,
+    spawn: () => { throw new Error("must not spawn on PR detection"); }, now: () => NOW, log: (m) => logs.push(m),
+  });
+  writeFileSync("r.json", JSON.stringify({ 64: { adapter: "claude", pid: 604, logFile: "logs/issue-64.log", attempts: 1, status: "dispatched", pr: null, exitCode: 1 } }));
+  await monitorOnce({
+    config: mkConfig(), statePath: "r.json", escalationsPath: "r.md", eventsPath,
+    gh: async () => [], isAlive: () => false, spawn: () => 6040, now: () => NOW, log: (m) => logs.push(m),
+  });
+  writeFileSync("w.json", JSON.stringify({ 65: { adapter: "claude", pid: null, logFile: "logs/issue-65.log", attempts: 1, status: "awaiting-verification", pr: 65 } }));
+  await verifyOnce({
+    config: mkConfig(), statePath: "w.json", escalationsPath: "w.md", eventsPath,
+    gh: async () => ({ mergeable: "CONFLICTING", mergeStateStatus: "DIRTY", body: "Closes #65\n\n## Gates" }),
+    spawn: () => 6050, now: () => NOW, log: (m) => logs.push(m),
+  });
+}
+
+// #143 AC1: every supervisor lifecycle transition appends one documented JSON line with ts, event, and issue.
+await inTempDir(async () => {
+  await produceEventFixture("events.jsonl");
+  const events = readEvents("events.jsonl");
+  for (const event of ["dispatch", "resume", "rework", "claim-detected", "pr-detected", "worker-exit", "worker-kill", "escalation"])
+    assert.ok(events.some((e) => e.event === event), `event stream includes ${event}`);
+  for (const event of events) {
+    assert.ok(!Number.isNaN(Date.parse(event.ts)), "event timestamp is ISO-like");
+    assert.ok(HERD_EVENT_TYPES.includes(event.event), `event type is documented: ${event.event}`);
+    assert.equal(typeof event.issue, "number", "event carries issue number");
+  }
+});
+
+// #143 AC2: worker-scoped events carry adapter, pid, log file, and attempt count.
+await inTempDir(async () => {
+  await produceEventFixture("events.jsonl");
+  for (const event of readEvents("events.jsonl").filter((e) => e.adapter)) {
+    assert.equal(event.adapter, "claude", `${event.event} carries adapter`);
+    assert.ok(Object.hasOwn(event, "pid"), `${event.event} carries pid`);
+    assert.match(event.logFile, /logs\/issue-\d+\.log/, `${event.event} carries log file`);
+    assert.equal(typeof event.attempts, "number", `${event.event} carries attempts`);
+  }
+});
+
+// #143 AC3: event stream is append-only across supervisor restarts.
+await inTempDir(async () => {
+  const first = { ts: new Date(NOW).toISOString(), event: "dispatch", issue: 70 };
+  writeFileSync("events.jsonl", JSON.stringify(first) + "\n");
+  appendHerdEvent("events.jsonl", { now: NOW + 1, event: "claim-detected", issue: 70 }, () => {});
+  const events = readEvents("events.jsonl");
+  assert.deepEqual(events[0], first, "existing line is preserved");
+  assert.equal(events.length, 2, "new line is appended");
+});
+
+// #143 AC4: a failed event write prints one warning naming the file and poll continues.
+await inTempDir(async () => {
+  mkdirSync("events-dir");
+  writeFileSync("s.json", JSON.stringify({ 71: { adapter: "claude", pid: 701, logFile: "logs/issue-71.log", attempts: 1, status: "dispatched", pr: null } }));
+  const logs = [];
+  const r = await pollOnce({
+    gh: fakeGh({ ready: [], inProgress: [], openPrs: [] }), isAlive: () => false, now: NOW,
+    statePath: "s.json", escalationsPath: "e.md", eventsPath: "events-dir", log: (m) => logs.push(m),
+  });
+  const warnings = logs.filter((m) => /failed to append event/.test(m));
+  assert.equal(r.ok, true, "poll completes despite event write failure");
+  assert.equal(warnings.length, 1, "one warning is printed");
+  assert.match(warnings[0], /events-dir/, "warning names the event path");
+  assert.ok(existsSync("e.md"), "escalation still completes");
+});
+
+// #143 AC5: every criterion above has exactly one test named after it.
+{
+  const self = readFileSync(new URL("./herd-survey.test.mjs", import.meta.url), "utf8");
+  for (const ac of ["AC1", "AC2", "AC3", "AC4", "AC5"]) {
+    const hits = (self.match(new RegExp(`// #143 ${ac}:`, "g")) || []).length;
+    assert.equal(hits, 1, `#143 ${ac} exactly one test named after it`);
+  }
+}
+
 // --- Issue #138: detect and escalate stale agent/issue-N claim branches that
 // block re-work. One test per acceptance criterion, named after it. AC2 (the
 // dispatch-timeout re-check) lives in herd-dispatch.test.mjs. ---
@@ -404,4 +506,4 @@ await inTempDir(async () => {
   assert.match(summary, /2 log file\(s\) pruned/, "the summary line reports the number pruned this pass");
 });
 
-console.log("PASS herd-survey.test.mjs (7 criteria + issue #137: 4 criteria + issue #138: 5 criteria + issue #139: 3 criteria)");
+console.log("PASS herd-survey.test.mjs (7 criteria + issue #137: 4 criteria + issue #143: 5 criteria + issue #138: 5 criteria + issue #139: 3 criteria)");

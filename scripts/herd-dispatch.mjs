@@ -18,9 +18,11 @@ import { resolveAdapter, substitute } from "./herd.mjs";
 import {
   STATE_FILE,
   ESCALATIONS_FILE,
+  EVENTS_FILE,
   readState,
   writeState,
   appendEscalation,
+  appendHerdEvent,
   isPidAlive,
   claimRefPresent,
   deleteRefCommand,
@@ -95,14 +97,26 @@ export function spawnWorker(argv, env, logFile, onExit, onError) {
 // exitCode to tell a clean stop (0) from a crash. Fired from the spawn's `exit`
 // listener, so it re-reads the file to avoid clobbering a concurrent poll write
 // and no-ops if the entry was already reconciled away.
-export function recordExit(path, issue, code, signal) {
+export function recordExit(path, issue, code, signal, { eventsPath = EVENTS_FILE, now = Date.now, warn = console.warn } = {}) {
   const state = readState(path);
   const entry = state[issue];
   if (!entry) return;
+  const pid = entry.pid;
   entry.exitCode = code == null ? null : Number(code);
   entry.exitSignal = signal || null;
   entry.pid = null;
   writeState(path, state);
+  appendHerdEvent(eventsPath, {
+    now: now(),
+    event: "worker-exit",
+    issue,
+    adapter: entry.adapter,
+    pid,
+    logFile: entry.logFile,
+    attempts: entry.attempts,
+    pr: entry.pr,
+    status: entry.status,
+  }, warn);
 }
 
 export async function surveyReady(gh) {
@@ -147,6 +161,7 @@ export async function dispatchOne(opts) {
     ready,
     statePath = STATE_FILE,
     escalationsPath = ESCALATIONS_FILE,
+    eventsPath = EVENTS_FILE,
     spawn: spawnFn = spawnWorker,
     gh,
     isAlive = isPidAlive,
@@ -173,7 +188,7 @@ export async function dispatchOne(opts) {
   const live = liveWorkers(state, isAlive);
   if (live >= maxWorkers) return { dispatched: null, reason: "at-capacity", live, maxWorkers };
 
-  const onExit = (code, signal) => recordExit(statePath, issue.number, code, signal);
+  const onExit = (code, signal) => recordExit(statePath, issue.number, code, signal, { eventsPath, now, warn: log });
   const pid = spawnFn(plan.argv, plan.env, plan.logFile, onExit);
 
   // A missing or unexecutable adapter binary never starts, so spawn returns no
@@ -183,23 +198,57 @@ export async function dispatchOne(opts) {
   if (pid == null) {
     state[issue.number] = { adapter: plan.adapter, pid: null, logFile: plan.logFile, attempts: 1, status: "dispatch-failed", pr: null };
     writeState(statePath, state);
+    appendHerdEvent(eventsPath, {
+      now: now(),
+      event: "dispatch",
+      issue: issue.number,
+      adapter: plan.adapter,
+      pid: null,
+      logFile: plan.logFile,
+      attempts: 1,
+      status: "dispatch-failed",
+    }, log);
     appendEscalation(escalationsPath, {
       now: now(),
       issue: issue.number,
       what: `worker spawn failed for adapter "${plan.adapter}" — the launch command never started (missing or unexecutable binary). Command: ${plan.argv.join(" ")}`,
+      adapter: plan.adapter,
+      pid: null,
       logFile: plan.logFile,
+      attempts: 1,
+      status: "dispatch-failed",
       action: "check the adapter's launch command in .ratchet/herd.json; the CLI may be missing from PATH or not executable",
-    });
+    }, { eventsPath, warn: log });
     return { dispatched: issue.number, claimed: false, status: "dispatch-failed", spawnFailed: true };
   }
 
   state[issue.number] = { adapter: plan.adapter, pid, logFile: plan.logFile, attempts: 1, status: "dispatched", pr: null };
   writeState(statePath, state);
+  appendHerdEvent(eventsPath, {
+    now: now(),
+    event: "dispatch",
+    issue: issue.number,
+    adapter: plan.adapter,
+    pid,
+    logFile: plan.logFile,
+    attempts: 1,
+    status: "dispatched",
+  }, log);
 
   const { claimed } = await waitForClaim({ gh, issue: issue.number, timeoutMs: claimTimeoutMs, intervalMs: claimIntervalMs, now, sleep });
   if (!claimed) {
     try {
       kill(pid);
+      appendHerdEvent(eventsPath, {
+        now: now(),
+        event: "worker-kill",
+        issue: issue.number,
+        adapter: plan.adapter,
+        pid,
+        logFile: plan.logFile,
+        attempts: 1,
+        status: "dispatch-failed",
+      }, log);
     } catch {
       /* worker already gone */
     }
@@ -224,8 +273,28 @@ export async function dispatchOne(opts) {
     const action = refLeft
       ? `run \`${del}\` to delete the stale claim ref the killed worker left, then inspect the log; the adapter CLI may be misconfigured`
       : "inspect the log; the adapter CLI may be missing, misconfigured, or failing to claim";
-    appendEscalation(escalationsPath, { now: now(), issue: issue.number, what, logFile: plan.logFile, action });
+    appendEscalation(escalationsPath, {
+      now: now(),
+      issue: issue.number,
+      what,
+      adapter: plan.adapter,
+      pid,
+      logFile: plan.logFile,
+      attempts: 1,
+      status: "dispatch-failed",
+      action,
+    }, { eventsPath, warn: log });
     return { dispatched: issue.number, claimed: false, status: "dispatch-failed", staleRef: refLeft };
   }
+  appendHerdEvent(eventsPath, {
+    now: now(),
+    event: "claim-detected",
+    issue: issue.number,
+    adapter: plan.adapter,
+    pid,
+    logFile: plan.logFile,
+    attempts: 1,
+    status: "dispatched",
+  }, log);
   return { dispatched: issue.number, claimed: true, pid, adapter: plan.adapter };
 }

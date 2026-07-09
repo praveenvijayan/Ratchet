@@ -19,7 +19,7 @@
 
 import { readFileSync } from "node:fs";
 import { substitute } from "./herd.mjs";
-import { STATE_FILE, ESCALATIONS_FILE, readState, writeState, appendEscalation, isPidAlive } from "./herd-survey.mjs";
+import { STATE_FILE, ESCALATIONS_FILE, EVENTS_FILE, readState, writeState, appendEscalation, appendHerdEvent, isPidAlive } from "./herd-survey.mjs";
 import { spawnWorker, recordExit } from "./herd-dispatch.mjs";
 
 // Statuses the monitor has already resolved — never acted on again.
@@ -86,6 +86,7 @@ export async function monitorOnce(opts) {
     config,
     statePath = STATE_FILE,
     escalationsPath = ESCALATIONS_FILE,
+    eventsPath = EVENTS_FILE,
     gh,
     isAlive = isPidAlive,
     spawn: spawnFn = spawnWorker,
@@ -113,7 +114,18 @@ export async function monitorOnce(opts) {
     const escalate = (what, action) => {
       entry.status = "escalated";
       entry.pid = null;
-      appendEscalation(escalationsPath, { now: now(), issue, what, logFile: entry.logFile, action });
+      appendEscalation(escalationsPath, {
+        now: now(),
+        issue,
+        what,
+        adapter: entry.adapter,
+        pid: entry.pid,
+        logFile: entry.logFile,
+        attempts: entry.attempts,
+        pr: entry.pr,
+        status: entry.status,
+        action,
+      }, { eventsPath, warn: log });
     };
     let line;
 
@@ -121,6 +133,17 @@ export async function monitorOnce(opts) {
       entry.status = "awaiting-verification";
       entry.pr = decision.pr;
       entry.pid = null;
+      appendHerdEvent(eventsPath, {
+        now: now(),
+        event: "pr-detected",
+        issue,
+        adapter: entry.adapter,
+        pid: entry.pid,
+        logFile: entry.logFile,
+        attempts: entry.attempts,
+        pr: decision.pr,
+        status: entry.status,
+      }, log);
       line = `herd: issue #${issue} -> verify (PR #${decision.pr} open)`;
     } else if (decision.action === "escalate-clean") {
       escalate(
@@ -145,7 +168,7 @@ export async function monitorOnce(opts) {
       } else {
         let pid = null;
         try {
-          pid = spawnFn(resume.argv, resume.env, resume.logFile, (code, signal) => recordExit(statePath, issue, code, signal));
+          pid = spawnFn(resume.argv, resume.env, resume.logFile, (code, signal) => recordExit(statePath, issue, code, signal, { eventsPath, now, warn: log }));
         } catch (e) {
           escalate(`resume spawn failed: ${e.message}`, "check the adapter command in .ratchet/herd.json; the resume CLI may be missing or unexecutable");
           line = `herd: issue #${issue} -> escalated (resume spawn failed: ${e.message})`;
@@ -156,6 +179,17 @@ export async function monitorOnce(opts) {
           entry.status = "resumed";
           delete entry.exitCode; // a stale exit must not classify the new run
           delete entry.exitSignal;
+          appendHerdEvent(eventsPath, {
+            now: now(),
+            event: "resume",
+            issue,
+            adapter: entry.adapter,
+            pid,
+            logFile: resume.logFile,
+            attempts: entry.attempts,
+            pr: entry.pr,
+            status: entry.status,
+          }, log);
           line = `herd: issue #${issue} -> retry ${decision.attempts}/${config.reworkCap} (resume via ${entry.adapter}, pid ${pid})`;
         }
       }
