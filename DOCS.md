@@ -199,6 +199,8 @@ scripts/
   release.test.mjs              Regression test for releases
   run-gates.mjs                 Run GATES.md locally and in CI
   run-gates.test.mjs            Regression test for the gate runner
+  skill-parity.mjs              Guard: every skill has agents/openai.yaml + byte-identical .claude/plugin mirrors
+  skill-parity.test.mjs         Regression test for the cross-agent parity guard
   sweep-lease.mjs               Shared claim lease freshness rule
   sweep-lease.test.mjs          Regression test for renewable leases
   sweep-stale-claims.mjs        Return abandoned work to the queue
