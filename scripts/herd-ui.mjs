@@ -107,6 +107,69 @@ export function latestClaimTs(events, issue) {
   return ts;
 }
 
+// The usage fields a worker-exit event may carry (0075). Kept in sync with
+// herd.mjs's USAGE_FIELDS by shape, not import, so the dashboard stays a
+// read-only consumer of whatever the supervisor already wrote to the stream.
+const USAGE_KEYS = Object.freeze(["costUsd", "tokensIn", "tokensOut"]);
+
+// A finite number stays itself; anything else (null from an unreadable log, a
+// string, NaN, Infinity, undefined) normalises to null so no row or total ever
+// carries a NaN/undefined into the browser.
+function numOrNull(v) {
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+// True when an event carries any usage field at all — even valued null. A
+// declared-but-unreadable usage (log crashed/truncated) writes the keys as
+// null, and that exit is still the issue's most recent usage reading, so it
+// counts as usage-bearing rather than being skipped for an older event.
+export function isUsageBearing(e) {
+  return e != null && USAGE_KEYS.some((k) => k in e);
+}
+
+// The usage numbers from the most recent usage-bearing event for `issue`, or
+// null when no event for it carried usage (an adapter with no `usage` mapping,
+// or usage not yet emitted). Each returned field is a number or null; a field
+// absent from the winning event is normalised to null so every row exposes all
+// three keys. "Most recent" is the lexicographically-greatest ISO ts, matching
+// latestClaimTs — the stream's ts is always an ISO string.
+export function latestUsage(events, issue) {
+  let winner = null;
+  let winnerTs = null;
+  for (const e of events || []) {
+    if (Number(e.issue) !== Number(issue)) continue;
+    if (!isUsageBearing(e)) continue;
+    const ts = String(e.ts);
+    if (winnerTs === null || ts > winnerTs) {
+      winnerTs = ts;
+      winner = e;
+    }
+  }
+  if (winner === null) return null;
+  return {
+    costUsd: numOrNull(winner.costUsd),
+    tokensIn: numOrNull(winner.tokensIn),
+    tokensOut: numOrNull(winner.tokensOut),
+  };
+}
+
+// Fleet totals across worker rows: each field is the sum of its finite values,
+// or null when no worker contributed a finite number for it (so the header
+// renders a `—`, never 0, when nothing has usage). A null field on a row simply
+// does not add to that total — a worker without usage never drags a sum down.
+export function fleetUsage(workers) {
+  let costUsd = null;
+  let tokensIn = null;
+  let tokensOut = null;
+  const add = (acc, v) => (typeof v === "number" && Number.isFinite(v) ? (acc || 0) + v : acc);
+  for (const w of workers || []) {
+    costUsd = add(costUsd, w.costUsd);
+    tokensIn = add(tokensIn, w.tokensIn);
+    tokensOut = add(tokensOut, w.tokensOut);
+  }
+  return { costUsd, tokensIn, tokensOut };
+}
+
 // Build a clickable PR URL from an "owner/repo" slug, or null when the slug is
 // unknown (git remote absent) so the link simply does not render.
 export function prUrl(repoSlug, prNumber) {
@@ -190,6 +253,10 @@ export function buildWorkers({ state, events, config, now = Date.now(), repoSlug
       adapterCfg && typeof adapterCfg.avatar === "string" && adapterCfg.avatar !== "" ? adapterCfg.avatar : null;
     const status = e.status ?? "unknown";
     const claimActive = e.pid != null && !TERMINAL_STATUS.has(status);
+    // Usage from the issue's latest usage-bearing worker-exit event (0075), or
+    // all-null when it never carried usage. Each field is a number or null; the
+    // browser renders null as a `—` placeholder cell.
+    const usage = latestUsage(events, issue);
     rows.push({
       issue,
       status,
@@ -208,6 +275,9 @@ export function buildWorkers({ state, events, config, now = Date.now(), repoSlug
       prUrl: prUrl(repoSlug, e.pr ?? null),
       issueUrl: repoSlug ? `https://github.com/${repoSlug}/issues/${issue}` : null,
       logFile: e.logFile ?? null,
+      costUsd: usage ? usage.costUsd : null,
+      tokensIn: usage ? usage.tokensIn : null,
+      tokensOut: usage ? usage.tokensOut : null,
     });
   }
   rows.sort((a, b) => a.issue - b.issue);
@@ -313,7 +383,8 @@ export function readSnapshot({
     }
   }
   const hint = workers.length === 0 && escalations.length === 0 ? EMPTY_HINT : null;
-  return { workers, escalations, hint };
+  const totals = fleetUsage(workers);
+  return { workers, escalations, hint, totals };
 }
 
 // A change key that ignores the ever-advancing clock, so the live stream pushes
@@ -321,7 +392,7 @@ export function readSnapshot({
 // an age ticked. Ages are recomputed by the browser from claimStartTs.
 export function snapshotKey(snapshot) {
   const workers = snapshot.workers.map(({ claimAgeSeconds, ...rest }) => rest);
-  return JSON.stringify({ workers, escalations: snapshot.escalations, hint: snapshot.hint });
+  return JSON.stringify({ workers, escalations: snapshot.escalations, hint: snapshot.hint, totals: snapshot.totals ?? null });
 }
 
 // --- incremental log tail ----------------------------------------------------
@@ -548,6 +619,9 @@ export const PAGE_HTML = `<!doctype html>
   header h1 { font-size:16px; margin:0; }
   header .dot { width:8px; height:8px; border-radius:50%; background:var(--muted); display:inline-block; }
   header .dot.live { background:#2da44e; }
+  header .fleettotals { margin-left:auto; color:var(--muted); font-variant-numeric:tabular-nums; }
+  header .fleettotals.empty { display:none; }
+  td.usage { text-align:right; font-variant-numeric:tabular-nums; }
   main { padding:20px; max-width:1100px; margin:0 auto; }
   .hint { color:var(--muted); padding:40px 0; text-align:center; }
   .layout { display:flex; gap:16px; align-items:flex-start; }
@@ -601,6 +675,7 @@ export const PAGE_HTML = `<!doctype html>
 <header>
   <h1>Herd dashboard</h1>
   <span><span class="dot" id="livedot"></span> <span id="livetext" class="empty">connecting…</span></span>
+  <span id="fleettotals" class="fleettotals empty"></span>
 </header>
 <main>
   <div class="layout" id="layout">
@@ -630,6 +705,17 @@ export const PAGE_HTML = `<!doctype html>
   let selected = null, logSource = null, logBuffer = "", panelOpen = false, snapshot = { workers: [], escalations: [], hint: null };
 
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
+
+  // Usage formatters. A finite number renders; anything else (null from an
+  // unreadable log or a worker with no usage mapping) becomes an em dash — never
+  // blank, NaN, or undefined. usdText/tokText return the bare "—" for the header
+  // line; usdCell/tokCell wrap it in the muted empty span for table cells.
+  const isNum = (n) => typeof n === "number" && isFinite(n);
+  const grp = (n) => String(n).replace(/\\B(?=(\\d{3})+(?!\\d))/g, ",");
+  const usdText = (n) => isNum(n) ? "$" + n.toFixed(4) : "—";
+  const tokText = (n) => isNum(n) ? grp(n) : "—";
+  const usdCell = (n) => isNum(n) ? usdText(n) : '<span class="empty">—</span>';
+  const tokCell = (n) => isNum(n) ? tokText(n) : '<span class="empty">—</span>';
 
   // Swap a worker's avatar to its bundled default when the adapter's own image
   // fails to load (missing file, bad URL), so the row shows a mascot rather than
@@ -698,7 +784,7 @@ export const PAGE_HTML = `<!doctype html>
   // LIFECYCLE_GROUPS. "other" is the catch-all so an unmapped status is always
   // shown, never dropped.
   const GROUP_ORDER = [["live", "Live"], ["awaiting-review", "Awaiting review"], ["escalated", "Escalated"], ["terminal", "Terminal"], ["other", "Other"]];
-  const THEAD = '<thead><tr><th>Issue</th><th>Status</th><th>Adapter</th><th>Attempts</th><th>Age</th><th>PR</th></tr></thead>';
+  const THEAD = '<thead><tr><th>Issue</th><th>Status</th><th>Adapter</th><th>Attempts</th><th>Age</th><th>PR</th><th>Cost</th><th>Tokens in</th><th>Tokens out</th></tr></thead>';
 
   function rowHtml(w) {
     const pr = w.prUrl ? '<a href="' + esc(w.prUrl) + '" target="_blank" rel="noopener">#' + esc(w.pr) + "</a>"
@@ -709,7 +795,10 @@ export const PAGE_HTML = `<!doctype html>
       '<td><span class="adapter">' + avatarImg(w) + "<span>" + esc(w.adapter || "—") + "</span></span></td>" +
       "<td>" + attemptsText(w) + "</td>" +
       "<td>" + ageText(w) + "</td>" +
-      "<td>" + pr + "</td></tr>";
+      "<td>" + pr + "</td>" +
+      '<td class="usage">' + usdCell(w.costUsd) + "</td>" +
+      '<td class="usage">' + tokCell(w.tokensIn) + "</td>" +
+      '<td class="usage">' + tokCell(w.tokensOut) + "</td></tr>";
   }
 
   function renderWorkers() {
@@ -789,7 +878,19 @@ export const PAGE_HTML = `<!doctype html>
 
   $("logsearch").addEventListener("input", renderLog);
 
-  function render() { renderErrToggle(); renderEscalations(); renderWorkers(); }
+  // The fleet totals line in the header: summed cost and summed tokens across
+  // every worker with usage data. Hidden entirely when no worker has any finite
+  // usage number, so it never reads "$0 · 0" before the first exit lands.
+  function renderTotals() {
+    const t = snapshot.totals || {};
+    const el = $("fleettotals");
+    const has = isNum(t.costUsd) || isNum(t.tokensIn) || isNum(t.tokensOut);
+    if (!has) { el.textContent = ""; el.classList.add("empty"); return; }
+    el.classList.remove("empty");
+    el.textContent = "Fleet: " + usdText(t.costUsd) + " · " + tokText(t.tokensIn) + " in · " + tokText(t.tokensOut) + " out";
+  }
+
+  function render() { renderErrToggle(); renderEscalations(); renderWorkers(); renderTotals(); }
 
   $("errtoggle").addEventListener("click", () => { panelOpen = !panelOpen; applyPanel(); });
   $("errclose").addEventListener("click", () => { panelOpen = false; applyPanel(); });
