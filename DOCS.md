@@ -210,6 +210,8 @@ scripts/
   herd-review.test.mjs          Regression test for herd review reactor
   herd-ui.mjs                   ratchet-herd local web dashboard (node:http + SSE)
   herd-ui.test.mjs              Regression test for the herd web dashboard
+  herd-notify.mjs               Desktop notifications for new herd escalations
+  herd-notify.test.mjs          Regression test for herd escalation notifications
   herd-avatars.mjs              Bundled default mascot avatars for the dashboard
   herd-avatar.test.mjs          Regression test for dashboard adapter avatars
   herd-ui-log-search.test.mjs   Regression test for log drill-down search/filter
