@@ -580,6 +580,70 @@ await inTempDir(async () => {
   assert.ok(warnsB.some((m) => /usage field/.test(m)), "the missing-log case still warns on one line");
 });
 
+// --- Issue #169: stop the survey/monitor ping-pong that re-escalates stale
+// claims every poll. AC1 (the monitor never classifies a stale-claim sentinel)
+// lives in herd-monitor.test.mjs; the survey/interaction criteria are here. ---
+
+// #169 AC2) A stale claim ref produces exactly one escalation across any number
+// of subsequent polls while the ref, the sentinel, and the herd state are
+// otherwise unchanged: alternating survey and monitor polls over the same stale
+// ref — the exact ping-pong — append exactly one escalation block, not a wall.
+await inTempDir(async () => {
+  const gh = fakeGhWithRefs({ claimRefs: [175] }); // ref present, no worker, no PR
+  const survey = { gh, isAlive: () => false, now: NOW, statePath: "s.json", escalationsPath: "e.md", log: () => {} };
+  const monitor = {
+    config: mkConfig(), statePath: "s.json", escalationsPath: "e.md", eventsPath: "ev.jsonl", gh,
+    isAlive: () => false, spawn: () => { throw new Error("the monitor must not resume a stale sentinel"); },
+    now: () => NOW, log: () => {},
+  };
+  const s1 = await pollOnce(survey);
+  await monitorOnce(monitor);
+  const s2 = await pollOnce(survey);
+  await monitorOnce(monitor);
+  const s3 = await pollOnce(survey);
+  assert.equal(s1.staleEscalated, 1, "escalated once on the poll that first saw the stale ref");
+  assert.equal(s2.staleEscalated, 0, "not re-escalated after a monitor pass");
+  assert.equal(s3.staleEscalated, 0, "still not re-escalated on any later poll");
+  const esc = readFileSync("e.md", "utf8");
+  assert.equal((esc.match(/^## /gm) || []).length, 1, "exactly one escalation block across five interleaved polls");
+});
+
+// #169 AC3) When the stale ref disappears from origin, the sentinel entry is
+// removed from the state file on the next poll — a resolved claim leaves no
+// orphaned bookkeeping behind.
+await inTempDir(async () => {
+  const opts = { isAlive: () => false, now: NOW, statePath: "s.json", escalationsPath: "e.md", log: () => {} };
+  await pollOnce({ ...opts, gh: fakeGhWithRefs({ claimRefs: [175] }) });
+  assert.equal(readState("s.json")["175"]?.status, "stale-claim", "the first poll records the sentinel");
+  await pollOnce({ ...opts, gh: fakeGhWithRefs({ claimRefs: [] }) }); // the human deleted the ref
+  assert.equal("175" in readState("s.json"), false, "the sentinel entry is removed once the ref is gone");
+});
+
+// #169 AC4) A supervisor restart mid-loop does not re-escalate a stale ref whose
+// sentinel entry already exists in the state file: a fresh poll that reads the
+// persisted sentinel re-recognises it and escalates nothing.
+await inTempDir(async () => {
+  // State persisted before the restart: the ref was already escalated once.
+  writeFileSync("s.json", JSON.stringify({ 175: { adapter: null, pid: null, logFile: null, attempts: 0, status: "stale-claim", pr: null } }));
+  const gh = fakeGhWithRefs({ claimRefs: [175] }); // the ref is still there after the restart
+  const r = await pollOnce({ gh, isAlive: () => false, now: NOW, statePath: "s.json", escalationsPath: "e.md", log: () => {} });
+  assert.equal(r.staleEscalated, 0, "the persisted sentinel is not re-escalated after a restart");
+  assert.equal(existsSync("e.md"), false, "no new escalation block is written on restart");
+});
+
+// #169 AC5) Every criterion above has exactly one test named after it — AC1
+// (the monitor side) lives in herd-monitor.test.mjs, AC2–AC4 here; each appears
+// exactly once across the two files.
+{
+  const survey = readFileSync(new URL("./herd-survey.test.mjs", import.meta.url), "utf8");
+  const monitor = readFileSync(new URL("./herd-monitor.test.mjs", import.meta.url), "utf8");
+  const both = survey + monitor;
+  for (const ac of ["AC1", "AC2", "AC3", "AC4"]) {
+    const hits = (both.match(new RegExp(`#169 ${ac}\\)`, "g")) || []).length;
+    assert.equal(hits, 1, `#169 ${ac} has exactly one test named after it`);
+  }
+}
+
 // --- Issue #170: prune terminal herd state entries that carry no pid and no
 // open PR. reconcileState only flags dead pids / concluded PRs, so a terminal
 // entry (dispatch-failed, escalated, verify-escalated) with pid:null/pr:null is
@@ -613,7 +677,7 @@ await inTempDir(async () => {
     "s.json",
     JSON.stringify({ 122: { adapter: "claude", pid: null, logFile: "y.log", attempts: 1, pr: null, status: "dispatch-failed" } }),
   );
-  const gh = fakeGh({ ready: [{ number: 122 }], inProgress: [], openPrs: [] });
+  const gh = fakeGh({ ready: [], inProgress: [], openPrs: [] });
   const ready = [{ number: 122, createdAt: "2026-01-01", labels: [{ name: "priority:high" }] }];
   const disp = () =>
     dispatchOne({
@@ -661,4 +725,4 @@ await inTempDir(async () => {
   assert.ok(logs.some((m) => /1 terminal entry pruned/.test(m)), "the poll summary line reports the terminal-pruned count");
 });
 
-console.log("PASS herd-survey.test.mjs (7 criteria + issue #137: 4 criteria + issue #143: 5 criteria + issue #138: 5 criteria + issue #139: 3 criteria + issue #163: 3 criteria + issue #170: 4 criteria)");
+console.log("PASS herd-survey.test.mjs (7 criteria + issue #137: 4 criteria + issue #143: 5 criteria + issue #138: 5 criteria + issue #139: 3 criteria + issue #163: 3 criteria + issue #169: 4 criteria + issue #170: 4 criteria)");

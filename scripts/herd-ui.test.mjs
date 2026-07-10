@@ -554,6 +554,99 @@ await inTempDir(async (dir) => {
   });
 });
 
+// --- #171 Criterion 1: a row with a live worker pid in an active (non-terminal)
+// status shows its claim age against the claim timeout, with the overdue
+// highlight only when age exceeds the timeout. -------------------------------
+await inTempDir(async (dir) => {
+  const statePath = join(dir, "state.json");
+  const eventsPath = join(dir, "events.jsonl");
+  const start = new Date(NOW - 90_000).toISOString(); // 90s before the fixed clock
+  writeFileSync(statePath, JSON.stringify({
+    3: { adapter: "claude", pid: 111, attempts: 1, status: "dispatched", pr: null, logFile: "l3.log" },
+  }));
+  writeFileSync(eventsPath, JSON.stringify({ ts: start, event: "dispatch", issue: 3 }) + "\n");
+
+  const snap = readSnapshot({ statePath, eventsPath, escalationsPath: join(dir, "none.md"), config: CONFIG, now: NOW });
+  const w = snap.workers.find((w) => w.issue === 3);
+  assert.equal(w.pid, 111, "row carries the live worker pid");
+  assert.equal(w.status, "dispatched", "row is in an active non-terminal status");
+  assert.equal(w.claimActive, true, "claimActive is true for a live pid in a non-terminal status");
+  assert.equal(w.claimAgeSeconds, 90, "claim age is measured from the dispatch event");
+  assert.equal(w.claimTimeoutSeconds, 300, "the timeout denominator is present for the gauge");
+
+  // The page's ageText renders the timeout denominator and overdue class only for active claims
+  await withServer({}, async (base) => {
+    const page = await fetchText(`${base}/`);
+    const scriptMatch = /<script>([\s\S]*?)<\/script>/.exec(page.body);
+    assert.ok(scriptMatch, "page has a script block");
+    const script = scriptMatch[1];
+    assert.match(script, /w\.claimActive/, "ageText checks claimActive");
+    // The active-claim branch carries the timeout denominator and the overdue class
+    assert.match(script, /w\.claimActive\)\s*\{[\s\S]*?claimTimeoutSeconds[\s\S]*?"over"/, "the active branch shows the timeout denominator and overdue class");
+  });
+});
+
+// --- #171 Criterion 2: a row in a terminal or escalated status, or with no
+// live pid, shows a "last activity" age with no timeout denominator and no
+// overdue highlight. ---------------------------------------------------------
+await inTempDir(async (dir) => {
+  const statePath = join(dir, "state.json");
+  const eventsPath = join(dir, "events.jsonl");
+  const start = new Date(NOW - 926_000).toISOString(); // long ago — would be "overdue" under the old logic
+  writeFileSync(statePath, JSON.stringify({
+    4: { adapter: "claude", pid: null, attempts: 1, status: "escalated", pr: null, logFile: "l4.log" },
+    6: { adapter: "codex", pid: null, attempts: 2, status: "pr-concluded", pr: 99, logFile: "l6.log" },
+  }));
+  writeFileSync(eventsPath, [
+    JSON.stringify({ ts: start, event: "dispatch", issue: 4 }),
+    JSON.stringify({ ts: start, event: "dispatch", issue: 6 }),
+  ].join("\n") + "\n");
+
+  const snap = readSnapshot({ statePath, eventsPath, escalationsPath: join(dir, "none.md"), config: CONFIG, now: NOW });
+  const w4 = snap.workers.find((w) => w.issue === 4);
+  const w6 = snap.workers.find((w) => w.issue === 6);
+  assert.equal(w4.status, "escalated", "row 4 is in an escalated (terminal) status");
+  assert.equal(w4.claimActive, false, "an escalated row is not claimActive");
+  assert.equal(w6.status, "pr-concluded", "row 6 is in a concluded status with no live pid");
+  assert.equal(w6.claimActive, false, "a row with no live pid is not claimActive");
+  // Both still carry the age so the browser can show "last activity"
+  assert.equal(w4.claimAgeSeconds, 926, "the age is still computed for last-activity display");
+  assert.ok(w4.claimAgeSeconds > w4.claimTimeoutSeconds, "the age exceeds the timeout — but must NOT be highlighted");
+
+  // The page's ageText, for non-active rows, renders no timeout denominator and no overdue class
+  await withServer({}, async (base) => {
+    const page = await fetchText(`${base}/`);
+    const scriptMatch = /<script>([\s\S]*?)<\/script>/.exec(page.body);
+    const script = scriptMatch[1];
+    // The fallback return (after the claimActive branch) renders just the age, no denominator
+    assert.match(script, /return '<span class="gauge">' \+ t \+ "<\/span>"/, "the non-active branch renders age with no timeout denominator");
+  });
+});
+
+// --- #171 Criterion 3: a row with no dispatch or resume event at all shows a
+// placeholder, never a blank, NaN, or a negative age. ------------------------
+await inTempDir(async (dir) => {
+  const statePath = join(dir, "state.json");
+  const eventsPath = join(dir, "events.jsonl");
+  writeFileSync(statePath, JSON.stringify({
+    8: { adapter: "claude", pid: 111, attempts: 1, status: "dispatched", pr: null, logFile: "l8.log" },
+  }));
+  writeFileSync(eventsPath, ""); // no events at all
+
+  const snap = readSnapshot({ statePath, eventsPath, escalationsPath: join(dir, "none.md"), config: CONFIG, now: NOW });
+  const w = snap.workers.find((w) => w.issue === 8);
+  assert.equal(w.claimStartTs, null, "no dispatch/resume event -> claimStartTs is null");
+  assert.equal(w.claimAgeSeconds, null, "no event -> claimAgeSeconds is null, never NaN or negative");
+
+  // The page's ageText returns a placeholder when claimStartTs is null
+  await withServer({}, async (base) => {
+    const page = await fetchText(`${base}/`);
+    const scriptMatch = /<script>([\s\S]*?)<\/script>/.exec(page.body);
+    const script = scriptMatch[1];
+    assert.match(script, /if \(w\.claimStartTs == null\) return "—"/, "ageText returns a placeholder dash when there is no event");
+  });
+});
+
 // --- #178 Criterion 4: every criterion above has exactly one test named after
 // it. --------------------------------------------------------------------------
 {
@@ -575,4 +668,25 @@ await inTempDir(async (dir) => {
   for (let n = 1; n <= criteriaCount; n++) assert.ok(unique.has(n), `#178 criterion ${n} has a test`);
 }
 
-console.log("PASS herd-ui.test.mjs (18 criteria)");
+// --- #171 Criterion 4: every criterion above has exactly one test named after
+// it. --------------------------------------------------------------------------
+{
+  const selfPath = fileURLToPath(import.meta.url);
+  const selfText = readFileSync(selfPath, "utf8");
+  const planDir = join(dirname(selfPath), "..", "plan");
+  const planPath = existsSync(join(planDir, "0081-herd-ui-claim-age-live-only.md"))
+    ? join(planDir, "0081-herd-ui-claim-age-live-only.md")
+    : join(planDir, "done", "0081-herd-ui-claim-age-live-only.md");
+  const planText = readFileSync(planPath, "utf8");
+
+  const criteriaSection = /##\s+Acceptance criteria\s*([\s\S]*?)(?:\n##\s|$)/.exec(planText)[1];
+  const criteriaCount = (criteriaSection.match(/^-\s*\[[ x]\]/gim) || []).length;
+
+  const markers = [...selfText.matchAll(/^\/\/ --- #171 Criterion (\d+):/gim)].map((m) => Number(m[1]));
+  const unique = new Set(markers);
+  assert.equal(markers.length, unique.size, "each #171 criterion is tested exactly once (no duplicate markers)");
+  assert.equal(markers.length, criteriaCount, `one test per #171 acceptance criterion (${criteriaCount})`);
+  for (let n = 1; n <= criteriaCount; n++) assert.ok(unique.has(n), `#171 criterion ${n} has a test`);
+}
+
+console.log("PASS herd-ui.test.mjs (22 criteria)");
