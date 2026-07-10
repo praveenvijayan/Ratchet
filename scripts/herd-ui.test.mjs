@@ -3,15 +3,17 @@
 // exactly one test per criterion of the local herd web dashboard, driven
 // through herd-ui.mjs's public interface. Offline: fixtures live in temp dirs,
 // servers bind 127.0.0.1:0 (an ephemeral port), and SSE frames are read over
-// raw node:http. Criterion 8 closes the loop — it counts its own sibling tests
-// against the plan file's criteria. Zero dependencies. Run:
+// raw node:http. Each per-issue Criterion-N self-count closes its own loop by
+// counting its own sibling `Criterion N` markers — it never reads a plan file
+// at runtime, so archiving a plan when its issue closes can never break it.
+// Zero dependencies. Run:
 //   node scripts/herd-ui.test.mjs
 
 import assert from "node:assert/strict";
 import { get as httpGet } from "node:http";
-import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, rmSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, dirname } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -343,23 +345,18 @@ await (async () => {
 })();
 
 // --- Criterion 8: every criterion above has exactly one test named after it. --
+// The plan file carried eight acceptance criteria; this counts its own
+// `Criterion N` markers and proves there is exactly one per criterion, 1..8.
+// It counts markers in THIS file only — it never reads the plan file at
+// runtime, so archiving the plan when the issue closes can never break it.
 {
-  const selfPath = fileURLToPath(import.meta.url);
-  const selfText = readFileSync(selfPath, "utf8");
-  const planDir = join(dirname(selfPath), "..", "plan");
-  const planPath = existsSync(join(planDir, "0069-herd-web-dashboard.md"))
-    ? join(planDir, "0069-herd-web-dashboard.md")
-    : join(planDir, "done", "0069-herd-web-dashboard.md");
-  const planText = readFileSync(planPath, "utf8");
-
-  const criteriaSection = /##\s+Acceptance criteria\s*([\s\S]*?)(?:\n##\s|$)/.exec(planText)[1];
-  const criteriaCount = (criteriaSection.match(/^-\s*\[[ x]\]/gim) || []).length;
-
+  const CRITERIA_COUNT = 8;
+  const selfText = readFileSync(fileURLToPath(import.meta.url), "utf8");
   const markers = [...selfText.matchAll(/^\/\/ --- Criterion (\d+):/gim)].map((m) => Number(m[1]));
   const unique = new Set(markers);
   assert.equal(markers.length, unique.size, "each criterion is tested exactly once (no duplicate markers)");
-  assert.equal(markers.length, criteriaCount, `one test per acceptance criterion (${criteriaCount})`);
-  for (let n = 1; n <= criteriaCount; n++) assert.ok(unique.has(n), `criterion ${n} has a test`);
+  assert.equal(markers.length, CRITERIA_COUNT, `one test per acceptance criterion (${CRITERIA_COUNT})`);
+  for (let n = 1; n <= CRITERIA_COUNT; n++) assert.ok(unique.has(n), `criterion ${n} has a test`);
 }
 
 // --- #166 Criterion 1: errors and escalations render inside a side panel
@@ -462,21 +459,18 @@ await inTempDir(async (dir) => {
 });
 
 // --- #166 Criterion 6: every criterion above has exactly one test named after
-// it. --------------------------------------------------------------------------
+// it. The plan file carried six #166 acceptance criteria; this counts its own
+// `#166 Criterion N` markers and proves there is exactly one per criterion,
+// 1..6. It counts markers in THIS file only — it never reads the plan file at
+// runtime, so archiving the plan when the issue closes can never break it.
 {
-  const selfPath = fileURLToPath(import.meta.url);
-  const selfText = readFileSync(selfPath, "utf8");
-  const planPath = join(dirname(selfPath), "..", "plan", "0078-herd-dashboard-error-panel.md");
-  const planText = readFileSync(planPath, "utf8");
-
-  const criteriaSection = /##\s+Acceptance criteria\s*([\s\S]*?)(?:\n##\s|$)/.exec(planText)[1];
-  const criteriaCount = (criteriaSection.match(/^-\s*\[[ x]\]/gim) || []).length;
-
+  const CRITERIA_COUNT = 6;
+  const selfText = readFileSync(fileURLToPath(import.meta.url), "utf8");
   const markers = [...selfText.matchAll(/^\/\/ --- #166 Criterion (\d+):/gim)].map((m) => Number(m[1]));
   const unique = new Set(markers);
   assert.equal(markers.length, unique.size, "each #166 criterion is tested exactly once (no duplicate markers)");
-  assert.equal(markers.length, criteriaCount, `one test per #166 acceptance criterion (${criteriaCount})`);
-  for (let n = 1; n <= criteriaCount; n++) assert.ok(unique.has(n), `#166 criterion ${n} has a test`);
+  assert.equal(markers.length, CRITERIA_COUNT, `one test per #166 acceptance criterion (${CRITERIA_COUNT})`);
+  for (let n = 1; n <= CRITERIA_COUNT; n++) assert.ok(unique.has(n), `#166 criterion ${n} has a test`);
 }
 
 // --- #178 Criterion 1: each worker row shows the issue title alongside its
@@ -662,45 +656,33 @@ await inTempDir(async (dir) => {
 });
 
 // --- #178 Criterion 4: every criterion above has exactly one test named after
-// it. --------------------------------------------------------------------------
+// it. The plan file carried four #178 acceptance criteria; this counts its own
+// `#178 Criterion N` markers and proves there is exactly one per criterion,
+// 1..4. It counts markers in THIS file only — it never reads the plan file at
+// runtime, so archiving the plan when the issue closes can never break it.
 {
-  const selfPath = fileURLToPath(import.meta.url);
-  const selfText = readFileSync(selfPath, "utf8");
-  const planDir = join(dirname(selfPath), "..", "plan");
-  const planPath = existsSync(join(planDir, "0088-herd-dashboard-issue-titles.md"))
-    ? join(planDir, "0088-herd-dashboard-issue-titles.md")
-    : join(planDir, "done", "0088-herd-dashboard-issue-titles.md");
-  const planText = readFileSync(planPath, "utf8");
-
-  const criteriaSection = /##\s+Acceptance criteria\s*([\s\S]*?)(?:\n##\s|$)/.exec(planText)[1];
-  const criteriaCount = (criteriaSection.match(/^-\s*\[[ x]\]/gim) || []).length;
-
+  const CRITERIA_COUNT = 4;
+  const selfText = readFileSync(fileURLToPath(import.meta.url), "utf8");
   const markers = [...selfText.matchAll(/^\/\/ --- #178 Criterion (\d+):/gim)].map((m) => Number(m[1]));
   const unique = new Set(markers);
   assert.equal(markers.length, unique.size, "each #178 criterion is tested exactly once (no duplicate markers)");
-  assert.equal(markers.length, criteriaCount, `one test per #178 acceptance criterion (${criteriaCount})`);
-  for (let n = 1; n <= criteriaCount; n++) assert.ok(unique.has(n), `#178 criterion ${n} has a test`);
+  assert.equal(markers.length, CRITERIA_COUNT, `one test per #178 acceptance criterion (${CRITERIA_COUNT})`);
+  for (let n = 1; n <= CRITERIA_COUNT; n++) assert.ok(unique.has(n), `#178 criterion ${n} has a test`);
 }
 
 // --- #171 Criterion 4: every criterion above has exactly one test named after
-// it. --------------------------------------------------------------------------
+// it. The plan file carried four #171 acceptance criteria; this counts its own
+// `#171 Criterion N` markers and proves there is exactly one per criterion,
+// 1..4. It counts markers in THIS file only — it never reads the plan file at
+// runtime, so archiving the plan when the issue closes can never break it.
 {
-  const selfPath = fileURLToPath(import.meta.url);
-  const selfText = readFileSync(selfPath, "utf8");
-  const planDir = join(dirname(selfPath), "..", "plan");
-  const planPath = existsSync(join(planDir, "0081-herd-ui-claim-age-live-only.md"))
-    ? join(planDir, "0081-herd-ui-claim-age-live-only.md")
-    : join(planDir, "done", "0081-herd-ui-claim-age-live-only.md");
-  const planText = readFileSync(planPath, "utf8");
-
-  const criteriaSection = /##\s+Acceptance criteria\s*([\s\S]*?)(?:\n##\s|$)/.exec(planText)[1];
-  const criteriaCount = (criteriaSection.match(/^-\s*\[[ x]\]/gim) || []).length;
-
+  const CRITERIA_COUNT = 4;
+  const selfText = readFileSync(fileURLToPath(import.meta.url), "utf8");
   const markers = [...selfText.matchAll(/^\/\/ --- #171 Criterion (\d+):/gim)].map((m) => Number(m[1]));
   const unique = new Set(markers);
   assert.equal(markers.length, unique.size, "each #171 criterion is tested exactly once (no duplicate markers)");
-  assert.equal(markers.length, criteriaCount, `one test per #171 acceptance criterion (${criteriaCount})`);
-  for (let n = 1; n <= criteriaCount; n++) assert.ok(unique.has(n), `#171 criterion ${n} has a test`);
+  assert.equal(markers.length, CRITERIA_COUNT, `one test per #171 acceptance criterion (${CRITERIA_COUNT})`);
+  for (let n = 1; n <= CRITERIA_COUNT; n++) assert.ok(unique.has(n), `#171 criterion ${n} has a test`);
 }
 
 // --- #179 Criterion 1: rows render in labelled groups ordered live,
@@ -832,21 +814,18 @@ await inTempDir(async (dir) => {
 });
 
 // --- #179 Criterion 5: every criterion above has exactly one test named after
-// it. --------------------------------------------------------------------------
+// it. The plan file carried five #179 acceptance criteria; this counts its own
+// `#179 Criterion N` markers and proves there is exactly one per criterion,
+// 1..5. It counts markers in THIS file only — it never reads the plan file at
+// runtime, so archiving the plan when the issue closes can never break it.
 {
-  const selfPath = fileURLToPath(import.meta.url);
-  const selfText = readFileSync(selfPath, "utf8");
-  const planPath = join(dirname(selfPath), "..", "plan", "0089-herd-dashboard-row-grouping.md");
-  const planText = readFileSync(planPath, "utf8");
-
-  const criteriaSection = /##\s+Acceptance criteria\s*([\s\S]*?)(?:\n##\s|$)/.exec(planText)[1];
-  const criteriaCount = (criteriaSection.match(/^-\s*\[[ x]\]/gim) || []).length;
-
+  const CRITERIA_COUNT = 5;
+  const selfText = readFileSync(fileURLToPath(import.meta.url), "utf8");
   const markers = [...selfText.matchAll(/^\/\/ --- #179 Criterion (\d+):/gim)].map((m) => Number(m[1]));
   const unique = new Set(markers);
   assert.equal(markers.length, unique.size, "each #179 criterion is tested exactly once (no duplicate markers)");
-  assert.equal(markers.length, criteriaCount, `one test per #179 acceptance criterion (${criteriaCount})`);
-  for (let n = 1; n <= criteriaCount; n++) assert.ok(unique.has(n), `#179 criterion ${n} has a test`);
+  assert.equal(markers.length, CRITERIA_COUNT, `one test per #179 acceptance criterion (${CRITERIA_COUNT})`);
+  for (let n = 1; n <= CRITERIA_COUNT; n++) assert.ok(unique.has(n), `#179 criterion ${n} has a test`);
 }
 
 // --- #182 Criterion 1: selecting an issue shows its events in chronological
@@ -1162,21 +1141,18 @@ await inTempDir(async (dir) => {
 });
 
 // --- #164 Criterion 5: every criterion above has exactly one test named after
-// it. --------------------------------------------------------------------------
+// it. The plan file carried five #164 acceptance criteria; this counts its own
+// `#164 Criterion N` markers and proves there is exactly one per criterion,
+// 1..5. It counts markers in THIS file only — it never reads the plan file at
+// runtime, so archiving the plan when the issue closes can never break it.
 {
-  const selfPath = fileURLToPath(import.meta.url);
-  const selfText = readFileSync(selfPath, "utf8");
-  const planPath = join(dirname(selfPath), "..", "plan", "0076-herd-dashboard-usage-metrics.md");
-  const planText = readFileSync(planPath, "utf8");
-
-  const criteriaSection = /##\s+Acceptance criteria\s*([\s\S]*?)(?:\n##\s|$)/.exec(planText)[1];
-  const criteriaCount = (criteriaSection.match(/^-\s*\[[ x]\]/gim) || []).length;
-
+  const CRITERIA_COUNT = 5;
+  const selfText = readFileSync(fileURLToPath(import.meta.url), "utf8");
   const markers = [...selfText.matchAll(/^\/\/ --- #164 Criterion (\d+):/gim)].map((m) => Number(m[1]));
   const unique = new Set(markers);
   assert.equal(markers.length, unique.size, "each #164 criterion is tested exactly once (no duplicate markers)");
-  assert.equal(markers.length, criteriaCount, `one test per #164 acceptance criterion (${criteriaCount})`);
-  for (let n = 1; n <= criteriaCount; n++) assert.ok(unique.has(n), `#164 criterion ${n} has a test`);
+  assert.equal(markers.length, CRITERIA_COUNT, `one test per #164 acceptance criterion (${CRITERIA_COUNT})`);
+  for (let n = 1; n <= CRITERIA_COUNT; n++) assert.ok(unique.has(n), `#164 criterion ${n} has a test`);
 }
 
 // --- #176 Criterion 1: the supervisor appends a heartbeat event to the event
@@ -1298,21 +1274,18 @@ await inTempDir(async (dir) => {
 });
 
 // --- #176 Criterion 5: every criterion above has exactly one test named after
-// it. --------------------------------------------------------------------------
+// it. The plan file carried five #176 acceptance criteria; this counts its own
+// `#176 Criterion N` markers and proves there is exactly one per criterion,
+// 1..5. It counts markers in THIS file only — it never reads the plan file at
+// runtime, so archiving the plan when the issue closes can never break it.
 {
-  const selfPath = fileURLToPath(import.meta.url);
-  const selfText = readFileSync(selfPath, "utf8");
-  const planPath = join(dirname(selfPath), "..", "plan", "0086-herd-dashboard-heartbeat.md");
-  const planText = readFileSync(planPath, "utf8");
-
-  const criteriaSection = /##\s+Acceptance criteria\s*([\s\S]*?)(?:\n##\s|$)/.exec(planText)[1];
-  const criteriaCount = (criteriaSection.match(/^-\s*\[[ x]\]/gim) || []).length;
-
+  const CRITERIA_COUNT = 5;
+  const selfText = readFileSync(fileURLToPath(import.meta.url), "utf8");
   const markers = [...selfText.matchAll(/^\/\/ --- #176 Criterion (\d+):/gim)].map((m) => Number(m[1]));
   const unique = new Set(markers);
   assert.equal(markers.length, unique.size, "each #176 criterion is tested exactly once (no duplicate markers)");
-  assert.equal(markers.length, criteriaCount, `one test per #176 acceptance criterion (${criteriaCount})`);
-  for (let n = 1; n <= criteriaCount; n++) assert.ok(unique.has(n), `#176 criterion ${n} has a test`);
+  assert.equal(markers.length, CRITERIA_COUNT, `one test per #176 acceptance criterion (${CRITERIA_COUNT})`);
+  for (let n = 1; n <= CRITERIA_COUNT; n++) assert.ok(unique.has(n), `#176 criterion ${n} has a test`);
 }
 
 // --- #181 Criterion 1: a row with an open PR shows its combined checks status:
@@ -1428,44 +1401,34 @@ await inTempDir(async (dir) => {
 });
 
 // --- #181 Criterion 4: every criterion above has exactly one test named after
-// it. --------------------------------------------------------------------------
+// it. The plan file carried four #181 acceptance criteria; this counts its own
+// `#181 Criterion N` markers and proves there is exactly one per criterion,
+// 1..4. It counts markers in THIS file only — it never reads the plan file at
+// runtime, so archiving the plan when the issue closes can never break it.
 {
-  const selfPath = fileURLToPath(import.meta.url);
-  const selfText = readFileSync(selfPath, "utf8");
-  const planDir = join(dirname(selfPath), "..", "plan");
-  const planPath = existsSync(join(planDir, "0091-herd-dashboard-pr-checks.md"))
-    ? join(planDir, "0091-herd-dashboard-pr-checks.md")
-    : join(planDir, "done", "0091-herd-dashboard-pr-checks.md");
-  const planText = readFileSync(planPath, "utf8");
-
-  const criteriaSection = /##\s+Acceptance criteria\s*([\s\S]*?)(?:\n##\s|$)/.exec(planText)[1];
-  const criteriaCount = (criteriaSection.match(/^-\s*\[[ x]\]/gim) || []).length;
-
+  const CRITERIA_COUNT = 4;
+  const selfText = readFileSync(fileURLToPath(import.meta.url), "utf8");
   const markers = [...selfText.matchAll(/^\/\/ --- #181 Criterion (\d+):/gim)].map((m) => Number(m[1]));
   const unique = new Set(markers);
   assert.equal(markers.length, unique.size, "each #181 criterion is tested exactly once (no duplicate markers)");
-  assert.equal(markers.length, criteriaCount, `one test per #181 acceptance criterion (${criteriaCount})`);
-  for (let n = 1; n <= criteriaCount; n++) assert.ok(unique.has(n), `#181 criterion ${n} has a test`);
+  assert.equal(markers.length, CRITERIA_COUNT, `one test per #181 acceptance criterion (${CRITERIA_COUNT})`);
+  for (let n = 1; n <= CRITERIA_COUNT; n++) assert.ok(unique.has(n), `#181 criterion ${n} has a test`);
 }
 
 
 // --- #182 Criterion 5: every criterion above has exactly one test named after
-// it. --------------------------------------------------------------------------
+// it. The plan file carried five #182 acceptance criteria; this counts its own
+// `#182 Criterion N` markers and proves there is exactly one per criterion,
+// 1..5. It counts markers in THIS file only — it never reads the plan file at
+// runtime, so archiving the plan when the issue closes can never break it.
 {
-  const selfPath = fileURLToPath(import.meta.url);
-  const selfText = readFileSync(selfPath, "utf8");
-  const planDir = join(dirname(selfPath), "..", "plan");
-  const planPath = existsSync(join(planDir, "0092-herd-dashboard-activity-timeline.md"))
-    ? join(planDir, "0092-herd-dashboard-activity-timeline.md")
-    : join(planDir, "done", "0092-herd-dashboard-activity-timeline.md");
-  const planText = readFileSync(planPath, "utf8");
-  const criteriaSection = /##\s+Acceptance criteria\s*([\s\S]*?)(?:\n##\s|$)/.exec(planText)[1];
-  const criteriaCount = (criteriaSection.match(/^-\s*\[[ x]\]/gim) || []).length;
+  const CRITERIA_COUNT = 5;
+  const selfText = readFileSync(fileURLToPath(import.meta.url), "utf8");
   const markers = [...selfText.matchAll(/^\/\/ --- #182 Criterion (\d+):/gim)].map((m) => Number(m[1]));
   const unique = new Set(markers);
   assert.equal(markers.length, unique.size, "each #182 criterion is tested exactly once (no duplicate markers)");
-  assert.equal(markers.length, criteriaCount, `one test per #182 acceptance criterion (${criteriaCount})`);
-  for (let n = 1; n <= criteriaCount; n++) assert.ok(unique.has(n), `#182 criterion ${n} has a test`);
+  assert.equal(markers.length, CRITERIA_COUNT, `one test per #182 acceptance criterion (${CRITERIA_COUNT})`);
+  for (let n = 1; n <= CRITERIA_COUNT; n++) assert.ok(unique.has(n), `#182 criterion ${n} has a test`);
 }
 
 console.log("PASS herd-ui.test.mjs");

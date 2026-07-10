@@ -8,9 +8,9 @@
 
 import assert from "node:assert/strict";
 import { get as httpGet } from "node:http";
-import { mkdtempSync, writeFileSync, appendFileSync, rmSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, appendFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, dirname } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { PAGE_HTML, createDashboardServer, listenOrFail } from "./herd-ui.mjs";
@@ -170,24 +170,18 @@ await inTempDir(async (dir) => {
 }
 
 // --- #184 Criterion 5: Every criterion above has exactly one test named after
-// it. --------------------------------------------------------------------------
+// it. The plan file carried five #184 acceptance criteria; this counts its own
+// `#184 Criterion N` markers and proves there is exactly one per criterion,
+// 1..5. It counts markers in THIS file only — it never reads the plan file at
+// runtime, so archiving the plan when the issue closes can never break it.
 {
-  const selfPath = fileURLToPath(import.meta.url);
-  const selfText = readFileSync(selfPath, "utf8");
-  const planDir = join(dirname(selfPath), "..", "plan");
-  const planPath = existsSync(join(planDir, "0094-herd-dashboard-log-search.md"))
-    ? join(planDir, "0094-herd-dashboard-log-search.md")
-    : join(planDir, "done", "0094-herd-dashboard-log-search.md");
-  const planText = readFileSync(planPath, "utf8");
-
-  const criteriaSection = /##\s+Acceptance criteria\s*([\s\S]*?)(?:\n##\s|$)/.exec(planText)[1];
-  const criteriaCount = (criteriaSection.match(/^-\s*\[[ x]\]/gim) || []).length;
-
+  const CRITERIA_COUNT = 5;
+  const selfText = readFileSync(fileURLToPath(import.meta.url), "utf8");
   const markers = [...selfText.matchAll(/^\/\/ --- #184 Criterion (\d+):/gim)].map((m) => Number(m[1]));
   const unique = new Set(markers);
   assert.equal(markers.length, unique.size, "each #184 criterion is tested exactly once (no duplicate markers)");
-  assert.equal(markers.length, criteriaCount, `one test per #184 acceptance criterion (${criteriaCount})`);
-  for (let n = 1; n <= criteriaCount; n++) assert.ok(unique.has(n), `#184 criterion ${n} has a test`);
+  assert.equal(markers.length, CRITERIA_COUNT, `one test per #184 acceptance criterion (${CRITERIA_COUNT})`);
+  for (let n = 1; n <= CRITERIA_COUNT; n++) assert.ok(unique.has(n), `#184 criterion ${n} has a test`);
 }
 
 console.log("PASS herd-ui-log-search.test.mjs (5 criteria for #184)");
