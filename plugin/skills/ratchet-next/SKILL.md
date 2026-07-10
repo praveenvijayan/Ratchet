@@ -65,12 +65,13 @@ Then:
    such a handoff, another agent's in-review work is foreign — stop. Then `cd`
    into it and `git pull`; otherwise
    `git fetch origin agent/issue-<N> && git worktree add ../wt/issue-<N> agent/issue-<N>`.
-   Set the issue to `state:changes-requested`.
+   Set the issue to `state:changes-requested`, remove `state:in-review`.
 3. Fix each point with a focused commit. Re-run the `GATES.md` gates, fail-fast;
    never push red.
 4. Push — the existing PR updates (never open a second). Reply to each review
    comment with the commit SHA that resolves it.
-5. Set the issue back to `state:in-review` and stop for re-review.
+5. Set the issue back to `state:in-review`, remove `state:changes-requested`,
+   and stop for re-review.
 
 ## Hard rules
 

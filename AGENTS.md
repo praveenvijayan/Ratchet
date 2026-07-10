@@ -145,8 +145,9 @@ dispatched onto *this* issue is covered; stumbling across some other agent's
 in-flight issue is still foreign, dispatch or no dispatch.
 
 `--ff-only` discipline still applies whenever you integrate `main`; never branch
-from another agent's branch. Then set label `state:in-progress` and self-assign.
-Labels never claim anything; they report — the ref is the claim.
+from another agent's branch. Then set label `state:in-progress`, remove
+`state:ready`, and self-assign. Labels never claim anything; they report — the
+ref is the claim.
 
 **Pick → claim → build is one continuous motion.** Having picked an issue,
 proceed through claim and build without pausing to ask for confirmation — the
@@ -214,7 +215,8 @@ After push, the `pr-gates` workflow backstops the handoff on every
 Push, then open a PR whose **first line is `Closes #<N>`**, followed by a summary
 and the gate checklist with real results. If an open PR already exists for
 `agent/issue-<N>`, update it — never open a second. Set the issue to
-`state:in-review`. Then **full stop**: no polling, no self-review, no nudging.
+`state:in-review`, remove `state:in-progress`. Then **full stop**: no polling,
+no self-review, no nudging.
 
 > You never merge, never approve, never close issues, never push to `main`.
 > The PR is your terminal action.
@@ -238,10 +240,11 @@ step 2 first: rework directed at you by the human (or a watcher event for your
 PR) is an explicit handoff, so if `.ratchet-owner` isn't yours, overwrite it
 with your OWNER_ID; without such a handoff, another agent's in-review work is
 foreign — leave it alone. Set the issue to
-`state:changes-requested`, fix each point with a focused commit, re-run the
-gates, push (the PR updates automatically — never open a second), and reply to
-each comment with the commit SHA that resolves it. Set the issue back to
-`state:in-review`. New scope discovered in review does **not** expand this PR —
+`state:changes-requested`, remove `state:in-review`, fix each point with a
+focused commit, re-run the gates, push (the PR updates automatically — never
+open a second), and reply to each comment with the commit SHA that resolves it.
+Set the issue back to `state:in-review`, remove `state:changes-requested`. New
+scope discovered in review does **not** expand this PR —
 it becomes a new `plan/*.md` file. Fix what's wrong; queue what's new.
 
 ### 7. System closes the loop (no agent involved)
