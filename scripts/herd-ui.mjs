@@ -19,6 +19,7 @@ import { realpathSync } from "node:fs";
 
 import { readState, STATE_FILE, EVENTS_FILE, ESCALATIONS_FILE } from "./herd-survey.mjs";
 import { DEFAULTS, loadConfig, HerdConfigError } from "./herd.mjs";
+import { defaultAvatarFor } from "./herd-avatars.mjs";
 
 export const DEFAULT_PORT = 4780;
 
@@ -141,10 +142,19 @@ export function buildWorkers({ state, events, config, now = Date.now(), repoSlug
     const claimStartTs = latestClaimTs(events, issue);
     const claimAgeSeconds =
       claimStartTs !== null ? Math.max(0, Math.floor((now - Date.parse(claimStartTs)) / 1000)) : null;
+    // Avatar the browser should try first: the adapter's own `avatar` when it
+    // declared a non-empty one, else null so the row shows its bundled default.
+    // The default is deterministic per adapter name (same mascot every restart)
+    // and always a valid data URI, so it doubles as the load-failure fallback.
+    const adapterCfg = config.adapters ? config.adapters[e.adapter] : undefined;
+    const avatar =
+      adapterCfg && typeof adapterCfg.avatar === "string" && adapterCfg.avatar !== "" ? adapterCfg.avatar : null;
     rows.push({
       issue,
       status: e.status ?? "unknown",
       adapter: e.adapter ?? null,
+      avatar,
+      defaultAvatar: defaultAvatarFor(e.adapter ?? null),
       pid: e.pid ?? null,
       attempts: e.attempts ?? 0,
       reworkCap: config.reworkCap,
@@ -386,7 +396,7 @@ export async function run(argv, { log = console.log, cwd = process.cwd() } = {})
 // snapshot, subscribes to the live stream, renders escalations above the worker
 // list, and streams one selected worker's log. Ages tick locally from
 // claimStartTs so the server pushes only on real change.
-const PAGE_HTML = `<!doctype html>
+export const PAGE_HTML = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -418,6 +428,10 @@ const PAGE_HTML = `<!doctype html>
   .gauge.warn { color:var(--warn); }
   .gauge.over { color:var(--over); font-weight:600; }
   .status { font-variant:small-caps; }
+  .adapter { display:inline-flex; align-items:center; gap:8px; }
+  /* Fixed dimension so a large source image can never break the row layout;
+     object-fit crops rather than stretches, and the shape stays a 20px circle. */
+  img.avatar { width:20px; height:20px; flex:none; border-radius:50%; object-fit:cover; background:var(--line); }
   a { color:var(--accent); }
   .logpane { margin-top:18px; }
   .logpane h2 { font-size:14px; margin:0 0 6px; }
@@ -443,6 +457,23 @@ const PAGE_HTML = `<!doctype html>
   let selected = null, logSource = null, snapshot = { workers: [], escalations: [], hint: null };
 
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
+
+  // Swap a worker's avatar to its bundled default when the adapter's own image
+  // fails to load (missing file, bad URL), so the row shows a mascot rather than
+  // a broken-image icon. onerror is cleared first: the default is an inline data
+  // URI that always loads, so this fires at most once and never loops.
+  window.avatarFallback = function (img) {
+    img.onerror = null;
+    img.src = img.dataset.default;
+  };
+  // The image the browser tries first (adapter avatar, else the bundled
+  // default), with the always-loadable default parked in data-default as the
+  // fallback target. Rendered at a fixed size by CSS.
+  function avatarImg(w) {
+    const src = w.avatar || w.defaultAvatar;
+    return '<img class="avatar" alt="" src="' + esc(src) + '" data-default="' + esc(w.defaultAvatar) +
+      '" onerror="avatarFallback(this)">';
+  }
 
   function ageText(w) {
     if (w.claimStartTs == null) return "—";
@@ -478,7 +509,7 @@ const PAGE_HTML = `<!doctype html>
       return '<tr class="worker' + (w.issue === selected ? " sel" : "") + '" data-issue="' + w.issue + '">' +
         "<td>#" + esc(w.issue) + "</td>" +
         '<td class="status">' + esc(w.status) + "</td>" +
-        "<td>" + esc(w.adapter || "—") + "</td>" +
+        '<td><span class="adapter">' + avatarImg(w) + "<span>" + esc(w.adapter || "—") + "</span></span></td>" +
         "<td>" + attemptsText(w) + "</td>" +
         "<td>" + ageText(w) + "</td>" +
         "<td>" + pr + "</td></tr>";
