@@ -103,6 +103,7 @@
     { "path": "scripts/pr-size-check.test.mjs", "class": "excluded" },
     { "path": "scripts/ratchet-init-skill.test.mjs", "class": "excluded" },
     { "path": "scripts/ratchet-metrics.test.mjs", "class": "excluded" },
+    { "path": "scripts/ratchet-uninstall.test.mjs", "class": "excluded" },
     { "path": "scripts/ratchet-update.test.mjs", "class": "excluded" },
     { "path": "scripts/release.test.mjs", "class": "excluded" },
     { "path": "scripts/review-verdict.test.mjs", "class": "excluded" },

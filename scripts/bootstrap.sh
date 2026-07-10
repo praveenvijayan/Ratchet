@@ -25,6 +25,18 @@ esac; done
 
 die(){ echo "bootstrap: $*" >&2; exit 1; }
 
+# Portable content hash (file or directory) so the uninstaller can later tell
+# whether a host has locally modified an installed framework file.
+SHACMD=(sha256sum); command -v sha256sum >/dev/null 2>&1 || SHACMD=(shasum -a 256)
+hash_path() {
+  local p="$1"
+  if [ -d "$p" ]; then
+    ( cd "$p" && find . -type f -print0 | sort -z | xargs -0 "${SHACMD[@]}" ) | "${SHACMD[@]}" | awk '{print $1}'
+  else
+    "${SHACMD[@]}" "$p" | awk '{print $1}'
+  fi
+}
+
 # AC: must be inside a git repo — checked BEFORE downloading anything.
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
   || die "not a git repository — run bootstrap from inside your project's git repo. Nothing was downloaded."
@@ -102,11 +114,13 @@ if [ "${#CONFLICTS[@]}" -gt 0 ] && [ "$FORCE" -ne 1 ]; then
   die "no files were changed."
 fi
 
+HASHFILE="$TMP/hashes.tsv"; : > "$HASHFILE"
 for rel in "${INSTALL[@]:-}"; do
   [ -n "$rel" ] || continue
   mkdir -p "$(dirname "$rel")"
   rm -rf "$rel"
   cp -R "$SRC/$rel" "$rel"
+  printf '%s\t%s\n' "$rel" "$(hash_path "$rel")" >> "$HASHFILE"
   echo "  installed: $rel"
 done
 
@@ -288,7 +302,9 @@ SCAFFOLD_ENV
   esac
 done <<< "$GEN_LIST"
 
-# Record the version and an installation manifest of every path we wrote.
+# Record the version and an installation manifest of every path we wrote, plus
+# a content hash per installed framework path — the uninstaller uses it to
+# detect local edits before removing a file.
 VER="$REF"
 if [[ "$REF" =~ ^v?([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then VER="${BASH_REMATCH[1]}"; fi
 printf '%s\n' "$VER" > .ratchet-version
@@ -296,12 +312,18 @@ node -e '
   const fs = require("fs");
   const args = process.argv.slice(1);
   const sep = args.indexOf("--");
-  const [ver, prof] = args;
+  const [ver, prof, hashFile] = args;
   const profiles = ["core", ...prof.split(",").map((s) => s.trim()).filter(Boolean)].filter((v, i, a) => a.indexOf(v) === i);
-  const installed = sep === -1 ? args.slice(2) : args.slice(2, sep);
+  const installed = sep === -1 ? args.slice(3) : args.slice(3, sep);
   const generated = sep === -1 ? [] : args.slice(sep + 1);
-  fs.writeFileSync(".ratchet-install.json", JSON.stringify({ version: ver, profiles, installed, generated }, null, 2) + "\n");
-' "$VER" "$PROFILES" "${INSTALL[@]:-}" -- "${GEN_SCAFFOLDED[@]:-}"
+  const hashes = {};
+  for (const line of fs.readFileSync(hashFile, "utf8").split("\n")) {
+    if (!line.trim()) continue;
+    const [p, h] = line.split("\t");
+    hashes[p] = h;
+  }
+  fs.writeFileSync(".ratchet-install.json", JSON.stringify({ version: ver, profiles, installed, generated, hashes }, null, 2) + "\n");
+' "$VER" "$PROFILES" "$HASHFILE" "${INSTALL[@]:-}" -- "${GEN_SCAFFOLDED[@]:-}"
 
 echo
 echo "bootstrap: Ratchet $VER installed (profiles: ${PROFILES}). Recorded in .ratchet-install.json."
