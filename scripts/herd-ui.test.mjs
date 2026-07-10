@@ -23,6 +23,9 @@ import {
   prUrl,
   resolveRepoSlug,
   buildWorkers,
+  lifecycleGroup,
+  LIFECYCLE_GROUPS,
+  groupWorkers,
   createTitleCache,
   readSnapshot,
   snapshotKey,
@@ -689,4 +692,150 @@ await inTempDir(async (dir) => {
   for (let n = 1; n <= criteriaCount; n++) assert.ok(unique.has(n), `#171 criterion ${n} has a test`);
 }
 
-console.log("PASS herd-ui.test.mjs (22 criteria)");
+// --- #179 Criterion 1: rows render in labelled groups ordered live,
+// awaiting-review, escalated, terminal, with issue-number order within each
+// group. -----------------------------------------------------------------------
+{
+  assert.deepEqual(
+    LIFECYCLE_GROUPS.map((g) => g.key),
+    ["live", "awaiting-review", "escalated", "terminal", "other"],
+    "groups are ordered live → awaiting-review → escalated → terminal → other (catch-all last)",
+  );
+  assert.equal(lifecycleGroup("working"), "live");
+  assert.equal(lifecycleGroup("in-review"), "awaiting-review");
+  assert.equal(lifecycleGroup("dispatch-failed"), "escalated");
+  assert.equal(lifecycleGroup("dead"), "terminal");
+}
+await inTempDir(async (dir) => {
+  const statePath = join(dir, "s.json");
+  const eventsPath = join(dir, "e.jsonl");
+  const escalationsPath = join(dir, "esc.md");
+  // Issue numbers deliberately interleaved across groups to prove per-group order.
+  writeFileSync(statePath, JSON.stringify({
+    30: { adapter: "claude", pid: 1, attempts: 0, status: "working", pr: null },
+    10: { adapter: "codex", pid: 2, attempts: 0, status: "dispatched", pr: null },
+    25: { adapter: "claude", pid: 3, attempts: 1, status: "in-review", pr: 5 },
+    5: { adapter: "codex", pid: 4, attempts: 1, status: "ready-for-review", pr: 6 },
+    40: { adapter: "claude", pid: null, attempts: 2, status: "dispatch-failed", pr: null },
+    15: { adapter: "codex", pid: null, attempts: 0, status: "dead", pr: null },
+  }));
+  writeFileSync(eventsPath, "");
+  writeFileSync(escalationsPath, "");
+
+  const snap = readSnapshot({ statePath, eventsPath, escalationsPath, config: CONFIG, now: NOW });
+  const groups = groupWorkers(snap.workers);
+  assert.deepEqual(groups.map((g) => g.key), ["live", "awaiting-review", "escalated", "terminal"], "non-empty groups render in lifecycle order");
+  assert.deepEqual(groups.find((g) => g.key === "live").rows.map((r) => r.issue), [10, 30], "live rows are in issue-number order within the group");
+  assert.deepEqual(groups.find((g) => g.key === "awaiting-review").rows.map((r) => r.issue), [5, 25], "awaiting-review rows are in issue-number order within the group");
+
+  await withServer({ statePath, eventsPath, escalationsPath }, async (base) => {
+    const page = (await fetchText(`${base}/`)).body;
+    assert.match(page, /class="lifecycle-group"/, "rows render inside labelled lifecycle-group sections");
+    assert.match(page, /class="group-head"/, "each group carries a label header");
+    assert.match(
+      page,
+      /\["live", ?"Live"\], ?\["awaiting-review", ?"Awaiting review"\], ?\["escalated", ?"Escalated"\], ?\["terminal", ?"Terminal"\], ?\["other", ?"Other"\]/,
+      "the client renders the groups in the fixed lifecycle order",
+    );
+  });
+});
+
+// --- #179 Criterion 2: a row moves between groups live when its status changes,
+// without a page reload. -------------------------------------------------------
+await inTempDir(async (dir) => {
+  const statePath = join(dir, "s.json");
+  const eventsPath = join(dir, "e.jsonl");
+  const escalationsPath = join(dir, "esc.md");
+  writeFileSync(eventsPath, "");
+  writeFileSync(escalationsPath, "");
+  const live = { 7: { adapter: "claude", pid: 1, attempts: 0, status: "working", pr: null } };
+  const done = { 7: { adapter: "claude", pid: null, attempts: 0, status: "dead", pr: null } };
+
+  writeFileSync(statePath, JSON.stringify(live));
+  const before = readSnapshot({ statePath, eventsPath, escalationsPath, config: CONFIG, now: NOW });
+  assert.equal(before.workers[0].group, "live", "the row starts in the live group");
+  writeFileSync(statePath, JSON.stringify(done));
+  const after = readSnapshot({ statePath, eventsPath, escalationsPath, config: CONFIG, now: NOW });
+  assert.equal(after.workers[0].group, "terminal", "the row's group follows its status");
+  assert.notEqual(snapshotKey(before), snapshotKey(after), "a group change alters the stream key, so the live stream re-pushes it");
+
+  // Over SSE: mutate the status after the first frame and confirm a second frame
+  // arrives with the row regrouped — a live move, no page reload.
+  writeFileSync(statePath, JSON.stringify(live));
+  await withServer({ statePath, eventsPath, escalationsPath }, async (base) => {
+    let mutated = false;
+    const frames = await sseCollect(`${base}/api/stream`, (fr) => {
+      if (fr.length === 1 && !mutated) { mutated = true; writeFileSync(statePath, JSON.stringify(done)); return false; }
+      return fr.length >= 2;
+    });
+    assert.equal(frames[0].data.workers[0].group, "live", "the first pushed frame has the row live");
+    assert.equal(frames[frames.length - 1].data.workers[0].group, "terminal", "a later pushed frame moved the row to terminal without a reload");
+  });
+});
+
+// --- #179 Criterion 3: an empty group renders nothing — no empty header taking
+// space. -----------------------------------------------------------------------
+{
+  const groups = groupWorkers([
+    { issue: 1, group: "live" },
+    { issue: 2, group: "live" },
+  ]);
+  assert.deepEqual(groups.map((g) => g.key), ["live"], "only the non-empty group is returned — no awaiting-review/escalated/terminal headers");
+}
+await inTempDir(async (dir) => {
+  const statePath = join(dir, "s.json");
+  const eventsPath = join(dir, "e.jsonl");
+  const escalationsPath = join(dir, "esc.md");
+  writeFileSync(statePath, JSON.stringify({ 3: { adapter: "claude", pid: 1, attempts: 0, status: "working", pr: null } }));
+  writeFileSync(eventsPath, "");
+  writeFileSync(escalationsPath, "");
+  await withServer({ statePath, eventsPath, escalationsPath }, async (base) => {
+    const page = (await fetchText(`${base}/`)).body;
+    // The served page ships an empty #workers container — groups are created only
+    // when rows exist, so an empty group has no static header reserving space.
+    assert.match(page, /<div id="workers"><\/div>/, "no group sections are pre-rendered; empty groups occupy no space");
+    assert.match(page, /if \(!rows \|\| !rows\.length\) continue/, "the renderer skips a group with no rows");
+  });
+});
+
+// --- #179 Criterion 4: a status that maps to no known group falls into a
+// visible catch-all group, never disappearing from the table. ------------------
+await inTempDir(async (dir) => {
+  const statePath = join(dir, "s.json");
+  const eventsPath = join(dir, "e.jsonl");
+  const escalationsPath = join(dir, "esc.md");
+
+  assert.equal(lifecycleGroup("some-brand-new-status"), "other", "an unmapped status maps to the catch-all group");
+  const grouped = groupWorkers([{ issue: 9, group: lifecycleGroup("wat") }]);
+  assert.deepEqual(grouped.map((g) => g.key), ["other"], "an unknown-status row appears in the Other group");
+  assert.equal(grouped[0].rows[0].issue, 9, "the unknown-status row is not dropped");
+  // Even a group key outside LIFECYCLE_GROUPS keeps its row (drift guard).
+  const drift = groupWorkers([{ issue: 3, group: "nonexistent-group" }]);
+  assert.ok(drift.some((g) => g.rows.some((r) => r.issue === 3)), "a group key outside the known set still keeps its row visible");
+
+  writeFileSync(statePath, JSON.stringify({ 9: { adapter: "claude", pid: 1, attempts: 0, status: "totally-new-status", pr: null } }));
+  writeFileSync(eventsPath, "");
+  writeFileSync(escalationsPath, "");
+  const snap = readSnapshot({ statePath, eventsPath, escalationsPath, config: CONFIG, now: NOW });
+  assert.equal(snap.workers[0].group, "other", "readSnapshot tags an unmapped status as the catch-all group");
+});
+
+// --- #179 Criterion 5: every criterion above has exactly one test named after
+// it. --------------------------------------------------------------------------
+{
+  const selfPath = fileURLToPath(import.meta.url);
+  const selfText = readFileSync(selfPath, "utf8");
+  const planPath = join(dirname(selfPath), "..", "plan", "0089-herd-dashboard-row-grouping.md");
+  const planText = readFileSync(planPath, "utf8");
+
+  const criteriaSection = /##\s+Acceptance criteria\s*([\s\S]*?)(?:\n##\s|$)/.exec(planText)[1];
+  const criteriaCount = (criteriaSection.match(/^-\s*\[[ x]\]/gim) || []).length;
+
+  const markers = [...selfText.matchAll(/^\/\/ --- #179 Criterion (\d+):/gim)].map((m) => Number(m[1]));
+  const unique = new Set(markers);
+  assert.equal(markers.length, unique.size, "each #179 criterion is tested exactly once (no duplicate markers)");
+  assert.equal(markers.length, criteriaCount, `one test per #179 acceptance criterion (${criteriaCount})`);
+  for (let n = 1; n <= criteriaCount; n++) assert.ok(unique.has(n), `#179 criterion ${n} has a test`);
+}
+
+console.log("PASS herd-ui.test.mjs (27 criteria)");
