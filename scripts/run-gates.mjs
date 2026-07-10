@@ -10,7 +10,10 @@
 //     rows), preserving order.
 //   - Runs each gate's command in order, stopping at the FIRST failure.
 //   - A gate whose command starts with `TODO:` has no command yet: it is
-//     SKIPPED with a visible notice and never counted as passed.
+//     SKIPPED with a visible notice and never counted as passed. When EVERY gate
+//     is a TODO (or no gates exist at all), the run is vacuous — zero real gates
+//     executed — and the process exits non-zero so the check is red in the PR
+//     checks list, distinguishable from a run that verified real gates (#89).
 //   - A `|` inside a command runs as part of the command, not as a column
 //     break, as long as it sits inside backticks (`npm test | tee log`) or is
 //     escaped (`\|`). A row the parser cannot split unambiguously (unbalanced
@@ -76,10 +79,10 @@ try {
 
 if (gates.length === 0) {
   const msg = `No gate rows found in ${CONFIG_FILE}. Nothing to verify — add a gates table with at least one row.`;
-  notice(msg);
-  summary(`### Gates\n\n${msg}`);
-  console.log(msg);
-  process.exit(0);
+  errorAnnot(msg);
+  summary(`### Gates\n\n❌ ${msg}`);
+  console.error(msg);
+  process.exit(1);
 }
 
 summary(`### Gates (${CONFIG_FILE})\n`);
@@ -138,8 +141,11 @@ const done = run > 0
   ? `${run} gate(s) passed, ${skipped} skipped.`
   : `No runnable gates — ${skipped} skipped, 0 run.`;
 if (run === 0) {
-  warning(`${done} This green check is vacuous: GATES.md only contains TODO rows, so no real verification ran.`);
-  summary("\n⚠️ **Green but vacuous:** every gate row is `TODO`, so this run verified no real commands.");
+  const msg = `${done} This check is vacuous: GATES.md only contains TODO rows, so no real verification ran.`;
+  errorAnnot(msg);
+  summary("\n❌ **Vacuous run:** every gate row is `TODO`, so this run verified no real commands. The check is red to make that glanceable in the PR checks list without opening the run.");
+  console.error(`\n${msg}`);
 }
 summary(`\n${done}`);
 console.log(`\n${done}`);
+process.exit(run > 0 ? 0 : 1);
