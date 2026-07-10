@@ -26,6 +26,13 @@ export const EVENTS_FILE = ".ratchet/events.jsonl";
 // map; the deterministic form of "spread work across adapters" that avoids
 // Math.random, so a supervisor's dispatch order is reproducible offline.
 export const ROUTING_FILE = ".ratchet/herd-routing.json";
+// Status of the survey's stale-claim sentinel: a bookkeeping entry
+// (pid/adapter/pr null) that records a stale claim ref already escalated so it
+// is escalated exactly once. It is NOT a worker. Exported as the single source
+// of the string so the monitor (herd-monitor.mjs) recognises and skips it rather
+// than mis-classifying the pid-null entry as a dead worker — the two scripts
+// share one constant instead of each hard-coding "stale-claim" and drifting.
+export const STALE_CLAIM_STATUS = "stale-claim";
 export const HERD_EVENT_TYPES = Object.freeze([
   "dispatch",
   "resume",
@@ -437,10 +444,10 @@ export async function pollOnce({
     const openPrHeads = new Set(reality.openPrs.map((p) => p.headRefName));
     const stale = new Set(findStaleClaims(claimIssues, state, openPrHeads, isAlive));
     for (const [issue, entry] of Object.entries(state)) {
-      if (entry.status === "stale-claim" && !stale.has(Number(issue))) delete state[issue];
+      if (entry.status === STALE_CLAIM_STATUS && !stale.has(Number(issue))) delete state[issue];
     }
     for (const issue of stale) {
-      if (state[String(issue)]?.status === "stale-claim") continue; // already escalated once
+      if (state[String(issue)]?.status === STALE_CLAIM_STATUS) continue; // already escalated once
       const del = deleteRefCommand(issue);
       appendEscalation(escalationsPath, {
         now: stamp,
@@ -451,7 +458,7 @@ export async function pollOnce({
         logFile: null,
         action: `run \`${del}\` to delete the stale claim ref, then re-queue the issue if its work is unfinished`,
       });
-      state[String(issue)] = { adapter: null, pid: null, logFile: null, attempts: 0, status: "stale-claim", pr: null };
+      state[String(issue)] = { adapter: null, pid: null, logFile: null, attempts: 0, status: STALE_CLAIM_STATUS, pr: null };
       staleEscalated += 1;
     }
   }
