@@ -24,9 +24,19 @@ const agents = read("AGENTS.md");
 }
 
 // #60 AC2: DOCS.md inventories all workflows and every shipped script.
+// The workflow check is scoped to the §6 workflow table (the inventory section)
+// rather than the whole file, so a workflow mentioned only in prose or the
+// layout listing does not satisfy the inventory — it must appear as a row in
+// the table. The table uses bare names (without .yml), matching the `name:`
+// field in each workflow YAML.
 {
   const workflows = readdirSync(`${root}.github/workflows`).filter((f) => f.endsWith(".yml")).sort();
-  for (const workflow of workflows) assert.ok(docs.includes(workflow), `DOCS must list workflow ${workflow}`);
+  const wfSection = docs.slice(docs.indexOf("## 6. Workflows"), docs.indexOf("### Security: the unattended runner"));
+  assert.ok(wfSection.length > 0, "DOCS must have a §6 Workflows section to slice");
+  for (const f of workflows) {
+    const wfName = f.replace(/\.yml$/, "");
+    assert.ok(wfSection.includes(`| \`${wfName}\` |`), `DOCS §6 workflow table must list ${wfName}`);
+  }
 
   const scripts = readdirSync(`${root}scripts`).filter((f) => !f.startsWith(".")).sort();
   for (const script of scripts) assert.ok(docs.includes(script), `DOCS must list script ${script}`);
@@ -118,4 +128,41 @@ const agents = read("AGENTS.md");
   for (let n = 1; n <= CRITERIA_COUNT; n++) assert.ok(unique.has(n), `#191 criterion ${n} has a test`);
 }
 
-console.log("PASS docs-refresh.test.mjs (6 #60 criteria + 4 #191 criteria)");
+// --- #91 AC1: REWORK_GRACE_HOURS is documented alongside STALE_HOURS where the
+// sweep is described (the §6 workflow table entry for sweep-stale-claims) ---
+{
+  const wfSection = docs.slice(docs.indexOf("## 6. Workflows"), docs.indexOf("### Security: the unattended runner"));
+  assert.ok(wfSection.includes("STALE_HOURS"), "the sweep-stale-claims table entry must name STALE_HOURS");
+  assert.ok(wfSection.includes("REWORK_GRACE_HOURS"), "the sweep-stale-claims table entry must name REWORK_GRACE_HOURS");
+}
+
+// --- #91 AC2: the §6 workflow table lists all workflows, and the test checks
+// the inventory section (the table), not the whole file — verified by the #60
+// AC2 test above which slices the section. Here we assert every workflow YAML
+// in .github/workflows appears as a table row (| `name` |) in the section ---
+{
+  const wfSection = docs.slice(docs.indexOf("## 6. Workflows"), docs.indexOf("### Security: the unattended runner"));
+  const workflows = readdirSync(`${root}.github/workflows`).filter((f) => f.endsWith(".yml")).sort();
+  for (const f of workflows) {
+    const wfName = f.replace(/\.yml$/, "");
+    assert.ok(wfSection.includes(`| \`${wfName}\` |`), `the §6 table must have a row for ${wfName}`);
+  }
+}
+
+// --- #91 AC3: plan/README.md describes the abort-on-invalid-frontmatter
+// semantics — the sync aborts with nothing changed, not "skips" a file ---
+{
+  assert.match(planReadme, /sync aborts|aborts/, "plan README must say the sync aborts on invalid frontmatter");
+  assert.ok(!/the file is skipped and logged/.test(planReadme), "plan README must not say the file is 'skipped and logged'");
+  assert.match(planReadme, /changing nothing|nothing was changed|no file is partially synced/, "plan README must state nothing is partially synced");
+}
+
+// --- #91 AC4: the release documentation states a first release seeds its
+// version from .ratchet-version ---
+{
+  const wfSection = docs.slice(docs.indexOf("## 6. Workflows"), docs.indexOf("### Security: the unattended runner"));
+  assert.ok(/first release.*\.ratchet-version|\.ratchet-version.*first release/i.test(wfSection), "the release table row must state a first release seeds from .ratchet-version");
+  assert.ok(/first release/i.test(wfSection), "the release table row must mention 'first release'");
+}
+
+console.log("PASS docs-refresh.test.mjs (6 #60 criteria + 4 #191 criteria + 4 #91 criteria)");
