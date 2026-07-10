@@ -69,9 +69,11 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 | 4z1   | test: state-label-exclusivity   | `node scripts/state-label-exclusivity.test.mjs`   | exit 0 |
 | 4z2   | test: state-instructions-symmetry | `node scripts/state-instructions-symmetry.test.mjs` | exit 0 |
 | 4z3   | test: version-consistency       | `node scripts/version-consistency.test.mjs`       | exit 0 |
+| 4z5   | test: manifest-check            | `node scripts/manifest-check.test.mjs`            | exit 0 |
 | 4r    | test-coverage                   | `node scripts/gates-coverage.mjs`                 | exit 0 |
 | 4z    | skill-parity                    | `node scripts/skill-parity.mjs`                   | exit 0 |
 | 4z4   | version-consistency             | `node scripts/version-consistency.mjs`            | exit 0 |
+| 4z6   | manifest-check                  | `node scripts/manifest-check.mjs`                 | exit 0 |
 | 5     | build       | TODO: build command               | —              |
 | 6     | audit       | TODO: audit command               | —              |
 | 7     | secret-scan | TODO: secret-scan command         | —              |
@@ -90,7 +92,7 @@ the numbers here; they default to the manual's ~400 changed lines / ~6 files.
 
 - max_changed_lines: 400
 - max_changed_files: 6
-- exclude_paths: [package-lock.json, pnpm-lock.yaml, yarn.lock, Cargo.lock, poetry.lock, go.sum]
+- exclude_paths: [package-lock.json, pnpm-lock.yaml, yarn.lock, Cargo.lock, poetry.lock, go.sum, ratchet-manifest.json]
 
 `exclude_paths` accepts comma-separated path patterns. The lockfiles above are
 excluded by default even if this line is omitted; add generated artifacts here
