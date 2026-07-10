@@ -32,8 +32,14 @@ async function check({ gates = "", baseGates, additions, deletions, changedFiles
   const idx = n++;
   const gatesFile = join(dir, `GATES-${idx}.md`);
   await writeFile(gatesFile, gates);
+  // Strip real-CI credentials so fetchPrFiles() never sees them: inside the
+  // pr-gates job these are already set in the job environment, and without
+  // this the subprocess inherits them via `...process.env` and silently
+  // fetches the real, currently-open PR's files instead of using the
+  // fixture's synthetic aggregates/PR_FILES_JSON.
+  const { GITHUB_TOKEN: _t, GITHUB_REPOSITORY: _r, PR_NUMBER: _n, ...restEnv } = process.env;
   const env = {
-    ...process.env,
+    ...restEnv,
     GATES_FILE: gatesFile,
   };
   if (baseGates !== undefined) {
