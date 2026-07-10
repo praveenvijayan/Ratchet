@@ -28,7 +28,7 @@ let n = 0;
 // is the raw GATES.md body (may omit the size config to exercise defaults).
 // `baseGates`, when given, is written to a separate file and passed as
 // BASE_GATES_FILE — the base-branch config the check must judge by (#84).
-async function check({ gates = "", baseGates, additions, deletions, changedFiles, files }) {
+async function check({ gates = "", baseGates, additions, deletions, changedFiles, files, filesRaw }) {
   const idx = n++;
   const gatesFile = join(dir, `GATES-${idx}.md`);
   await writeFile(gatesFile, gates);
@@ -41,12 +41,20 @@ async function check({ gates = "", baseGates, additions, deletions, changedFiles
     await writeFile(baseFile, baseGates);
     env.BASE_GATES_FILE = baseFile;
   }
-  if (files) {
+  const setAggregates = () => {
+    if (additions !== undefined) env.PR_ADDITIONS = String(additions);
+    if (deletions !== undefined) env.PR_DELETIONS = String(deletions);
+    if (changedFiles !== undefined) env.PR_CHANGED_FILES = String(changedFiles);
+  };
+  if (filesRaw !== undefined) {
+    // A raw, unparseable file listing — simulates a transient failure to read
+    // the per-file details, with the payload aggregates still present in env.
+    env.PR_FILES_JSON = filesRaw;
+    setAggregates();
+  } else if (files) {
     env.PR_FILES_JSON = JSON.stringify(files);
   } else {
-    env.PR_ADDITIONS = String(additions);
-    env.PR_DELETIONS = String(deletions);
-    env.PR_CHANGED_FILES = String(changedFiles);
+    setAggregates();
   }
   const res = spawnSync("node", [SCRIPT], {
     encoding: "utf8",
@@ -257,4 +265,28 @@ const withLimitsAndExcludes = (lines, files, excludes) =>
   }
 }
 
-console.log("PASS pr-size-check.test.mjs (38 assertions)");
+// --- #90 AC1: a transient file-listing failure falls back to the event
+// payload's aggregate counts, and the output states exclusions were not applied.
+{
+  const res = await check({
+    gates: withLimits(400, 6),
+    filesRaw: "{ not valid json —", // per-file listing unreadable (a GitHub hiccup)
+    additions: 200,
+    deletions: 100,
+    changedFiles: 5,
+  });
+  assert.equal(res.code, 0, `a legitimate PR must not red-gate when file details are unavailable but aggregates are, got:\n${res.out}`);
+  assert.ok(res.out.includes("300"), `the fallback must count the aggregate 300 changed lines, got:\n${res.out}`);
+  assert.ok(/exclusion/i.test(res.out) && /not applied/i.test(res.out), `output must state that exclusions were not applied, got:\n${res.out}`);
+}
+
+// --- #90 AC2: GATES.md documents the exclude-pattern matching rules, including
+// that * does not cross directory separators and bare filenames match at any depth.
+{
+  const gates = readFileSync(new URL("../GATES.md", import.meta.url), "utf8");
+  const sizeSection = gates.slice(gates.indexOf("## PR size limit"));
+  assert.ok(/cross/i.test(sizeSection) && /segment|separator/i.test(sizeSection), "GATES.md must document that * does not cross directory separators");
+  assert.ok(/at any depth/i.test(sizeSection), "GATES.md must document that a bare filename matches at any depth");
+}
+
+console.log("PASS pr-size-check.test.mjs (43 assertions)");

@@ -236,11 +236,25 @@ try {
     };
   }
 } catch (e) {
-  const msg = `PR size check could not read PR file details: ${e.message}`;
-  errorAnnot(msg);
-  summary(`### PR size\n\n❌ ${msg}`);
-  console.error(msg);
-  process.exit(1);
+  // A transient failure reading the per-file listing (a GitHub API hiccup) must
+  // not red-gate a legitimate PR: the pull_request event payload's aggregate
+  // counts are wired into env as the designed fallback. Degrade to those
+  // aggregates — path exclusions can't be applied without the file list, and
+  // the output says so — and only hard-fail (Hard Rule 8) when neither the file
+  // details nor the aggregate counts are usable.
+  if (additions !== null && deletions !== null && changedFiles !== null) {
+    const msg = `PR size check could not read PR file details (${e.message}); falling back to the event payload's aggregate counts. Path exclusions were not applied.`;
+    console.log(`::warning::${msg}`);
+    summary(`### PR size\n\n> ⚠️ ${msg}\n`);
+    console.warn(msg);
+    size = { changedLines: additions + deletions, changedFiles, excluded: [], usedFileDetails: false };
+  } else {
+    const msg = `PR size check could not read PR file details and no aggregate counts were available to fall back on: ${e.message}`;
+    errorAnnot(msg);
+    summary(`### PR size\n\n❌ ${msg}`);
+    console.error(msg);
+    process.exit(1);
+  }
 }
 
 if (!size) {
