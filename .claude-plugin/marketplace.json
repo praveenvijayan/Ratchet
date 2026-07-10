@@ -11,7 +11,7 @@
     {
       "name": "ratchet",
       "source": "./plugin",
-      "description": "ratchet-plan, ratchet-sync, ratchet-init skills + the AGENTS.md continuous-delivery loop."
+      "description": "Ratchet — forward-only GitHub-native delivery loop: the full set of skills for the AGENTS.md operating manual, from planning through review and fleet supervision."
     }
   ]
 }
