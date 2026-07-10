@@ -14,6 +14,7 @@ const docs = read("DOCS.md");
 const readme = read("README.md");
 const planReadme = read("plan/README.md");
 const agents = read("AGENTS.md");
+const memory = read("memory/MEMORY.md");
 
 // #60 AC1: DOCS.md's sweep section describes the renewable lease, heartbeat
 // marker, and all three swept states, matching the code.
@@ -165,4 +166,52 @@ const agents = read("AGENTS.md");
   assert.ok(/first release/i.test(wfSection), "the release table row must mention 'first release'");
 }
 
-console.log("PASS docs-refresh.test.mjs (6 #60 criteria + 4 #191 criteria + 4 #91 criteria)");
+// --- #233 Criterion 1: AGENTS.md contains no RTK/headroom instruction block
+// and no directive requiring shell commands to be prefixed with rtk. ---
+
+{
+  assert.doesNotMatch(agents, /headroom:rtk-instructions/, "AGENTS.md must not contain the headroom RTK block");
+  assert.doesNotMatch(agents, /RTK \(Rust Token Killer\)/, "AGENTS.md must not contain the RTK guidance heading");
+  assert.doesNotMatch(
+    agents,
+    /(?:always\s+)?prefix(?:\s+\w+){0,8}\s+with\s+`rtk`/i,
+    "AGENTS.md must not require shell commands to be prefixed with rtk",
+  );
+}
+
+// --- #233 Criterion 2: memory/MEMORY.md contains the relocated RTK guidance,
+// including command examples and rules, without loss of content. ---
+
+{
+  const required = [
+    "RTK (Rust Token Killer)",
+    "always prefix with `rtk`",
+    "60-90%",
+    "rtk git status",
+    "rtk read <file>",
+    "rtk pytest tests/",
+    "rtk tsc",
+    "rtk gh pr view <n>",
+    "rtk docker ps",
+    "rtk pip list",
+    "In command chains, prefix each segment",
+    "For debugging, use raw commands without the `rtk` prefix",
+    "`rtk proxy <cmd>` runs a command without filtering but tracks usage",
+  ];
+  for (const text of required) {
+    assert.ok(memory.includes(text), `memory/MEMORY.md must preserve RTK guidance: ${text}`);
+  }
+}
+
+// --- #233 Criterion 3: every criterion above has exactly one test named after
+// it. ---
+
+{
+  const self = read("scripts/docs-refresh.test.mjs");
+  for (const n of [1, 2, 3]) {
+    const hits = (self.match(new RegExp(`#233 Criterion ${n}:`, "g")) || []).length;
+    assert.equal(hits, 1, `#233 Criterion ${n} must have exactly one named test`);
+  }
+}
+
+console.log("PASS docs-refresh.test.mjs (6 #60 criteria + 4 #191 criteria + 4 #91 criteria + 3 #233 criteria)");
