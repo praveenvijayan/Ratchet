@@ -20,9 +20,19 @@ import {
   readEvents,
   parseEscalations,
   latestClaimTs,
+  timelineEvents,
+  isUsageBearing,
+  latestUsage,
+  fleetUsage,
   prUrl,
   resolveRepoSlug,
   buildWorkers,
+  aggregateChecks,
+  createChecksCache,
+  latestHeartbeatTs,
+  heartbeatThresholdSeconds,
+  HEARTBEAT_SILENCE_FACTOR,
+  heartbeatStatus,
   lifecycleGroup,
   LIFECYCLE_GROUPS,
   groupWorkers,
@@ -35,6 +45,7 @@ import {
   parsePort,
   run,
 } from "./herd-ui.mjs";
+import { pollOnce } from "./herd-survey.mjs";
 
 const CONFIG = { reworkCap: 2, claimTimeoutSeconds: 300 };
 const NOW = Date.UTC(2026, 6, 9, 12, 0, 0); // fixed clock for deterministic ages
@@ -838,4 +849,623 @@ await inTempDir(async (dir) => {
   for (let n = 1; n <= criteriaCount; n++) assert.ok(unique.has(n), `#179 criterion ${n} has a test`);
 }
 
-console.log("PASS herd-ui.test.mjs (27 criteria)");
+// --- #182 Criterion 1: selecting an issue shows its events in chronological
+// order with timestamp, event type, and the adapter/attempt/PR fields each
+// event carries. -------------------------------------------------------------
+await inTempDir(async (dir) => {
+  const statePath = join(dir, "state.json");
+  const eventsPath = join(dir, "events.jsonl");
+  const escPath = join(dir, "none.md");
+  writeFileSync(statePath, JSON.stringify({ 5: { adapter: "codex", pid: 222, attempts: 2, status: "in-review", pr: 42, logFile: "l5.log" } }));
+  writeFileSync(eventsPath, [
+    JSON.stringify({ ts: "2026-07-09T12:05:00Z", event: "dispatch", issue: 5, adapter: "codex", pid: 222, attempts: 1 }),
+    JSON.stringify({ ts: "2026-07-09T12:00:00Z", event: "claim-detected", issue: 5, adapter: "codex", pid: 222 }),
+    JSON.stringify({ ts: "2026-07-09T12:10:00Z", event: "pr-opened", issue: 5, pr: 42 }),
+    JSON.stringify({ ts: "2026-07-09T11:00:00Z", event: "dispatch", issue: 7, adapter: "claude", pid: 111, attempts: 1 }),
+  ].join("\n") + "\n");
+  writeFileSync(escPath, "");
+
+  // Pure derivation: filter + chronological sort, only this issue's events
+  const events = readEvents(eventsPath);
+  const tl = timelineEvents(events, 5);
+  assert.equal(tl.length, 3, "only issue #5 events, not #7");
+  assert.deepEqual(tl.map((e) => e.ts), ["2026-07-09T12:00:00Z", "2026-07-09T12:05:00Z", "2026-07-09T12:10:00Z"], "events in chronological order by ts");
+  assert.equal(tl[0].event, "claim-detected", "first event is claim-detected (earliest ts)");
+  assert.equal(tl[2].event, "pr-opened", "last event is pr-opened");
+  assert.equal(tl[0].adapter, "codex", "event carries the adapter field");
+  assert.equal(tl[2].pr, 42, "event carries the PR field");
+
+  // Over HTTP: the timeline endpoint sends the events
+  await withServer({ statePath, eventsPath, escalationsPath: escPath }, async (base) => {
+    const frames = await sseCollect(
+      `${base}/api/timeline?issue=5`,
+      (frames) => frames.some((f) => f.event === "timeline"),
+    );
+    const timeline = frames.flatMap((f) => f.event === "timeline" ? f.data : []);
+    assert.equal(timeline.length, 3, "all events sent over HTTP");
+    assert.deepEqual(timeline.map((e) => e.ts), ["2026-07-09T12:00:00Z", "2026-07-09T12:05:00Z", "2026-07-09T12:10:00Z"], "chronological over HTTP");
+    assert.equal(timeline[0].event, "claim-detected", "event type present");
+    assert.equal(timeline[0].adapter, "codex", "adapter field present in the payload");
+    assert.equal(timeline[2].pr, 42, "PR field present in the payload");
+  });
+
+  // The page renders the timeline
+  await withServer({}, async (base) => {
+    const page = await fetchText(`${base}/`);
+    assert.match(page.body, /id="timeline"/, "the page has a timeline element");
+    assert.match(page.body, /function renderTimeline/, "the page has a renderTimeline function");
+    assert.match(page.body, /No activity recorded/, "the page has the empty-state message");
+    assert.match(page.body, /\/api\/timeline/, "the page subscribes to the timeline endpoint");
+  });
+});
+
+// --- #182 Criterion 2: new events for the selected issue append to the
+// timeline live without a page reload. ---------------------------------------
+await inTempDir(async (dir) => {
+  const statePath = join(dir, "state.json");
+  const eventsPath = join(dir, "events.jsonl");
+  const escPath = join(dir, "none.md");
+  writeFileSync(statePath, JSON.stringify({ 5: { adapter: "codex", pid: 222, attempts: 1, status: "dispatched", pr: null, logFile: "l5.log" } }));
+  writeFileSync(eventsPath, JSON.stringify({ ts: "2026-07-09T12:00:00Z", event: "dispatch", issue: 5, adapter: "codex", pid: 222, attempts: 1 }) + "\n");
+  writeFileSync(escPath, "");
+
+  await withServer({ statePath, eventsPath, escalationsPath: escPath }, async (base) => {
+    const streamDone = sseCollect(
+      `${base}/api/timeline?issue=5`,
+      (frames) => frames.filter((f) => f.event === "timeline").flatMap((f) => f.data).length >= 2,
+    );
+    // After the initial frame, append a new event
+    setTimeout(() => appendFileSync(eventsPath, JSON.stringify({ ts: "2026-07-09T12:10:00Z", event: "pr-opened", issue: 5, pr: 42 }) + "\n"), 120);
+    const frames = await streamDone;
+    const allEvents = frames.filter((f) => f.event === "timeline").flatMap((f) => f.data);
+    assert.equal(allEvents.length, 2, "the new event appended live without a reload");
+    assert.equal(allEvents[1].event, "pr-opened", "the appended event is the new one");
+    assert.equal(allEvents[1].pr, 42, "the appended event carries its PR field");
+  });
+});
+
+// --- #182 Criterion 3: an issue with no events shows a one-line "no activity
+// recorded" message, never an empty pane or an error. -----------------------
+await inTempDir(async (dir) => {
+  const statePath = join(dir, "state.json");
+  const eventsPath = join(dir, "events.jsonl");
+  const escPath = join(dir, "none.md");
+  // Issue 9 is in state but has no events in the stream
+  writeFileSync(statePath, JSON.stringify({ 9: { adapter: "claude", pid: 111, attempts: 1, status: "dispatched", pr: null, logFile: "l9.log" } }));
+  writeFileSync(eventsPath, JSON.stringify({ ts: "2026-07-09T12:00:00Z", event: "dispatch", issue: 5, adapter: "codex", pid: 222, attempts: 1 }) + "\n");
+  writeFileSync(escPath, "");
+
+  // Pure derivation: no events for issue 9
+  const tl = timelineEvents(readEvents(eventsPath), 9);
+  assert.equal(tl.length, 0, "no events for issue 9");
+
+  // Over HTTP: the endpoint sends an empty initial frame (no crash, no error)
+  await withServer({ statePath, eventsPath, escalationsPath: escPath }, async (base) => {
+    const { status, json } = await fetchJson(`${base}/api/snapshot`);
+    assert.equal(status, 200, "the dashboard still works");
+    assert.ok(json.workers.find((w) => w.issue === 9), "issue 9 is in the snapshot");
+
+    // Collect SSE frames for a short time — no timeline frames should arrive
+    // (no events for issue 9), but the connection stays open without erroring.
+    const noFrames = await new Promise((resolve) => {
+      const frames = [];
+      const req = httpGet(`${base}/api/timeline?issue=9`, (res) => {
+        let buf = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => {
+          buf += chunk;
+          let i;
+          while ((i = buf.indexOf("\n\n")) >= 0) {
+            const block = buf.slice(0, i);
+            buf = buf.slice(i + 2);
+            const ev = /^event:\s*(.*)$/m.exec(block);
+            const da = /^data:\s*(.*)$/m.exec(block);
+            if (da) frames.push({ event: ev ? ev[1] : "message", data: da[1] });
+          }
+        });
+      });
+      const timer = setTimeout(() => { req.destroy(); resolve(frames); }, 300);
+      req.on("error", () => { clearTimeout(timer); resolve(frames); });
+    });
+    assert.equal(noFrames.length, 0, "no frames sent — no events, no error, no crash");
+
+    // The page has the empty-state message
+    const page = await fetchText(`${base}/`);
+    assert.match(page.body, /No activity recorded/, "the page shows a one-line message for no events");
+  });
+});
+
+// --- #182 Criterion 4: a malformed event line in the stream is skipped with
+// the remaining timeline still rendering. ------------------------------------
+await inTempDir(async (dir) => {
+  const statePath = join(dir, "state.json");
+  const eventsPath = join(dir, "events.jsonl");
+  const escPath = join(dir, "none.md");
+  writeFileSync(statePath, JSON.stringify({ 5: { adapter: "codex", pid: 222, attempts: 1, status: "dispatched", pr: null, logFile: "l5.log" } }));
+  // Two valid events for issue 5, with a malformed line between them
+  writeFileSync(eventsPath, [
+    JSON.stringify({ ts: "2026-07-09T12:00:00Z", event: "dispatch", issue: 5, adapter: "codex", pid: 222, attempts: 1 }),
+    "THIS IS NOT JSON",
+    JSON.stringify({ ts: "2026-07-09T12:10:00Z", event: "pr-opened", issue: 5, pr: 42 }),
+    "",
+  ].join("\n"));
+  writeFileSync(escPath, "");
+
+  // readEvents already skips the malformed line
+  const events = readEvents(eventsPath);
+  assert.equal(events.length, 2, "malformed line skipped by readEvents");
+
+  // timelineEvents still returns the two valid events in order
+  const tl = timelineEvents(events, 5);
+  assert.equal(tl.length, 2, "timeline renders the remaining valid events");
+  assert.equal(tl[0].event, "dispatch", "first valid event present");
+  assert.equal(tl[1].event, "pr-opened", "second valid event present");
+
+  // Over HTTP: the timeline endpoint sends only the two valid events
+  await withServer({ statePath, eventsPath, escalationsPath: escPath }, async (base) => {
+    const frames = await sseCollect(
+      `${base}/api/timeline?issue=5`,
+      (frames) => frames.some((f) => f.event === "timeline"),
+    );
+    const allEvents = frames.filter((f) => f.event === "timeline").flatMap((f) => f.data);
+    assert.equal(allEvents.length, 2, "malformed line skipped over HTTP, remaining events render");
+    assert.deepEqual(allEvents.map((e) => e.event), ["dispatch", "pr-opened"], "valid events in chronological order");
+  });
+});
+
+// --- #164 Criterion 1: each worker row shows its costUsd, tokensIn, and
+// tokensOut from the latest usage-bearing event for that issue. ----------------
+{
+  // Pure derivation: the newest usage-bearing event wins over an older one, and
+  // a non-usage event (dispatch) never shadows the usage reading.
+  assert.equal(isUsageBearing({ event: "dispatch", issue: 1 }), false, "an event with no usage field is not usage-bearing");
+  assert.equal(isUsageBearing({ event: "worker-exit", issue: 1, costUsd: 0.5 }), true, "an event carrying a usage field is usage-bearing");
+  const events = [
+    { ts: "2026-07-09T12:00:00.000Z", event: "dispatch", issue: 7 },
+    { ts: "2026-07-09T12:01:00.000Z", event: "worker-exit", issue: 7, costUsd: 0.1, tokensIn: 100, tokensOut: 50 },
+    { ts: "2026-07-09T12:05:00.000Z", event: "worker-exit", issue: 7, costUsd: 0.42, tokensIn: 900, tokensOut: 300 },
+    { ts: "2026-07-09T12:03:00.000Z", event: "worker-exit", issue: 8, costUsd: 9.9, tokensIn: 1, tokensOut: 2 },
+  ];
+  assert.deepEqual(latestUsage(events, 7), { costUsd: 0.42, tokensIn: 900, tokensOut: 300 }, "the most recent usage-bearing event's numbers win");
+  assert.equal(latestUsage(events, 999), null, "an issue with no usage-bearing event yields null");
+}
+await inTempDir(async (dir) => {
+  const statePath = join(dir, "s.json");
+  const eventsPath = join(dir, "e.jsonl");
+  const escalationsPath = join(dir, "esc.md");
+  writeFileSync(statePath, JSON.stringify({ 7: { adapter: "claude", pid: 1, attempts: 0, status: "working", pr: null } }));
+  writeFileSync(eventsPath,
+    JSON.stringify({ ts: "2026-07-09T12:01:00.000Z", event: "worker-exit", issue: 7, costUsd: 0.1, tokensIn: 100, tokensOut: 50 }) + "\n" +
+    JSON.stringify({ ts: "2026-07-09T12:05:00.000Z", event: "worker-exit", issue: 7, costUsd: 0.42, tokensIn: 900, tokensOut: 300 }) + "\n");
+  writeFileSync(escalationsPath, "");
+  const snap = readSnapshot({ statePath, eventsPath, escalationsPath, config: CONFIG, now: NOW });
+  const row = snap.workers.find((w) => w.issue === 7);
+  assert.equal(row.costUsd, 0.42, "the row carries the latest event's cost");
+  assert.equal(row.tokensIn, 900, "the row carries the latest event's tokensIn");
+  assert.equal(row.tokensOut, 300, "the row carries the latest event's tokensOut");
+  await withServer({ statePath, eventsPath, escalationsPath }, async (base) => {
+    const page = (await fetchText(`${base}/`)).body;
+    assert.match(page, /<th>Cost<\/th><th>Tokens in<\/th><th>Tokens out<\/th>/, "the table header carries the three usage columns");
+    assert.match(page, /usdCell\(w\.costUsd\)/, "the row renders the cost cell from the row's costUsd");
+    assert.match(page, /tokCell\(w\.tokensIn\)/, "the row renders the tokens-in cell from the row's tokensIn");
+    assert.match(page, /tokCell\(w\.tokensOut\)/, "the row renders the tokens-out cell from the row's tokensOut");
+  });
+});
+
+// --- #164 Criterion 2: a header line shows the fleet totals — summed cost and
+// summed tokens across all workers with usage data. ----------------------------
+{
+  const totals = fleetUsage([
+    { costUsd: 0.5, tokensIn: 100, tokensOut: 40 },
+    { costUsd: 1.25, tokensIn: 900, tokensOut: 60 },
+    { costUsd: null, tokensIn: null, tokensOut: null }, // a worker with no usage adds nothing
+  ]);
+  assert.deepEqual(totals, { costUsd: 1.75, tokensIn: 1000, tokensOut: 100 }, "totals sum only finite values across workers");
+  assert.deepEqual(fleetUsage([{ costUsd: null, tokensIn: null, tokensOut: null }]), { costUsd: null, tokensIn: null, tokensOut: null }, "no usage anywhere leaves every total null (renders as —, not 0)");
+}
+await inTempDir(async (dir) => {
+  const statePath = join(dir, "s.json");
+  const eventsPath = join(dir, "e.jsonl");
+  const escalationsPath = join(dir, "esc.md");
+  writeFileSync(statePath, JSON.stringify({
+    7: { adapter: "claude", pid: null, attempts: 0, status: "dead", pr: null },
+    8: { adapter: "codex", pid: null, attempts: 0, status: "dead", pr: null },
+  }));
+  writeFileSync(eventsPath,
+    JSON.stringify({ ts: "2026-07-09T12:05:00.000Z", event: "worker-exit", issue: 7, costUsd: 0.5, tokensIn: 100, tokensOut: 40 }) + "\n" +
+    JSON.stringify({ ts: "2026-07-09T12:06:00.000Z", event: "worker-exit", issue: 8, costUsd: 1.25, tokensIn: 900, tokensOut: 60 }) + "\n");
+  writeFileSync(escalationsPath, "");
+  const snap = readSnapshot({ statePath, eventsPath, escalationsPath, config: CONFIG, now: NOW });
+  assert.deepEqual(snap.totals, { costUsd: 1.75, tokensIn: 1000, tokensOut: 100 }, "the snapshot carries the fleet totals for the header");
+  await withServer({ statePath, eventsPath, escalationsPath }, async (base) => {
+    const page = (await fetchText(`${base}/`)).body;
+    assert.match(page, /id="fleettotals"/, "the header carries a fleet-totals element");
+    assert.match(page, /"Fleet: " \+ usdText\(t\.costUsd\) \+ " · " \+ tokText\(t\.tokensIn\) \+ " in · " \+ tokText\(t\.tokensOut\) \+ " out"/, "the header line sums cost and tokens from snapshot.totals");
+  });
+});
+
+// --- #164 Criterion 3: a worker whose events carry no usage renders a —
+// placeholder in each usage cell, never a blank, NaN, or undefined. ------------
+{
+  // A declared-but-unreadable usage (keys present, valued null) is usage-bearing
+  // but every field normalises to null, so each cell still shows a placeholder.
+  const unreadable = latestUsage([{ ts: "2026-07-09T12:05:00.000Z", event: "worker-exit", issue: 3, costUsd: null, tokensIn: null, tokensOut: null }], 3);
+  assert.deepEqual(unreadable, { costUsd: null, tokensIn: null, tokensOut: null }, "an unreadable-usage event yields all-null, never NaN/undefined");
+}
+await inTempDir(async (dir) => {
+  const statePath = join(dir, "s.json");
+  const eventsPath = join(dir, "e.jsonl");
+  const escalationsPath = join(dir, "esc.md");
+  // Issue 5 has no usage event at all; issue 6 has an unreadable (null) usage.
+  writeFileSync(statePath, JSON.stringify({
+    5: { adapter: "plain", pid: null, attempts: 0, status: "dead", pr: null },
+    6: { adapter: "claude", pid: null, attempts: 0, status: "dead", pr: null },
+  }));
+  writeFileSync(eventsPath,
+    JSON.stringify({ ts: "2026-07-09T12:04:00.000Z", event: "worker-exit", issue: 6, costUsd: null, tokensIn: null, tokensOut: null }) + "\n");
+  writeFileSync(escalationsPath, "");
+  const snap = readSnapshot({ statePath, eventsPath, escalationsPath, config: CONFIG, now: NOW });
+  for (const issue of [5, 6]) {
+    const row = snap.workers.find((w) => w.issue === issue);
+    for (const f of ["costUsd", "tokensIn", "tokensOut"]) {
+      assert.equal(row[f], null, `issue #${issue} ${f} is null (rendered as a placeholder), never NaN/undefined`);
+      assert.ok(!Number.isNaN(row[f]), `issue #${issue} ${f} is not NaN`);
+    }
+  }
+  assert.deepEqual(snap.totals, { costUsd: null, tokensIn: null, tokensOut: null }, "no finite usage anywhere leaves totals null, so the header hides");
+  await withServer({ statePath, eventsPath, escalationsPath }, async (base) => {
+    const page = (await fetchText(`${base}/`)).body;
+    // The cell formatters fall back to the muted em-dash span for a null value.
+    assert.match(page, /usdCell = \(n\) => isNum\(n\) \? usdText\(n\) : '<span class="empty">—<\/span>'/, "a null cost cell renders the — placeholder span, never blank");
+    assert.match(page, /tokCell = \(n\) => isNum\(n\) \? tokText\(n\) : '<span class="empty">—<\/span>'/, "a null token cell renders the — placeholder span, never blank");
+    assert.match(page, /const isNum = \(n\) => typeof n === "number" && isFinite\(n\)/, "cells guard on a finite number, so NaN/undefined never reach the DOM");
+  });
+});
+
+// --- #164 Criterion 4: usage figures update live from new events without a
+// manual page reload, consistent with the rest of the dashboard. ---------------
+await inTempDir(async (dir) => {
+  const statePath = join(dir, "s.json");
+  const eventsPath = join(dir, "e.jsonl");
+  const escalationsPath = join(dir, "esc.md");
+  writeFileSync(statePath, JSON.stringify({ 7: { adapter: "claude", pid: 1, attempts: 0, status: "working", pr: null } }));
+  writeFileSync(eventsPath, "");
+  writeFileSync(escalationsPath, "");
+
+  // A new usage event changes the clock-independent stream key, so the live
+  // stream re-pushes — the mechanism by which the page updates without a reload.
+  const before = readSnapshot({ statePath, eventsPath, escalationsPath, config: CONFIG, now: NOW });
+  assert.equal(before.workers[0].costUsd, null, "the row starts with no usage");
+  appendFileSync(eventsPath, JSON.stringify({ ts: "2026-07-09T12:07:00.000Z", event: "worker-exit", issue: 7, costUsd: 0.9, tokensIn: 500, tokensOut: 200 }) + "\n");
+  const after = readSnapshot({ statePath, eventsPath, escalationsPath, config: CONFIG, now: NOW });
+  assert.equal(after.workers[0].costUsd, 0.9, "the row picks up the new usage on the next snapshot");
+  assert.notEqual(snapshotKey(before), snapshotKey(after), "a new usage event alters the stream key, so the live stream re-pushes it");
+
+  // Over SSE: append a usage event after the first frame, confirm a later frame
+  // carries the usage without a reload.
+  writeFileSync(eventsPath, "");
+  await withServer({ statePath, eventsPath, escalationsPath }, async (base) => {
+    let appended = false;
+    const frames = await sseCollect(`${base}/api/stream`, (fr) => {
+      if (fr.length === 1 && !appended) {
+        appended = true;
+        appendFileSync(eventsPath, JSON.stringify({ ts: "2026-07-09T12:08:00.000Z", event: "worker-exit", issue: 7, costUsd: 0.9, tokensIn: 500, tokensOut: 200 }) + "\n");
+        return false;
+      }
+      return fr.length >= 2;
+    });
+    assert.equal(frames[0].data.workers[0].costUsd, null, "the first pushed frame has no usage");
+    const last = frames[frames.length - 1].data;
+    assert.equal(last.workers[0].costUsd, 0.9, "a later pushed frame carries the usage — no page reload");
+    assert.deepEqual(last.totals, { costUsd: 0.9, tokensIn: 500, tokensOut: 200 }, "the pushed frame's fleet totals reflect the new usage");
+  });
+});
+
+// --- #164 Criterion 5: every criterion above has exactly one test named after
+// it. --------------------------------------------------------------------------
+{
+  const selfPath = fileURLToPath(import.meta.url);
+  const selfText = readFileSync(selfPath, "utf8");
+  const planPath = join(dirname(selfPath), "..", "plan", "0076-herd-dashboard-usage-metrics.md");
+  const planText = readFileSync(planPath, "utf8");
+
+  const criteriaSection = /##\s+Acceptance criteria\s*([\s\S]*?)(?:\n##\s|$)/.exec(planText)[1];
+  const criteriaCount = (criteriaSection.match(/^-\s*\[[ x]\]/gim) || []).length;
+
+  const markers = [...selfText.matchAll(/^\/\/ --- #164 Criterion (\d+):/gim)].map((m) => Number(m[1]));
+  const unique = new Set(markers);
+  assert.equal(markers.length, unique.size, "each #164 criterion is tested exactly once (no duplicate markers)");
+  assert.equal(markers.length, criteriaCount, `one test per #164 acceptance criterion (${criteriaCount})`);
+  for (let n = 1; n <= criteriaCount; n++) assert.ok(unique.has(n), `#164 criterion ${n} has a test`);
+}
+
+// --- #176 Criterion 1: the supervisor appends a heartbeat event to the event
+// stream once per poll pass. ---------------------------------------------------
+await inTempDir(async (dir) => {
+  const eventsPath = join(dir, "ev.jsonl");
+  const statePath = join(dir, "s.json");
+  const escalationsPath = join(dir, "e.md");
+  const okGh = async () => []; // survey succeeds against an empty fleet
+  const beats = () => readEvents(eventsPath).filter((e) => e.event === "heartbeat");
+
+  await pollOnce({ gh: okGh, isAlive: () => false, now: NOW, statePath, escalationsPath, eventsPath, log: () => {} });
+  assert.equal(beats().length, 1, "one poll pass appends exactly one heartbeat");
+  const hb = beats()[0];
+  assert.equal(hb.ts, new Date(NOW).toISOString(), "the heartbeat carries the poll timestamp");
+  assert.equal("issue" in hb, false, "a fleet-wide heartbeat carries no issue field");
+
+  await pollOnce({ gh: okGh, isAlive: () => false, now: NOW + 1000, statePath, escalationsPath, eventsPath, log: () => {} });
+  assert.equal(beats().length, 2, "a second pass appends a second heartbeat — one per pass");
+
+  // Alive-but-degraded: a poll whose gh survey throws is still a live supervisor,
+  // so it must still prove life. The heartbeat lands before the survey runs.
+  const failGh = async () => { throw new Error("gh: not authenticated"); };
+  const r = await pollOnce({ gh: failGh, now: NOW + 2000, statePath, escalationsPath, eventsPath, log: () => {} });
+  assert.equal(r.ok, false, "a failed survey does not crash the poll");
+  assert.equal(beats().length, 3, "a poll whose survey fails still emits its heartbeat");
+});
+
+// --- #176 Criterion 2: the dashboard shows the time since the last heartbeat,
+// updating live without a page reload. -----------------------------------------
+await inTempDir(async (dir) => {
+  const eventsPath = join(dir, "ev.jsonl");
+  const statePath = join(dir, "s.json");
+  const escalationsPath = join(dir, "esc.md");
+  writeFileSync(statePath, JSON.stringify({}));
+  writeFileSync(escalationsPath, "");
+  const hbTs = new Date(NOW - 30_000).toISOString(); // 30s before the fixed clock
+  writeFileSync(eventsPath, JSON.stringify({ ts: hbTs, event: "heartbeat" }) + "\n");
+
+  const cfg = { ...CONFIG, pollSeconds: 60 };
+  const snap = readSnapshot({ statePath, eventsPath, escalationsPath, config: cfg, now: NOW });
+  assert.equal(snap.heartbeat.lastHeartbeatTs, hbTs, "the snapshot carries the last heartbeat timestamp");
+  assert.equal(snap.heartbeat.ageSeconds, 30, "and the elapsed time since it (30s)");
+
+  // The age advances by the clock alone — no new event — so the stream must not
+  // push a frame every second: the key ignores the ticking age, and the browser
+  // recomputes it on a local timer. That is "live without a page reload".
+  const later = readSnapshot({ statePath, eventsPath, escalationsPath, config: cfg, now: NOW + 5000 });
+  assert.equal(later.heartbeat.ageSeconds, 35, "the age advances with the clock");
+  assert.equal(snapshotKey(snap), snapshotKey(later), "a ticking age alone does not change the stream key");
+
+  await withServer({ statePath, eventsPath, escalationsPath, config: cfg, now: () => NOW }, async (base) => {
+    const page = (await fetchText(`${base}/`)).body;
+    assert.match(page, /setInterval\([\s\S]*?renderHeartbeat\(\)/, "a local timer re-renders the heartbeat age without a reload");
+    const { json } = await fetchJson(`${base}/api/snapshot`);
+    assert.equal(json.heartbeat.lastHeartbeatTs, hbTs, "the API exposes the last heartbeat for the browser to age locally");
+  });
+});
+
+// --- #176 Criterion 3: when the last heartbeat is older than a threshold
+// derived from the poll interval, the dashboard shows a prominent "supervisor
+// silent since Xm" banner. -----------------------------------------------------
+{
+  assert.equal(heartbeatThresholdSeconds(60), Math.round(60 * HEARTBEAT_SILENCE_FACTOR), "the threshold derives from the poll interval");
+  assert.ok(heartbeatThresholdSeconds(120) > heartbeatThresholdSeconds(60), "a longer poll interval tolerates longer silence");
+
+  const threshold = heartbeatThresholdSeconds(60);
+  const fresh = heartbeatStatus({ lastHeartbeatTs: new Date(NOW - (threshold - 5) * 1000).toISOString(), thresholdSeconds: threshold, now: NOW });
+  assert.equal(fresh.state, "live", "a heartbeat within the threshold reads as live");
+  const stale = heartbeatStatus({ lastHeartbeatTs: new Date(NOW - (threshold + 60) * 1000).toISOString(), thresholdSeconds: threshold, now: NOW });
+  assert.equal(stale.state, "silent", "a heartbeat past the threshold reads as silent");
+}
+await inTempDir(async (dir) => {
+  const eventsPath = join(dir, "ev.jsonl");
+  const statePath = join(dir, "s.json");
+  const escalationsPath = join(dir, "esc.md");
+  writeFileSync(statePath, JSON.stringify({}));
+  writeFileSync(escalationsPath, "");
+  const cfg = { ...CONFIG, pollSeconds: 60 };
+  const staleTs = new Date(NOW - (heartbeatThresholdSeconds(60) + 120) * 1000).toISOString();
+  writeFileSync(eventsPath, JSON.stringify({ ts: staleTs, event: "heartbeat" }) + "\n");
+
+  const snap = readSnapshot({ statePath, eventsPath, escalationsPath, config: cfg, now: NOW });
+  assert.equal(snap.heartbeat.state, "silent", "a stale heartbeat marks the supervisor silent in the snapshot");
+
+  await withServer({ statePath, eventsPath, escalationsPath, config: cfg, now: () => NOW }, async (base) => {
+    const page = (await fetchText(`${base}/`)).body;
+    assert.match(page, /id="hbbanner"/, "the page has a prominent heartbeat banner element");
+    assert.match(page, /Supervisor silent since/, "the banner announces the supervisor as silent since a duration");
+    assert.match(page, /\.hbbanner\.silent/, "the silent banner is styled prominently");
+  });
+});
+
+// --- #176 Criterion 4: with no heartbeat event in the stream at all, the
+// dashboard says the supervisor has not been seen, never an unlabelled green
+// "live" dot. -------------------------------------------------------------------
+await inTempDir(async (dir) => {
+  const eventsPath = join(dir, "ev.jsonl");
+  const statePath = join(dir, "s.json");
+  const escalationsPath = join(dir, "esc.md");
+  writeFileSync(statePath, JSON.stringify({}));
+  writeFileSync(escalationsPath, "");
+  // Events exist, but none is a heartbeat.
+  writeFileSync(eventsPath, JSON.stringify({ ts: new Date(NOW).toISOString(), event: "dispatch", issue: 5 }) + "\n");
+
+  assert.equal(latestHeartbeatTs(readEvents(eventsPath)), null, "a stream with no heartbeat has no last heartbeat");
+  const snap = readSnapshot({ statePath, eventsPath, escalationsPath, config: { ...CONFIG, pollSeconds: 60 }, now: NOW });
+  assert.equal(snap.heartbeat.lastHeartbeatTs, null, "the snapshot reports the supervisor as never seen");
+  assert.equal(snap.heartbeat.state, "unseen", "its state is unseen, not live");
+
+  await withServer({ statePath, eventsPath, escalationsPath, now: () => NOW }, async (base) => {
+    const page = (await fetchText(`${base}/`)).body;
+    const script = /<script>([\s\S]*?)<\/script>/.exec(page)[1];
+    const handler = /addEventListener\("snapshot"[\s\S]*?\}\);/.exec(script)[0];
+    assert.doesNotMatch(handler, /livedot[\s\S]*?add\("live"\)/, "the snapshot handler no longer force-lights the live dot");
+    assert.match(script, /has not been seen/, "the page labels an unseen supervisor");
+    assert.match(script, /supervisor not seen/, "the header text names the supervisor as not seen, never a bare green dot");
+  });
+});
+
+// --- #176 Criterion 5: every criterion above has exactly one test named after
+// it. --------------------------------------------------------------------------
+{
+  const selfPath = fileURLToPath(import.meta.url);
+  const selfText = readFileSync(selfPath, "utf8");
+  const planPath = join(dirname(selfPath), "..", "plan", "0086-herd-dashboard-heartbeat.md");
+  const planText = readFileSync(planPath, "utf8");
+
+  const criteriaSection = /##\s+Acceptance criteria\s*([\s\S]*?)(?:\n##\s|$)/.exec(planText)[1];
+  const criteriaCount = (criteriaSection.match(/^-\s*\[[ x]\]/gim) || []).length;
+
+  const markers = [...selfText.matchAll(/^\/\/ --- #176 Criterion (\d+):/gim)].map((m) => Number(m[1]));
+  const unique = new Set(markers);
+  assert.equal(markers.length, unique.size, "each #176 criterion is tested exactly once (no duplicate markers)");
+  assert.equal(markers.length, criteriaCount, `one test per #176 acceptance criterion (${criteriaCount})`);
+  for (let n = 1; n <= criteriaCount; n++) assert.ok(unique.has(n), `#176 criterion ${n} has a test`);
+}
+
+// --- #181 Criterion 1: a row with an open PR shows its combined checks status:
+// passing, failing, or pending. ----------------------------------------------
+await inTempDir(async (dir) => {
+  const statePath = join(dir, "state.json");
+  const eventsPath = join(dir, "events.jsonl");
+  const start = new Date(NOW - 90_000).toISOString();
+  writeFileSync(statePath, JSON.stringify({
+    5: { adapter: "codex", pid: 222, attempts: 2, status: "in-review", pr: 42, logFile: "l5.log" },
+    7: { adapter: "claude", pid: 111, attempts: 1, status: "dispatched", pr: null, logFile: "l7.log" },
+  }));
+  writeFileSync(eventsPath, JSON.stringify({ ts: start, event: "dispatch", issue: 5 }) + "\n");
+
+  // aggregateChecks: the pure derivation behind the combined status
+  assert.equal(aggregateChecks([{ name: "ci", state: "SUCCESS" }]).status, "passing", "all success -> passing");
+  assert.equal(aggregateChecks([{ name: "ci", state: "FAILURE" }]).status, "failing", "any failure -> failing");
+  assert.equal(aggregateChecks([{ name: "ci", state: "PENDING" }]).status, "pending", "pending -> pending");
+  assert.equal(aggregateChecks([]).status, "pending", "no checks yet -> pending");
+  assert.equal(aggregateChecks([{ name: "ci", state: "SUCCESS" }, { name: "lint", state: "FAILURE" }]).status, "failing", "mixed with a failure -> failing");
+  assert.equal(aggregateChecks([{ name: "ci", state: "SUCCESS" }, { name: "lint", state: "PENDING" }]).status, "pending", "success + pending -> pending");
+
+  // The snapshot attaches the checks status to the worker row with a PR
+  const cache = createChecksCache({ fetchChecks: () => ({ status: "passing" }) });
+  readSnapshot({ statePath, eventsPath, escalationsPath: join(dir, "none.md"), config: CONFIG, now: NOW, repoSlug: "praveenvijayan/Ratchet", checksCache: cache });
+  await new Promise((r) => setTimeout(r, 10));
+  const snap = readSnapshot({ statePath, eventsPath, escalationsPath: join(dir, "none.md"), config: CONFIG, now: NOW, repoSlug: "praveenvijayan/Ratchet", checksCache: cache });
+  const w5 = snap.workers.find((w) => w.issue === 5);
+  const w7 = snap.workers.find((w) => w.issue === 7);
+  assert.equal(w5.pr, 42, "row 5 has an open PR");
+  assert.equal(w5.checksStatus, "passing", "row with an open PR shows its combined checks status");
+  assert.ok(w5.checksFetchedAt != null, "the status carries a fetched-at timestamp");
+  assert.equal(w7.pr, null, "row 7 has no PR");
+  assert.equal(w7.checksStatus, undefined, "a row without a PR has no checks status");
+
+  // The page renders the checks status next to the PR link
+  await withServer({ statePath, eventsPath, escalationsPath: join(dir, "none.md"), repoSlug: "praveenvijayan/Ratchet", fetchChecks: () => ({ status: "passing" }) }, async (base) => {
+    const page = await fetchText(`${base}/`);
+    assert.match(page.body, /class="checks/, "the page has a checks status element");
+    assert.match(page.body, /function checksClass/, "the page has a checksClass function");
+  });
+});
+
+// --- #181 Criterion 2: the status refreshes periodically without a page reload;
+// the last-fetched time is visible. ------------------------------------------
+await inTempDir(async (dir) => {
+  const statePath = join(dir, "state.json");
+  const eventsPath = join(dir, "events.jsonl");
+  const start = new Date(NOW - 90_000).toISOString();
+  writeFileSync(statePath, JSON.stringify({
+    5: { adapter: "codex", pid: 222, attempts: 2, status: "in-review", pr: 42, logFile: "l5.log" },
+  }));
+  writeFileSync(eventsPath, JSON.stringify({ ts: start, event: "dispatch", issue: 5 }) + "\n");
+
+  const fetchLog = [];
+  let callCount = 0;
+  const cache = createChecksCache({
+    fetchChecks: (pr) => { callCount++; fetchLog.push(callCount); return { status: "passing" }; },
+    refreshMs: 20, // very short for the test
+  });
+
+  // First poll: triggers fetch #1
+  readSnapshot({ statePath, eventsPath, escalationsPath: join(dir, "none.md"), config: CONFIG, now: NOW, repoSlug: "praveenvijayan/Ratchet", checksCache: cache });
+  await new Promise((r) => setTimeout(r, 10));
+  // Second poll: fetch resolved, fetchAt is set
+  const snap1 = readSnapshot({ statePath, eventsPath, escalationsPath: join(dir, "none.md"), config: CONFIG, now: NOW, repoSlug: "praveenvijayan/Ratchet", checksCache: cache });
+  const w1 = snap1.workers.find((w) => w.issue === 5);
+  assert.ok(w1.checksFetchedAt != null, "the last-fetched time is visible on the row");
+  assert.equal(w1.checksStatus, "passing", "status is present");
+
+  // Wait beyond refreshMs, then poll again — should re-fetch
+  await new Promise((r) => setTimeout(r, 30));
+  readSnapshot({ statePath, eventsPath, escalationsPath: join(dir, "none.md"), config: CONFIG, now: NOW, repoSlug: "praveenvijayan/Ratchet", checksCache: cache });
+  await new Promise((r) => setTimeout(r, 10));
+  const snap2 = readSnapshot({ statePath, eventsPath, escalationsPath: join(dir, "none.md"), config: CONFIG, now: NOW, repoSlug: "praveenvijayan/Ratchet", checksCache: cache });
+  const w2 = snap2.workers.find((w) => w.issue === 5);
+  assert.ok(callCount >= 2, "the status refreshed (fetchChecks called again after refreshMs)");
+  assert.ok(w2.checksFetchedAt >= w1.checksFetchedAt, "the fetched-at time moved forward on refresh");
+
+  // The page renders the last-fetched time
+  await withServer({ statePath, eventsPath, escalationsPath: join(dir, "none.md"), repoSlug: "praveenvijayan/Ratchet", fetchChecks: () => ({ status: "passing" }), checksRefreshMs: 50 }, async (base) => {
+    const page = await fetchText(`${base}/`);
+    assert.match(page.body, /checksFetchedAt/, "the page reads checksFetchedAt from the snapshot");
+    assert.match(page.body, /function checksAgo/, "the page computes a human-readable time-ago from the fetched-at timestamp");
+  });
+});
+
+// --- #181 Criterion 3: a checks query failure shows an "unknown" state on the
+// row, never a stale "passing" presented as current or a broken row. ---------
+await inTempDir(async (dir) => {
+  const statePath = join(dir, "state.json");
+  const eventsPath = join(dir, "events.jsonl");
+  const start = new Date(NOW - 90_000).toISOString();
+  writeFileSync(statePath, JSON.stringify({
+    5: { adapter: "codex", pid: 222, attempts: 2, status: "in-review", pr: 42, logFile: "l5.log" },
+  }));
+  writeFileSync(eventsPath, JSON.stringify({ ts: start, event: "dispatch", issue: 5 }) + "\n");
+
+  // A fetcher that always fails (simulates gh missing or network error)
+  const cache = createChecksCache({ fetchChecks: () => { throw new Error("gh not found"); } });
+  readSnapshot({ statePath, eventsPath, escalationsPath: join(dir, "none.md"), config: CONFIG, now: NOW, repoSlug: "praveenvijayan/Ratchet", checksCache: cache });
+  await new Promise((r) => setTimeout(r, 10));
+  const snap = readSnapshot({ statePath, eventsPath, escalationsPath: join(dir, "none.md"), config: CONFIG, now: NOW, repoSlug: "praveenvijayan/Ratchet", checksCache: cache });
+  const w = snap.workers.find((w) => w.issue === 5);
+  assert.equal(w.checksStatus, "unknown", "a failed query shows 'unknown', never a stale 'passing'");
+  assert.ok(w.checksFetchedAt != null, "the failed attempt still carries a fetched-at time");
+
+  // The page renders "unknown" with the unknown class, never a broken row
+  await withServer({ statePath, eventsPath, escalationsPath: join(dir, "none.md"), repoSlug: "praveenvijayan/Ratchet", fetchChecks: () => { throw new Error("fail"); } }, async (base) => {
+    const page = await fetchText(`${base}/`);
+    assert.match(page.body, /checks\.unknown/, "the page styles unknown checks distinctly (not passing/failing/pending)");
+  });
+});
+
+// --- #181 Criterion 4: every criterion above has exactly one test named after
+// it. --------------------------------------------------------------------------
+{
+  const selfPath = fileURLToPath(import.meta.url);
+  const selfText = readFileSync(selfPath, "utf8");
+  const planDir = join(dirname(selfPath), "..", "plan");
+  const planPath = existsSync(join(planDir, "0091-herd-dashboard-pr-checks.md"))
+    ? join(planDir, "0091-herd-dashboard-pr-checks.md")
+    : join(planDir, "done", "0091-herd-dashboard-pr-checks.md");
+  const planText = readFileSync(planPath, "utf8");
+
+  const criteriaSection = /##\s+Acceptance criteria\s*([\s\S]*?)(?:\n##\s|$)/.exec(planText)[1];
+  const criteriaCount = (criteriaSection.match(/^-\s*\[[ x]\]/gim) || []).length;
+
+  const markers = [...selfText.matchAll(/^\/\/ --- #181 Criterion (\d+):/gim)].map((m) => Number(m[1]));
+  const unique = new Set(markers);
+  assert.equal(markers.length, unique.size, "each #181 criterion is tested exactly once (no duplicate markers)");
+  assert.equal(markers.length, criteriaCount, `one test per #181 acceptance criterion (${criteriaCount})`);
+  for (let n = 1; n <= criteriaCount; n++) assert.ok(unique.has(n), `#181 criterion ${n} has a test`);
+}
+
+
+// --- #182 Criterion 5: every criterion above has exactly one test named after
+// it. --------------------------------------------------------------------------
+{
+  const selfPath = fileURLToPath(import.meta.url);
+  const selfText = readFileSync(selfPath, "utf8");
+  const planDir = join(dirname(selfPath), "..", "plan");
+  const planPath = existsSync(join(planDir, "0092-herd-dashboard-activity-timeline.md"))
+    ? join(planDir, "0092-herd-dashboard-activity-timeline.md")
+    : join(planDir, "done", "0092-herd-dashboard-activity-timeline.md");
+  const planText = readFileSync(planPath, "utf8");
+  const criteriaSection = /##\s+Acceptance criteria\s*([\s\S]*?)(?:\n##\s|$)/.exec(planText)[1];
+  const criteriaCount = (criteriaSection.match(/^-\s*\[[ x]\]/gim) || []).length;
+  const markers = [...selfText.matchAll(/^\/\/ --- #182 Criterion (\d+):/gim)].map((m) => Number(m[1]));
+  const unique = new Set(markers);
+  assert.equal(markers.length, unique.size, "each #182 criterion is tested exactly once (no duplicate markers)");
+  assert.equal(markers.length, criteriaCount, `one test per #182 acceptance criterion (${criteriaCount})`);
+  for (let n = 1; n <= criteriaCount; n++) assert.ok(unique.has(n), `#182 criterion ${n} has a test`);
+}
+
+console.log("PASS herd-ui.test.mjs");

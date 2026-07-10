@@ -188,6 +188,114 @@ export function latestClaimTs(events, issue) {
   return ts;
 }
 
+// Filter events for one issue and sort them chronologically by ts. A missing
+// ts sorts first (never crashes on a partial event). Used by the /api/timeline
+// endpoint and directly testable.
+export function timelineEvents(events, issue) {
+  return (events || [])
+    .filter((e) => Number(e.issue) === Number(issue))
+    .sort((a, b) => String(a.ts || "").localeCompare(String(b.ts || "")));
+}
+
+// The usage fields a worker-exit event may carry (0075). Kept in sync with
+// herd.mjs's USAGE_FIELDS by shape, not import, so the dashboard stays a
+// read-only consumer of whatever the supervisor already wrote to the stream.
+const USAGE_KEYS = Object.freeze(["costUsd", "tokensIn", "tokensOut"]);
+
+// A finite number stays itself; anything else (null from an unreadable log, a
+// string, NaN, Infinity, undefined) normalises to null so no row or total ever
+// carries a NaN/undefined into the browser.
+function numOrNull(v) {
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+// True when an event carries any usage field at all — even valued null. A
+// declared-but-unreadable usage (log crashed/truncated) writes the keys as
+// null, and that exit is still the issue's most recent usage reading, so it
+// counts as usage-bearing rather than being skipped for an older event.
+export function isUsageBearing(e) {
+  return e != null && USAGE_KEYS.some((k) => k in e);
+}
+
+// The usage numbers from the most recent usage-bearing event for `issue`, or
+// null when no event for it carried usage (an adapter with no `usage` mapping,
+// or usage not yet emitted). Each returned field is a number or null; a field
+// absent from the winning event is normalised to null so every row exposes all
+// three keys. "Most recent" is the lexicographically-greatest ISO ts, matching
+// latestClaimTs — the stream's ts is always an ISO string.
+export function latestUsage(events, issue) {
+  let winner = null;
+  let winnerTs = null;
+  for (const e of events || []) {
+    if (Number(e.issue) !== Number(issue)) continue;
+    if (!isUsageBearing(e)) continue;
+    const ts = String(e.ts);
+    if (winnerTs === null || ts > winnerTs) {
+      winnerTs = ts;
+      winner = e;
+    }
+  }
+  if (winner === null) return null;
+  return {
+    costUsd: numOrNull(winner.costUsd),
+    tokensIn: numOrNull(winner.tokensIn),
+    tokensOut: numOrNull(winner.tokensOut),
+  };
+}
+
+// Fleet totals across worker rows: each field is the sum of its finite values,
+// or null when no worker contributed a finite number for it (so the header
+// renders a `—`, never 0, when nothing has usage). A null field on a row simply
+// does not add to that total — a worker without usage never drags a sum down.
+export function fleetUsage(workers) {
+  let costUsd = null;
+  let tokensIn = null;
+  let tokensOut = null;
+  const add = (acc, v) => (typeof v === "number" && Number.isFinite(v) ? (acc || 0) + v : acc);
+  for (const w of workers || []) {
+    costUsd = add(costUsd, w.costUsd);
+    tokensIn = add(tokensIn, w.tokensIn);
+    tokensOut = add(tokensOut, w.tokensOut);
+  }
+  return { costUsd, tokensIn, tokensOut };
+}
+
+// The timestamp of the newest heartbeat event, or null when the stream carries
+// none — the supervisor has never been seen. Heartbeats are fleet-wide and
+// carry no issue, so this scans only by event type.
+export function latestHeartbeatTs(events) {
+  let ts = null;
+  for (const e of events) {
+    if (e.event !== "heartbeat") continue;
+    if (ts === null || String(e.ts) > ts) ts = String(e.ts);
+  }
+  return ts;
+}
+
+// How long the dashboard tolerates silence before it alarms, derived from the
+// poll interval: a heartbeat lands every `pollSeconds`, so missing more than a
+// couple of polls means the supervisor has stopped. The factor gives one whole
+// missed poll of slack past that before the banner fires, so a single slow poll
+// never cries wolf.
+export const HEARTBEAT_SILENCE_FACTOR = 2.5;
+export function heartbeatThresholdSeconds(pollSeconds) {
+  const base = Number.isFinite(pollSeconds) && pollSeconds > 0 ? pollSeconds : DEFAULTS.pollSeconds;
+  return Math.max(1, Math.round(base * HEARTBEAT_SILENCE_FACTOR));
+}
+
+// Classify supervisor liveness from the last heartbeat: "unseen" when there is
+// none at all, "silent" when the newest is older than the threshold, "live"
+// otherwise. Pure and clock-injectable so the server, the API, and the browser
+// tick all reach the same verdict from the same inputs.
+export function heartbeatStatus({ lastHeartbeatTs, thresholdSeconds, now = Date.now() }) {
+  const parsed = lastHeartbeatTs ? Date.parse(lastHeartbeatTs) : NaN;
+  // No heartbeat, or one whose timestamp will not parse, is "never seen" — never
+  // silently reported as live with a nonsense age.
+  if (!Number.isFinite(parsed)) return { state: "unseen", ageSeconds: null };
+  const ageSeconds = Math.max(0, Math.floor((now - parsed) / 1000));
+  return { state: ageSeconds > thresholdSeconds ? "silent" : "live", ageSeconds };
+}
+
 // Build a clickable PR URL from an "owner/repo" slug, or null when the slug is
 // unknown (git remote absent) so the link simply does not render.
 export function prUrl(repoSlug, prNumber) {
@@ -271,6 +379,10 @@ export function buildWorkers({ state, events, config, now = Date.now(), repoSlug
       adapterCfg && typeof adapterCfg.avatar === "string" && adapterCfg.avatar !== "" ? adapterCfg.avatar : null;
     const status = e.status ?? "unknown";
     const claimActive = e.pid != null && !TERMINAL_STATUS.has(status);
+    // Usage from the issue's latest usage-bearing worker-exit event (0075), or
+    // all-null when it never carried usage. Each field is a number or null; the
+    // browser renders null as a `—` placeholder cell.
+    const usage = latestUsage(events, issue);
     rows.push({
       issue,
       status,
@@ -289,6 +401,9 @@ export function buildWorkers({ state, events, config, now = Date.now(), repoSlug
       prUrl: prUrl(repoSlug, e.pr ?? null),
       issueUrl: repoSlug ? `https://github.com/${repoSlug}/issues/${issue}` : null,
       logFile: e.logFile ?? null,
+      costUsd: usage ? usage.costUsd : null,
+      tokensIn: usage ? usage.tokensIn : null,
+      tokensOut: usage ? usage.tokensOut : null,
     });
   }
   rows.sort((a, b) => a.issue - b.issue);
@@ -319,9 +434,87 @@ export function groupWorkers(workers) {
   return out;
 }
 
-// --- issue titles -------------------------------------------------------------
+// --- PR checks ----------------------------------------------------------------
 
 const pexec = promisify(execFile);
+
+// Aggregate per-check states into a single combined status. The `gh pr checks
+// --json name,state` states are: SUCCESS, FAILURE, PENDING, SKIPPED, NEUTRAL,
+// etc. Any failure makes the row "failing"; all-clear makes it "passing"; any
+// pending (no failures) makes it "pending". An empty list means no checks
+// have run yet — "pending". Anything unrecognised is "unknown".
+export function aggregateChecks(checks) {
+  if (!Array.isArray(checks) || checks.length === 0) return { status: "pending" };
+  const states = checks.map((c) => String(c.state || "").toUpperCase());
+  if (states.some((s) => s === "FAILURE" || s === "ERROR" || s === "CANCELLED" || s === "TIMED_OUT"))
+    return { status: "failing" };
+  if (states.some((s) => s === "PENDING" || s === "QUEUED" || s === "IN_PROGRESS" || s === "WAITING"))
+    return { status: "pending" };
+  if (states.every((s) => s === "SUCCESS" || s === "NEUTRAL" || s === "SKIPPED" || s === ""))
+    return { status: "passing" };
+  return { status: "unknown" };
+}
+
+// Fetch a PR's combined checks status via `gh pr checks`. Returns
+// { status, fetchedAt } on success, or { status: "unknown", fetchedAt } on any
+// failure (gh missing, network error, 404). Never throws — a failed query
+// surfaces as "unknown", never a broken row.
+export async function defaultFetchChecks(pr, repoSlug) {
+  const args = repoSlug
+    ? ["pr", "checks", String(pr), "--repo", repoSlug, "--json", "name,state"]
+    : ["pr", "checks", String(pr), "--json", "name,state"];
+  try {
+    const { stdout } = await pexec("gh", args);
+    return aggregateChecks(JSON.parse(stdout));
+  } catch {
+    return { status: "unknown" };
+  }
+}
+
+// A per-server checks cache so `gh` is called at most once per refreshMs per PR
+// — not on every poll. `ensure` starts an async fetch if the PR is new or its
+// cached result is older than refreshMs (idempotent — a pending fetch is never
+// duplicated); `get` returns { status, fetchedAt } or undefined (not yet
+// resolved). The snapshot picks up the status on the next poll after the fetch
+// resolves, and the change-key pushes it to the browser via SSE.
+export function createChecksCache({ fetchChecks = defaultFetchChecks, refreshMs = 30_000 } = {}) {
+  const cache = new Map(); // pr number -> { status, fetchedAt, pending }
+
+  function doFetch(n, repoSlug) {
+    const existing = cache.get(n);
+    if (existing) existing.pending = true;
+    else cache.set(n, { status: "pending", fetchedAt: null, pending: true });
+    Promise.resolve()
+      .then(() => fetchChecks(n, repoSlug))
+      .then((result) => {
+        cache.set(n, { status: result.status || "unknown", fetchedAt: Date.now(), pending: false });
+      })
+      .catch(() => {
+        cache.set(n, { status: "unknown", fetchedAt: Date.now(), pending: false });
+      });
+  }
+
+  return {
+    ensure(pr, repoSlug) {
+      const n = Number(pr);
+      if (!n) return;
+      const entry = cache.get(n);
+      const now = Date.now();
+      if (!entry) {
+        doFetch(n, repoSlug);
+      } else if (!entry.pending && entry.fetchedAt != null && now - entry.fetchedAt > refreshMs) {
+        doFetch(n, repoSlug);
+      }
+    },
+    get(pr) {
+      const entry = cache.get(Number(pr));
+      if (!entry) return undefined;
+      return { status: entry.status, fetchedAt: entry.fetchedAt };
+    },
+  };
+}
+
+// --- issue titles -------------------------------------------------------------
 
 // Fetch a single issue's title and state from GitHub via `gh`. Returns an
 // object { title, state } where state is "OPEN" or "CLOSED"; both are null on
@@ -385,12 +578,15 @@ export function createTitleCache({ fetchTitle = defaultFetchTitle, log = () => {
 
 // The full dashboard payload. Never throws: every source is read tolerantly, so
 // missing state/events/escalations yield an empty snapshot carrying `hint`.
-// When a titleCache is provided, each worker row carries an issueTitle (the
-// cached title, or null while pending/failed) and the title fetch is triggered
-// at most once per issue. Escalations are deduplicated (same issue + same
-// reason → one block with an occurrence count), resolved (stale-claim with no
-// sentinel, PR-concluded with a closed issue → visually de-emphasised), and
-// capped (all unresolved plus at most MAX_RESOLVED_SHOWN recent resolved ones).
+// When a checksCache is provided, each worker row with an open PR carries its
+// combined checks status (passing/failing/pending/unknown) and the last-fetched
+// timestamp; the fetch is triggered at most once per refreshMs per PR. When a
+// titleCache is provided, each worker row carries an issueTitle (the cached
+// title, or null while pending/failed) and the title fetch is triggered at most
+// once per issue. Escalations are deduplicated (same issue + same reason → one
+// block with an occurrence count), resolved (stale-claim with no sentinel,
+// PR-concluded with a closed issue → visually de-emphasised), and capped (all
+// unresolved plus at most MAX_RESOLVED_SHOWN recent resolved ones).
 export function readSnapshot({
   statePath = STATE_FILE,
   eventsPath = EVENTS_FILE,
@@ -398,6 +594,7 @@ export function readSnapshot({
   config,
   now = Date.now(),
   repoSlug = null,
+  checksCache = null,
   titleCache = null,
 } = {}) {
   const state = readState(statePath);
@@ -405,6 +602,16 @@ export function readSnapshot({
   const rawEscalations = parseEscalations(escalationsPath);
   const workers = buildWorkers({ state, events, config, now, repoSlug });
   const closedIssues = new Set();
+  if (checksCache) {
+    for (const w of workers) {
+      if (w.pr != null) {
+        checksCache.ensure(w.pr, repoSlug);
+        const cached = checksCache.get(w.pr);
+        w.checksStatus = cached ? cached.status : null;
+        w.checksFetchedAt = cached && cached.fetchedAt != null ? cached.fetchedAt : null;
+      }
+    }
+  }
   if (titleCache) {
     for (const w of workers) {
       titleCache.ensure(w.issue, repoSlug);
@@ -427,7 +634,18 @@ export function readSnapshot({
     ),
   );
   const hint = workers.length === 0 && escalations.length === 0 ? EMPTY_HINT : null;
-  return { workers, escalations, hint };
+  const totals = fleetUsage(workers);
+
+  // Supervisor liveness, distinct from UI-server liveness. lastHeartbeatTs and
+  // thresholdSeconds are sent so the browser can re-derive the age (and the
+  // silent/live transition) locally every second; ageSeconds/state are the
+  // server-side snapshot for the API and tests.
+  const lastHeartbeatTs = latestHeartbeatTs(events);
+  const thresholdSeconds = heartbeatThresholdSeconds(config?.pollSeconds);
+  const { state: hbState, ageSeconds } = heartbeatStatus({ lastHeartbeatTs, thresholdSeconds, now });
+  const heartbeat = { lastHeartbeatTs, thresholdSeconds, ageSeconds, state: hbState };
+
+  return { workers, escalations, hint, totals, heartbeat };
 }
 
 // A change key that ignores the ever-advancing clock, so the live stream pushes
@@ -435,7 +653,12 @@ export function readSnapshot({
 // an age ticked. Ages are recomputed by the browser from claimStartTs.
 export function snapshotKey(snapshot) {
   const workers = snapshot.workers.map(({ claimAgeSeconds, ...rest }) => rest);
-  return JSON.stringify({ workers, escalations: snapshot.escalations, hint: snapshot.hint });
+  // Drop the clock-derived heartbeat fields (ageSeconds/state) for the same
+  // reason as claim ages: the browser recomputes them each second, so keeping
+  // them here would push a frame every tick. A new heartbeat changes
+  // lastHeartbeatTs, which does re-push.
+  const { ageSeconds, state, ...heartbeat } = snapshot.heartbeat || {};
+  return JSON.stringify({ workers, escalations: snapshot.escalations, hint: snapshot.hint, totals: snapshot.totals ?? null, heartbeat });
 }
 
 // --- incremental log tail ----------------------------------------------------
@@ -505,10 +728,13 @@ export function createDashboardServer({
   repoSlug = null,
   now = Date.now,
   pollMs = 1000,
+  fetchChecks = null,
+  checksRefreshMs = 30_000,
   fetchTitle = null,
 } = {}) {
+  const checksCache = createChecksCache({ fetchChecks: fetchChecks || defaultFetchChecks, refreshMs: checksRefreshMs });
   const titleCache = createTitleCache({ fetchTitle: fetchTitle || defaultFetchTitle });
-  const snap = () => readSnapshot({ statePath, eventsPath, escalationsPath, config, now: now(), repoSlug, titleCache });
+  const snap = () => readSnapshot({ statePath, eventsPath, escalationsPath, config, now: now(), repoSlug, checksCache, titleCache });
 
   const server = httpCreateServer((req, res) => {
     const url = new URL(req.url, "http://localhost");
@@ -578,6 +804,33 @@ export function createDashboardServer({
         const { data, position: next } = tailFrom(logFile, position);
         position = next;
         if (data) res.write(`event: log\ndata: ${JSON.stringify(data)}\n\n`);
+      };
+      tick();
+      const timer = setInterval(tick, pollMs);
+      req.on("close", () => clearInterval(timer));
+      return;
+    }
+
+    // Live timeline for one issue: sends the issue's events from the event
+    // stream in chronological order, then pushes only new events as they
+    // arrive — never a full re-send. Malformed lines in the file are skipped
+    // by readEvents, so the timeline degrades to whatever it can parse.
+    if (url.pathname === "/api/timeline") {
+      const issue = Number(url.searchParams.get("issue"));
+      if (!Number.isInteger(issue)) {
+        sendJson(res, 400, { error: "issue query parameter required" });
+        return;
+      }
+      res.writeHead(200, SSE_HEADERS);
+      let sentCount = 0;
+      const tick = () => {
+        const events = timelineEvents(readEvents(eventsPath), issue);
+        if (events.length < sentCount) sentCount = 0; // truncated/rotated
+        if (events.length > sentCount) {
+          const delta = events.slice(sentCount);
+          res.write(`event: timeline\ndata: ${JSON.stringify(delta)}\n\n`);
+          sentCount = events.length;
+        }
       };
       tick();
       const timer = setInterval(tick, pollMs);
@@ -662,8 +915,14 @@ export const PAGE_HTML = `<!doctype html>
   header h1 { font-size:16px; margin:0; }
   header .dot { width:8px; height:8px; border-radius:50%; background:var(--muted); display:inline-block; }
   header .dot.live { background:#2da44e; }
+  header .fleettotals { margin-left:auto; color:var(--muted); font-variant-numeric:tabular-nums; }
+  header .fleettotals.empty { display:none; }
+  td.usage { text-align:right; font-variant-numeric:tabular-nums; }
   main { padding:20px; max-width:1100px; margin:0 auto; }
   .hint { color:var(--muted); padding:40px 0; text-align:center; }
+  .hbbanner { border-radius:6px; padding:12px 16px; margin-bottom:16px; font-weight:600; border:1px solid; border-left-width:4px; }
+  .hbbanner.silent { color:var(--over); border-color:var(--over); background:color-mix(in srgb, var(--over) 10%, transparent); }
+  .hbbanner.unseen { color:var(--warn); border-color:var(--warn); background:color-mix(in srgb, var(--warn) 10%, transparent); }
   .layout { display:flex; gap:16px; align-items:flex-start; }
   .fleet { flex:1 1 auto; min-width:0; }
   .fleet-toolbar { display:flex; align-items:center; gap:12px; margin-bottom:12px; }
@@ -709,8 +968,20 @@ export const PAGE_HTML = `<!doctype html>
   .logsearch:focus { outline:none; border-color:var(--accent); }
   pre.log { background:var(--card); border:1px solid var(--line); border-radius:6px; padding:12px; max-height:360px; overflow:auto; white-space:pre-wrap; word-break:break-word; margin:0; font:12px/1.5 ui-monospace, monospace; }
   .empty { color:var(--muted); }
+  .checks { font-size:12px; font-weight:600; margin-left:4px; }
+  .checks.pass { color:#2da44e; }
+  .checks.fail { color:var(--over); }
+  .checks.pend { color:var(--warn); }
+  .checks.unknown { color:var(--muted); font-style:italic; font-weight:400; }
+  .checks-time { font-size:11px; color:var(--muted); margin-left:2px; }
   .issue-title { color:var(--muted); font-size:13px; }
   .issue-title.empty { font-style:italic; }
+  .timeline { margin-bottom:14px; max-height:200px; overflow:auto; border:1px solid var(--line); border-radius:6px; background:var(--card); padding:8px 12px; }
+  .timeline-entry { padding:2px 0; font-size:13px; border-bottom:1px solid color-mix(in srgb, var(--line) 50%, transparent); }
+  .timeline-entry:last-child { border-bottom:none; }
+  .timeline-ts { color:var(--muted); font-family:ui-monospace, monospace; font-size:12px; margin-right:6px; }
+  .timeline-event { font-weight:600; }
+  .timeline-fields { color:var(--muted); font-size:12px; }
   .lognomatch { color:var(--muted); padding:12px; }
 </style>
 </head>
@@ -718,8 +989,10 @@ export const PAGE_HTML = `<!doctype html>
 <header>
   <h1>Herd dashboard</h1>
   <span><span class="dot" id="livedot"></span> <span id="livetext" class="empty">connecting…</span></span>
+  <span id="fleettotals" class="fleettotals empty"></span>
 </header>
 <main>
+  <div id="hbbanner" class="hbbanner" role="status" hidden></div>
   <div class="layout" id="layout">
     <div class="fleet" id="fleet">
       <div class="fleet-toolbar">
@@ -737,6 +1010,7 @@ export const PAGE_HTML = `<!doctype html>
   </div>
   <div class="logpane" id="logpane" hidden>
     <h2 id="logtitle"></h2>
+    <div id="timeline" class="timeline"></div>
     <input type="search" id="logsearch" class="logsearch" placeholder="Filter log lines…" autocomplete="off">
     <div id="lognomatch" class="lognomatch" hidden>No matches.</div>
     <pre class="log" id="log"></pre>
@@ -744,9 +1018,21 @@ export const PAGE_HTML = `<!doctype html>
 </main>
 <script>
   const $ = (id) => document.getElementById(id);
-  let selected = null, logSource = null, logBuffer = "", panelOpen = false, snapshot = { workers: [], escalations: [], hint: null };
+  let selected = null, logSource = null, timelineSource = null, logBuffer = "", timelineBuffer = [], panelOpen = false, gotSnapshot = false;
+  let snapshot = { workers: [], escalations: [], hint: null, heartbeat: null };
 
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
+
+  // Usage formatters. A finite number renders; anything else (null from an
+  // unreadable log or a worker with no usage mapping) becomes an em dash — never
+  // blank, NaN, or undefined. usdText/tokText return the bare "—" for the header
+  // line; usdCell/tokCell wrap it in the muted empty span for table cells.
+  const isNum = (n) => typeof n === "number" && isFinite(n);
+  const grp = (n) => String(n).replace(/\\B(?=(\\d{3})+(?!\\d))/g, ",");
+  const usdText = (n) => isNum(n) ? "$" + n.toFixed(4) : "—";
+  const tokText = (n) => isNum(n) ? grp(n) : "—";
+  const usdCell = (n) => isNum(n) ? usdText(n) : '<span class="empty">—</span>';
+  const tokCell = (n) => isNum(n) ? tokText(n) : '<span class="empty">—</span>';
 
   // Swap a worker's avatar to its bundled default when the adapter's own image
   // fails to load (missing file, bad URL), so the row shows a mascot rather than
@@ -778,6 +1064,17 @@ export const PAGE_HTML = `<!doctype html>
   function attemptsText(w) {
     const cls = w.attempts >= w.reworkCap ? "over" : w.attempts >= w.reworkCap ? "warn" : "";
     return '<span class="gauge ' + cls + '">' + w.attempts + " / " + w.reworkCap + "</span>";
+  }
+  function checksClass(s) {
+    return s === "passing" ? "pass" : s === "failing" ? "fail" : s === "pending" ? "pend" : "unknown";
+  }
+  function checksTitle(w) {
+    if (!w.checksFetchedAt) return "checks status: " + esc(w.checksStatus);
+    return "checks: " + esc(w.checksStatus) + " · fetched " + new Date(w.checksFetchedAt).toLocaleTimeString();
+  }
+  function checksAgo(ts) {
+    const secs = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+    return secs >= 60 ? Math.floor(secs / 60) + "m ago" : secs + "s ago";
   }
 
   function issueCell(w) {
@@ -817,18 +1114,25 @@ export const PAGE_HTML = `<!doctype html>
   // LIFECYCLE_GROUPS. "other" is the catch-all so an unmapped status is always
   // shown, never dropped.
   const GROUP_ORDER = [["live", "Live"], ["awaiting-review", "Awaiting review"], ["escalated", "Escalated"], ["terminal", "Terminal"], ["other", "Other"]];
-  const THEAD = '<thead><tr><th>Issue</th><th>Status</th><th>Adapter</th><th>Attempts</th><th>Age</th><th>PR</th></tr></thead>';
+  const THEAD = '<thead><tr><th>Issue</th><th>Status</th><th>Adapter</th><th>Attempts</th><th>Age</th><th>PR</th><th>Cost</th><th>Tokens in</th><th>Tokens out</th></tr></thead>';
 
   function rowHtml(w) {
     const pr = w.prUrl ? '<a href="' + esc(w.prUrl) + '" target="_blank" rel="noopener">#' + esc(w.pr) + "</a>"
       : (w.pr != null ? "#" + esc(w.pr) : '<span class="empty">—</span>');
+    const checks = w.checksStatus
+      ? '<span class="checks ' + checksClass(w.checksStatus) + '" title="' + checksTitle(w) + '">' + esc(w.checksStatus) + "</span>" +
+        (w.checksFetchedAt ? '<span class="checks-time">' + esc(checksAgo(w.checksFetchedAt)) + "</span>" : "")
+      : "";
     return '<tr class="worker' + (w.issue === selected ? " sel" : "") + '" data-issue="' + w.issue + '">' +
       "<td>" + issueCell(w) + "</td>" +
       '<td class="status">' + esc(w.status) + "</td>" +
       '<td><span class="adapter">' + avatarImg(w) + "<span>" + esc(w.adapter || "—") + "</span></span></td>" +
       "<td>" + attemptsText(w) + "</td>" +
       "<td>" + ageText(w) + "</td>" +
-      "<td>" + pr + "</td></tr>";
+      "<td>" + pr + checks + "</td>" +
+      '<td class="usage">' + usdCell(w.costUsd) + "</td>" +
+      '<td class="usage">' + tokCell(w.tokensIn) + "</td>" +
+      '<td class="usage">' + tokCell(w.tokensOut) + "</td></tr>";
   }
 
   function renderWorkers() {
@@ -866,16 +1170,81 @@ export const PAGE_HTML = `<!doctype html>
     if (selected === issue) return;
     selected = issue;
     if (logSource) { logSource.close(); logSource = null; }
+    if (timelineSource) { timelineSource.close(); timelineSource = null; }
     const pane = $("logpane");
     pane.hidden = false;
     $("logtitle").textContent = "Log — issue #" + issue;
     $("logsearch").value = "";
     logBuffer = "";
+    timelineBuffer = [];
+    renderTimeline();
     renderLog();
     renderWorkers();
     logSource = new EventSource("/api/log?issue=" + issue);
     logSource.addEventListener("log", (ev) => { logBuffer += JSON.parse(ev.data); renderLog(); });
     logSource.addEventListener("note", (ev) => { logBuffer = JSON.parse(ev.data); renderLog(); });
+    timelineSource = new EventSource("/api/timeline?issue=" + issue);
+    timelineSource.addEventListener("timeline", (ev) => { timelineBuffer = timelineBuffer.concat(JSON.parse(ev.data)); renderTimeline(); });
+  }
+
+  // Render the per-issue activity timeline from timelineBuffer — each event
+  // shows its timestamp, event type, and any adapter/attempt/PR/pid fields it
+  // carries. An empty buffer shows a one-line "no activity recorded" message,
+  // never a blank pane. Malformed lines never reach here (readEvents skips
+  // them server-side), so the timeline always renders cleanly.
+  function renderTimeline() {
+    const el = $("timeline");
+    if (!timelineBuffer.length) {
+      el.innerHTML = '<div class="empty">No activity recorded.</div>';
+      return;
+    }
+    el.innerHTML = timelineBuffer.map((e) => {
+      const ts = e.ts ? new Date(Date.parse(e.ts)).toLocaleTimeString() : "—";
+      const fields = [];
+      if (e.adapter) fields.push("adapter " + esc(e.adapter));
+      if (e.pid != null) fields.push("pid " + esc(e.pid));
+      if (e.attempts != null) fields.push("attempt " + esc(e.attempts));
+      if (e.pr != null) fields.push("PR #" + esc(e.pr));
+      const fieldStr = fields.length ? ' <span class="timeline-fields">' + fields.join(" · ") + "</span>" : "";
+      return '<div class="timeline-entry"><span class="timeline-ts">' + esc(ts) + '</span><span class="timeline-event">' + esc(e.event || "?") + "</span>" + fieldStr + "</div>";
+    }).join("");
+  }
+
+  function durText(secs) {
+    if (secs < 60) return secs + "s";
+    const m = Math.floor(secs / 60), s = secs % 60;
+    return s ? m + "m" + s + "s" : m + "m";
+  }
+
+  // Supervisor liveness, recomputed locally every tick from the last heartbeat
+  // so the age advances and the silent banner appears without a page reload or a
+  // server push. The green dot means "supervisor still polling" — never merely
+  // "UI server up": with no heartbeat at all the dot stays grey and labelled.
+  function renderHeartbeat() {
+    if (!gotSnapshot) return;
+    const hb = snapshot.heartbeat || {};
+    const dot = $("livedot"), text = $("livetext"), banner = $("hbbanner");
+    text.classList.remove("empty");
+    if (hb.lastHeartbeatTs == null || !Number.isFinite(Date.parse(hb.lastHeartbeatTs))) {
+      dot.classList.remove("live");
+      text.textContent = "supervisor not seen";
+      banner.hidden = false;
+      banner.className = "hbbanner unseen";
+      banner.textContent = "Supervisor has not been seen — no heartbeat in the event stream yet.";
+      return;
+    }
+    const age = Math.max(0, Math.floor((Date.now() - Date.parse(hb.lastHeartbeatTs)) / 1000));
+    if (age > hb.thresholdSeconds) {
+      dot.classList.remove("live");
+      text.textContent = "supervisor silent";
+      banner.hidden = false;
+      banner.className = "hbbanner silent";
+      banner.textContent = "Supervisor silent since " + durText(age) + " — last heartbeat " + durText(age) + " ago.";
+    } else {
+      dot.classList.add("live");
+      text.textContent = "supervisor live · heartbeat " + durText(age) + " ago";
+      banner.hidden = true;
+    }
   }
 
   // Re-render the log pane from logBuffer, applying the active search query.
@@ -908,7 +1277,19 @@ export const PAGE_HTML = `<!doctype html>
 
   $("logsearch").addEventListener("input", renderLog);
 
-  function render() { renderErrToggle(); renderEscalations(); renderWorkers(); }
+  // The fleet totals line in the header: summed cost and summed tokens across
+  // every worker with usage data. Hidden entirely when no worker has any finite
+  // usage number, so it never reads "$0 · 0" before the first exit lands.
+  function renderTotals() {
+    const t = snapshot.totals || {};
+    const el = $("fleettotals");
+    const has = isNum(t.costUsd) || isNum(t.tokensIn) || isNum(t.tokensOut);
+    if (!has) { el.textContent = ""; el.classList.add("empty"); return; }
+    el.classList.remove("empty");
+    el.textContent = "Fleet: " + usdText(t.costUsd) + " · " + tokText(t.tokensIn) + " in · " + tokText(t.tokensOut) + " out";
+  }
+
+  function render() { renderErrToggle(); renderEscalations(); renderWorkers(); renderTotals(); renderHeartbeat(); }
 
   $("errtoggle").addEventListener("click", () => { panelOpen = !panelOpen; applyPanel(); });
   $("errclose").addEventListener("click", () => { panelOpen = false; applyPanel(); });
@@ -916,15 +1297,17 @@ export const PAGE_HTML = `<!doctype html>
   const stream = new EventSource("/api/stream");
   stream.addEventListener("snapshot", (ev) => {
     snapshot = JSON.parse(ev.data);
-    $("livedot").classList.add("live");
-    $("livetext").textContent = "live";
-    $("livetext").classList.remove("empty");
+    gotSnapshot = true;
     render();
   });
-  stream.onerror = () => { $("livedot").classList.remove("live"); $("livetext").textContent = "reconnecting…"; };
 
-  // Tick ages locally once a second without waiting on a server push.
-  setInterval(() => { if (snapshot.workers.length) renderWorkers(); }, 1000);
+  // Tick locally once a second without waiting on a server push: claim ages
+  // advance, and the heartbeat age climbs so the silent banner appears on its
+  // own the moment the supervisor stops emitting — the whole point of the alarm.
+  setInterval(() => {
+    if (snapshot.workers.length) renderWorkers();
+    renderHeartbeat();
+  }, 1000);
 </script>
 </body>
 </html>`;
