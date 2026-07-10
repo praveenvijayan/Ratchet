@@ -23,6 +23,10 @@ import {
   prUrl,
   resolveRepoSlug,
   buildWorkers,
+  latestHeartbeatTs,
+  heartbeatThresholdSeconds,
+  HEARTBEAT_SILENCE_FACTOR,
+  heartbeatStatus,
   lifecycleGroup,
   LIFECYCLE_GROUPS,
   groupWorkers,
@@ -35,6 +39,7 @@ import {
   parsePort,
   run,
 } from "./herd-ui.mjs";
+import { pollOnce } from "./herd-survey.mjs";
 
 const CONFIG = { reworkCap: 2, claimTimeoutSeconds: 300 };
 const NOW = Date.UTC(2026, 6, 9, 12, 0, 0); // fixed clock for deterministic ages
@@ -838,4 +843,141 @@ await inTempDir(async (dir) => {
   for (let n = 1; n <= criteriaCount; n++) assert.ok(unique.has(n), `#179 criterion ${n} has a test`);
 }
 
-console.log("PASS herd-ui.test.mjs (27 criteria)");
+// --- #176 Criterion 1: the supervisor appends a heartbeat event to the event
+// stream once per poll pass. ---------------------------------------------------
+await inTempDir(async (dir) => {
+  const eventsPath = join(dir, "ev.jsonl");
+  const statePath = join(dir, "s.json");
+  const escalationsPath = join(dir, "e.md");
+  const okGh = async () => []; // survey succeeds against an empty fleet
+  const beats = () => readEvents(eventsPath).filter((e) => e.event === "heartbeat");
+
+  await pollOnce({ gh: okGh, isAlive: () => false, now: NOW, statePath, escalationsPath, eventsPath, log: () => {} });
+  assert.equal(beats().length, 1, "one poll pass appends exactly one heartbeat");
+  const hb = beats()[0];
+  assert.equal(hb.ts, new Date(NOW).toISOString(), "the heartbeat carries the poll timestamp");
+  assert.equal("issue" in hb, false, "a fleet-wide heartbeat carries no issue field");
+
+  await pollOnce({ gh: okGh, isAlive: () => false, now: NOW + 1000, statePath, escalationsPath, eventsPath, log: () => {} });
+  assert.equal(beats().length, 2, "a second pass appends a second heartbeat — one per pass");
+
+  // Alive-but-degraded: a poll whose gh survey throws is still a live supervisor,
+  // so it must still prove life. The heartbeat lands before the survey runs.
+  const failGh = async () => { throw new Error("gh: not authenticated"); };
+  const r = await pollOnce({ gh: failGh, now: NOW + 2000, statePath, escalationsPath, eventsPath, log: () => {} });
+  assert.equal(r.ok, false, "a failed survey does not crash the poll");
+  assert.equal(beats().length, 3, "a poll whose survey fails still emits its heartbeat");
+});
+
+// --- #176 Criterion 2: the dashboard shows the time since the last heartbeat,
+// updating live without a page reload. -----------------------------------------
+await inTempDir(async (dir) => {
+  const eventsPath = join(dir, "ev.jsonl");
+  const statePath = join(dir, "s.json");
+  const escalationsPath = join(dir, "esc.md");
+  writeFileSync(statePath, JSON.stringify({}));
+  writeFileSync(escalationsPath, "");
+  const hbTs = new Date(NOW - 30_000).toISOString(); // 30s before the fixed clock
+  writeFileSync(eventsPath, JSON.stringify({ ts: hbTs, event: "heartbeat" }) + "\n");
+
+  const cfg = { ...CONFIG, pollSeconds: 60 };
+  const snap = readSnapshot({ statePath, eventsPath, escalationsPath, config: cfg, now: NOW });
+  assert.equal(snap.heartbeat.lastHeartbeatTs, hbTs, "the snapshot carries the last heartbeat timestamp");
+  assert.equal(snap.heartbeat.ageSeconds, 30, "and the elapsed time since it (30s)");
+
+  // The age advances by the clock alone — no new event — so the stream must not
+  // push a frame every second: the key ignores the ticking age, and the browser
+  // recomputes it on a local timer. That is "live without a page reload".
+  const later = readSnapshot({ statePath, eventsPath, escalationsPath, config: cfg, now: NOW + 5000 });
+  assert.equal(later.heartbeat.ageSeconds, 35, "the age advances with the clock");
+  assert.equal(snapshotKey(snap), snapshotKey(later), "a ticking age alone does not change the stream key");
+
+  await withServer({ statePath, eventsPath, escalationsPath, config: cfg, now: () => NOW }, async (base) => {
+    const page = (await fetchText(`${base}/`)).body;
+    assert.match(page, /setInterval\([\s\S]*?renderHeartbeat\(\)/, "a local timer re-renders the heartbeat age without a reload");
+    const { json } = await fetchJson(`${base}/api/snapshot`);
+    assert.equal(json.heartbeat.lastHeartbeatTs, hbTs, "the API exposes the last heartbeat for the browser to age locally");
+  });
+});
+
+// --- #176 Criterion 3: when the last heartbeat is older than a threshold
+// derived from the poll interval, the dashboard shows a prominent "supervisor
+// silent since Xm" banner. -----------------------------------------------------
+{
+  assert.equal(heartbeatThresholdSeconds(60), Math.round(60 * HEARTBEAT_SILENCE_FACTOR), "the threshold derives from the poll interval");
+  assert.ok(heartbeatThresholdSeconds(120) > heartbeatThresholdSeconds(60), "a longer poll interval tolerates longer silence");
+
+  const threshold = heartbeatThresholdSeconds(60);
+  const fresh = heartbeatStatus({ lastHeartbeatTs: new Date(NOW - (threshold - 5) * 1000).toISOString(), thresholdSeconds: threshold, now: NOW });
+  assert.equal(fresh.state, "live", "a heartbeat within the threshold reads as live");
+  const stale = heartbeatStatus({ lastHeartbeatTs: new Date(NOW - (threshold + 60) * 1000).toISOString(), thresholdSeconds: threshold, now: NOW });
+  assert.equal(stale.state, "silent", "a heartbeat past the threshold reads as silent");
+}
+await inTempDir(async (dir) => {
+  const eventsPath = join(dir, "ev.jsonl");
+  const statePath = join(dir, "s.json");
+  const escalationsPath = join(dir, "esc.md");
+  writeFileSync(statePath, JSON.stringify({}));
+  writeFileSync(escalationsPath, "");
+  const cfg = { ...CONFIG, pollSeconds: 60 };
+  const staleTs = new Date(NOW - (heartbeatThresholdSeconds(60) + 120) * 1000).toISOString();
+  writeFileSync(eventsPath, JSON.stringify({ ts: staleTs, event: "heartbeat" }) + "\n");
+
+  const snap = readSnapshot({ statePath, eventsPath, escalationsPath, config: cfg, now: NOW });
+  assert.equal(snap.heartbeat.state, "silent", "a stale heartbeat marks the supervisor silent in the snapshot");
+
+  await withServer({ statePath, eventsPath, escalationsPath, config: cfg, now: () => NOW }, async (base) => {
+    const page = (await fetchText(`${base}/`)).body;
+    assert.match(page, /id="hbbanner"/, "the page has a prominent heartbeat banner element");
+    assert.match(page, /Supervisor silent since/, "the banner announces the supervisor as silent since a duration");
+    assert.match(page, /\.hbbanner\.silent/, "the silent banner is styled prominently");
+  });
+});
+
+// --- #176 Criterion 4: with no heartbeat event in the stream at all, the
+// dashboard says the supervisor has not been seen, never an unlabelled green
+// "live" dot. -------------------------------------------------------------------
+await inTempDir(async (dir) => {
+  const eventsPath = join(dir, "ev.jsonl");
+  const statePath = join(dir, "s.json");
+  const escalationsPath = join(dir, "esc.md");
+  writeFileSync(statePath, JSON.stringify({}));
+  writeFileSync(escalationsPath, "");
+  // Events exist, but none is a heartbeat.
+  writeFileSync(eventsPath, JSON.stringify({ ts: new Date(NOW).toISOString(), event: "dispatch", issue: 5 }) + "\n");
+
+  assert.equal(latestHeartbeatTs(readEvents(eventsPath)), null, "a stream with no heartbeat has no last heartbeat");
+  const snap = readSnapshot({ statePath, eventsPath, escalationsPath, config: { ...CONFIG, pollSeconds: 60 }, now: NOW });
+  assert.equal(snap.heartbeat.lastHeartbeatTs, null, "the snapshot reports the supervisor as never seen");
+  assert.equal(snap.heartbeat.state, "unseen", "its state is unseen, not live");
+
+  await withServer({ statePath, eventsPath, escalationsPath, now: () => NOW }, async (base) => {
+    const page = (await fetchText(`${base}/`)).body;
+    const script = /<script>([\s\S]*?)<\/script>/.exec(page)[1];
+    const handler = /addEventListener\("snapshot"[\s\S]*?\}\);/.exec(script)[0];
+    assert.doesNotMatch(handler, /livedot[\s\S]*?add\("live"\)/, "the snapshot handler no longer force-lights the live dot");
+    assert.match(script, /has not been seen/, "the page labels an unseen supervisor");
+    assert.match(script, /supervisor not seen/, "the header text names the supervisor as not seen, never a bare green dot");
+  });
+});
+
+// --- #176 Criterion 5: every criterion above has exactly one test named after
+// it. --------------------------------------------------------------------------
+{
+  const selfPath = fileURLToPath(import.meta.url);
+  const selfText = readFileSync(selfPath, "utf8");
+  const planPath = join(dirname(selfPath), "..", "plan", "0086-herd-dashboard-heartbeat.md");
+  const planText = readFileSync(planPath, "utf8");
+
+  const criteriaSection = /##\s+Acceptance criteria\s*([\s\S]*?)(?:\n##\s|$)/.exec(planText)[1];
+  const criteriaCount = (criteriaSection.match(/^-\s*\[[ x]\]/gim) || []).length;
+
+  const markers = [...selfText.matchAll(/^\/\/ --- #176 Criterion (\d+):/gim)].map((m) => Number(m[1]));
+  const unique = new Set(markers);
+  assert.equal(markers.length, unique.size, "each #176 criterion is tested exactly once (no duplicate markers)");
+  assert.equal(markers.length, criteriaCount, `one test per #176 acceptance criterion (${criteriaCount})`);
+  for (let n = 1; n <= criteriaCount; n++) assert.ok(unique.has(n), `#176 criterion ${n} has a test`);
+}
+
+
+console.log("PASS herd-ui.test.mjs (32 criteria)");
