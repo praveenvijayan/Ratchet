@@ -365,11 +365,16 @@ await inTempDir(async () => {
 
 // A `gh` that also answers the stale-claim ref list (matching-refs) with the
 // given claim-ref issue numbers, on top of the survey's ready/in-progress/PR.
-function fakeGhWithRefs({ ready = [], inProgress = [], openPrs = [], claimRefs = [], refsThrow = false } = {}) {
+function fakeGhWithRefs({ ready = [], inProgress = [], openPrs = [], claimRefs = [], refsThrow = false, closedIssues = [], issueStateThrow = false } = {}) {
   return async (args) => {
     if (args[0] === "api" && String(args[1]).includes("matching-refs")) {
       if (refsThrow) throw new Error("transient network blip");
       return claimRefs.map((n) => ({ ref: `refs/heads/agent/issue-${n}` }));
+    }
+    if (args[0] === "issue" && args[1] === "view") {
+      if (issueStateThrow) throw new Error("transient gh blip");
+      const n = Number(args[2]);
+      return { state: closedIssues.includes(n) ? "CLOSED" : "OPEN" };
     }
     if (args[0] === "pr") return openPrs;
     if (args.includes("state:ready")) return ready;
@@ -441,6 +446,70 @@ await inTempDir(async () => {
   for (const ac of ["AC1", "AC2", "AC3", "AC4", "AC5"]) {
     const hits = (both.match(new RegExp(`#138 ${ac}\\)`, "g")) || []).length;
     assert.equal(hits, 1, `#138 ${ac} has exactly one test named after it`);
+  }
+}
+
+// --- Issue #173: stale-claim detection distinguishes closed issues from blocked
+// open ones. One test per acceptance criterion, named after it. ---
+
+// #173 AC1) A stale ref whose issue is closed is escalated with a message saying
+// the issue is closed and only the ref needs deleting — no re-queue instruction.
+await inTempDir(async () => {
+  const gh = fakeGhWithRefs({ claimRefs: [77], closedIssues: [77] });
+  const r = await pollOnce({ gh, isAlive: () => false, now: NOW, statePath: "s.json", escalationsPath: "e.md", log: () => {} });
+  assert.equal(r.staleEscalated, 1, "the closed-issue stale ref is escalated");
+  const esc = readFileSync("e.md", "utf8");
+  assert.match(esc, /issue is closed/, "the escalation says the issue is closed");
+  assert.match(esc, /pure garbage/, "the escalation calls it pure garbage");
+  assert.doesNotMatch(esc, /re-queue the issue/, "no re-queue instruction for a closed issue");
+  assert.match(esc, /gh api -X DELETE.*agent\/issue-77/, "the escalation includes the delete command");
+});
+
+// #173 AC2) A stale ref whose issue is closed does not create a worker row in
+// the state file.
+await inTempDir(async () => {
+  const gh = fakeGhWithRefs({ claimRefs: [77], closedIssues: [77] });
+  await pollOnce({ gh, isAlive: () => false, now: NOW, statePath: "s.json", escalationsPath: "e.md", log: () => {} });
+  const state = JSON.parse(readFileSync("s.json", "utf8"));
+  assert.ok(!("77" in state), "no worker row in the state file for a closed-issue stale ref");
+});
+
+// #173 AC3) A stale ref whose issue is still open keeps the existing escalation
+// wording, including the re-queue instruction.
+await inTempDir(async () => {
+  const gh = fakeGhWithRefs({ claimRefs: [88] }); // issue 88 is open (default)
+  const r = await pollOnce({ gh, isAlive: () => false, now: NOW, statePath: "s.json", escalationsPath: "e.md", log: () => {} });
+  assert.equal(r.staleEscalated, 1, "the open-issue stale ref is escalated");
+  const esc = readFileSync("e.md", "utf8");
+  assert.match(esc, /every future worker 422s and refuses the issue/, "keeps the existing open-issue wording");
+  assert.match(esc, /re-queue the issue if its work is unfinished/, "keeps the re-queue instruction");
+});
+
+// #173 AC4) A transient failure while checking issue state never changes the
+// escalation outcome on its own; the check is retried on the next poll.
+await inTempDir(async () => {
+  const logs = [];
+  const gh = fakeGhWithRefs({ claimRefs: [77], issueStateThrow: true });
+  const r = await pollOnce({ gh, isAlive: () => false, now: NOW, statePath: "s.json", escalationsPath: "e.md", log: (m) => logs.push(m) });
+  assert.equal(r.ok, true, "the poll completes despite the issue-state check failure");
+  assert.equal(r.staleEscalated, 0, "no escalation on a transient issue-state failure");
+  assert.ok(!existsSync("e.md"), "no escalation written on a transient blip");
+  assert.ok(logs.some((m) => /issue-state check failed.*#77/.test(m)), "logs that the issue-state check was skipped for #77");
+  const state = JSON.parse(readFileSync("s.json", "utf8"));
+  assert.ok(!("77" in state), "no worker row created on a transient failure");
+
+  // On the next poll the check succeeds (issue is open) and the escalation fires.
+  const gh2 = fakeGhWithRefs({ claimRefs: [77] });
+  const r2 = await pollOnce({ gh: gh2, isAlive: () => false, now: NOW, statePath: "s.json", escalationsPath: "e.md", log: () => {} });
+  assert.equal(r2.staleEscalated, 1, "the check is retried on the next poll and the escalation fires");
+});
+
+// #173 AC5) Every criterion above has exactly one test named after it.
+{
+  const self = readFileSync(new URL("./herd-survey.test.mjs", import.meta.url), "utf8");
+  for (const ac of ["AC1", "AC2", "AC3", "AC4"]) {
+    const hits = (self.match(new RegExp(`#173 ${ac}\\)`, "g")) || []).length;
+    assert.equal(hits, 1, `#173 ${ac} has exactly one test named after it`);
   }
 }
 
@@ -580,4 +649,4 @@ await inTempDir(async () => {
   assert.ok(warnsB.some((m) => /usage field/.test(m)), "the missing-log case still warns on one line");
 });
 
-console.log("PASS herd-survey.test.mjs (7 criteria + issue #137: 4 criteria + issue #143: 5 criteria + issue #138: 5 criteria + issue #139: 3 criteria + issue #163: 3 criteria)");
+console.log("PASS herd-survey.test.mjs (7 criteria + issue #137: 4 criteria + issue #143: 5 criteria + issue #138: 5 criteria + issue #139: 3 criteria + issue #163: 3 criteria + issue #173: 5 criteria)");
