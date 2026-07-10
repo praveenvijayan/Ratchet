@@ -580,4 +580,85 @@ await inTempDir(async () => {
   assert.ok(warnsB.some((m) => /usage field/.test(m)), "the missing-log case still warns on one line");
 });
 
-console.log("PASS herd-survey.test.mjs (7 criteria + issue #137: 4 criteria + issue #143: 5 criteria + issue #138: 5 criteria + issue #139: 3 criteria + issue #163: 3 criteria)");
+// --- Issue #170: prune terminal herd state entries that carry no pid and no
+// open PR. reconcileState only flags dead pids / concluded PRs, so a terminal
+// entry (dispatch-failed, escalated, verify-escalated) with pid:null/pr:null is
+// never flagged and the #137 change-driven prune never touches it — it lingers
+// and dispatch skips its issue forever. One test per acceptance criterion. ---
+
+// #170 criterion 1: a terminal-status entry with no live pid and no open PR is
+// removed from the state file after its escalation has been written. The
+// escalation was written by dispatch when the entry entered dispatch-failed; the
+// prune does not re-write it (pre-seeded here, asserted still present and not
+// duplicated), it only removes the lingering entry.
+await inTempDir(async () => {
+  writeFileSync(
+    "s.json",
+    JSON.stringify({ 83: { adapter: "claude", pid: null, logFile: "x.log", attempts: 1, pr: null, status: "dispatch-failed" } }),
+  );
+  writeFileSync("e.md", "## earlier — issue #83\n- What happened: dispatch failed\n\n"); // escalation already written by dispatch
+  const gh = fakeGh({ ready: [], inProgress: [], openPrs: [] });
+  const r = await pollOnce({ gh, isAlive: () => false, now: NOW, statePath: "s.json", escalationsPath: "e.md", log: () => {} });
+  const after = JSON.parse(readFileSync("s.json", "utf8"));
+  assert.equal(after[83], undefined, "the terminal entry with no pid and no open PR is removed");
+  const esc = readFileSync("e.md", "utf8");
+  assert.equal((esc.match(/issue #83/g) || []).length, 1, "its escalation is present and not re-written on prune");
+  assert.equal(r.terminalPruned, 1, "the terminal removal is counted");
+});
+
+// #170 criterion 2: an issue whose terminal entry was pruned and which is still
+// state:ready is dispatched again on a later poll instead of being skipped.
+await inTempDir(async () => {
+  writeFileSync(
+    "s.json",
+    JSON.stringify({ 122: { adapter: "claude", pid: null, logFile: "y.log", attempts: 1, pr: null, status: "dispatch-failed" } }),
+  );
+  const gh = fakeGh({ ready: [{ number: 122 }], inProgress: [], openPrs: [] });
+  const ready = [{ number: 122, createdAt: "2026-01-01", labels: [{ name: "priority:high" }] }];
+  const disp = () =>
+    dispatchOne({
+      config: mkConfig(), ready, statePath: "s.json", escalationsPath: "e.md",
+      gh, isAlive: () => false, now: () => NOW, dryRun: true, log: () => {},
+    });
+
+  const before = await disp();
+  assert.equal(before.reason, "no-eligible-issue", "while the terminal entry sits in state, dispatch skips the re-queued issue");
+
+  await pollOnce({ gh, isAlive: () => false, now: NOW, statePath: "s.json", escalationsPath: "e.md", log: () => {} });
+
+  const after = await disp();
+  assert.equal(after.plan?.issue, 122, "after the terminal entry is pruned, the still-ready issue dispatches instead of being skipped");
+});
+
+// #170 criterion 3: an entry with a live worker pid or an open PR is never
+// pruned regardless of status — including terminal statuses.
+await inTempDir(async () => {
+  writeFileSync(
+    "s.json",
+    JSON.stringify({
+      160: { adapter: "claude", pid: null, logFile: "a.log", attempts: 1, pr: 8, status: "ready-for-review" },
+      166: { adapter: "codex", pid: 1234, logFile: "b.log", attempts: 1, pr: null, status: "escalated" },
+    }),
+  );
+  const gh = fakeGh({ ready: [], inProgress: [], openPrs: [{ number: 8, headRefName: "agent/issue-160" }] });
+  const r = await pollOnce({ gh, isAlive: (pid) => pid === 1234, now: NOW, statePath: "s.json", escalationsPath: "e.md", log: () => {} });
+  const after = JSON.parse(readFileSync("s.json", "utf8"));
+  assert.ok(after[160], "a terminal entry tracking an open PR is retained");
+  assert.ok(after[166], "a terminal entry with a live worker pid is retained");
+  assert.equal(r.terminalPruned, 0, "nothing is pruned when a terminal entry is still live or open");
+});
+
+// #170 criterion 4: the poll summary line reports how many terminal entries were
+// pruned this pass.
+await inTempDir(async () => {
+  const logs = [];
+  writeFileSync(
+    "s.json",
+    JSON.stringify({ 168: { adapter: "claude", pid: null, logFile: "z.log", attempts: 1, pr: null, status: "dispatch-failed" } }),
+  );
+  const gh = fakeGh({ ready: [], inProgress: [], openPrs: [] });
+  await pollOnce({ gh, isAlive: () => false, now: NOW, statePath: "s.json", escalationsPath: "e.md", log: (m) => logs.push(m) });
+  assert.ok(logs.some((m) => /1 terminal entry pruned/.test(m)), "the poll summary line reports the terminal-pruned count");
+});
+
+console.log("PASS herd-survey.test.mjs (7 criteria + issue #137: 4 criteria + issue #143: 5 criteria + issue #138: 5 criteria + issue #139: 3 criteria + issue #163: 3 criteria + issue #170: 4 criteria)");
