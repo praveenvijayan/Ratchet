@@ -26,6 +26,7 @@ import {
   lifecycleGroup,
   LIFECYCLE_GROUPS,
   groupWorkers,
+  createTitleCache,
   readSnapshot,
   snapshotKey,
   tailFrom,
@@ -467,6 +468,95 @@ await inTempDir(async (dir) => {
   for (let n = 1; n <= criteriaCount; n++) assert.ok(unique.has(n), `#166 criterion ${n} has a test`);
 }
 
+// --- #178 Criterion 1: each worker row shows the issue title alongside its
+// number, linked to the issue. -----------------------------------------------
+await inTempDir(async (dir) => {
+  const statePath = join(dir, "state.json");
+  const eventsPath = join(dir, "events.jsonl");
+  const start = new Date(NOW - 90_000).toISOString();
+  writeFileSync(statePath, JSON.stringify({
+    5: { adapter: "codex", pid: 222, attempts: 2, status: "in-review", pr: 42, logFile: "l5.log" },
+  }));
+  writeFileSync(eventsPath, JSON.stringify({ ts: start, event: "dispatch", issue: 5 }) + "\n");
+
+  const cache = createTitleCache({ fetchTitle: () => "Fix the login bug" });
+  // First poll triggers the async fetch; title is pending (null).
+  readSnapshot({ statePath, eventsPath, escalationsPath: join(dir, "none.md"), config: CONFIG, now: NOW, repoSlug: "praveenvijayan/Ratchet", titleCache: cache });
+  await new Promise((r) => setTimeout(r, 10));
+  // Second poll: the title has resolved in the cache.
+  const snap = readSnapshot({ statePath, eventsPath, escalationsPath: join(dir, "none.md"), config: CONFIG, now: NOW, repoSlug: "praveenvijayan/Ratchet", titleCache: cache });
+  const w = snap.workers.find((w) => w.issue === 5);
+  assert.equal(w.issueTitle, "Fix the login bug", "worker row carries the issue title");
+  assert.equal(w.issueUrl, "https://github.com/praveenvijayan/Ratchet/issues/5", "worker row carries a link to the issue");
+
+  // The page renders the title next to the linked issue number.
+  await withServer({ statePath, eventsPath, escalationsPath: join(dir, "none.md"), repoSlug: "praveenvijayan/Ratchet", fetchTitle: () => "Fix the login bug" }, async (base) => {
+    const page = await fetchText(`${base}/`);
+    assert.match(page.body, /issue-title/, "the page has an issue-title element");
+    assert.match(page.body, /w\.issueTitle/, "the page script reads issueTitle from the snapshot");
+    assert.match(page.body, /w\.issueUrl/, "the page script links the issue number to issueUrl");
+  });
+});
+
+// --- #178 Criterion 2: titles are cached so the dashboard does not query
+// GitHub on every render or poll. --------------------------------------------
+await inTempDir(async (dir) => {
+  const statePath = join(dir, "state.json");
+  const eventsPath = join(dir, "events.jsonl");
+  const start = new Date(NOW - 90_000).toISOString();
+  writeFileSync(statePath, JSON.stringify({
+    5: { adapter: "codex", pid: 222, attempts: 2, status: "in-review", pr: 42, logFile: "l5.log" },
+    7: { adapter: "claude", pid: 111, attempts: 1, status: "dispatched", pr: null, logFile: "l7.log" },
+  }));
+  writeFileSync(eventsPath, [
+    JSON.stringify({ ts: start, event: "dispatch", issue: 5 }),
+    JSON.stringify({ ts: start, event: "dispatch", issue: 7 }),
+  ].join("\n") + "\n");
+
+  const fetchCalls = [];
+  const cache = createTitleCache({ fetchTitle: (issue) => { fetchCalls.push(issue); return `Title ${issue}`; } });
+
+  // Simulate five polls — readSnapshot is called once per poll.
+  for (let i = 0; i < 5; i++) {
+    readSnapshot({ statePath, eventsPath, escalationsPath: join(dir, "none.md"), config: CONFIG, now: NOW, repoSlug: "praveenvijayan/Ratchet", titleCache: cache });
+  }
+  await new Promise((r) => setTimeout(r, 10));
+
+  // After five polls, fetchTitle was called exactly once per issue — not five
+  // times each. The cache absorbed the repeats.
+  assert.equal(fetchCalls.length, 2, "fetchTitle called once per issue, not per poll");
+  assert.deepEqual(fetchCalls.sort((a, b) => a - b), [5, 7], "both issues fetched exactly once");
+});
+
+// --- #178 Criterion 3: a title that cannot be fetched leaves the row rendering
+// with the bare number and a placeholder, never blocking or erroring the row. -
+await inTempDir(async (dir) => {
+  const statePath = join(dir, "state.json");
+  const eventsPath = join(dir, "events.jsonl");
+  const start = new Date(NOW - 90_000).toISOString();
+  writeFileSync(statePath, JSON.stringify({
+    9: { adapter: "claude", pid: 111, attempts: 1, status: "dispatched", pr: null, logFile: "l9.log" },
+  }));
+  writeFileSync(eventsPath, JSON.stringify({ ts: start, event: "dispatch", issue: 9 }) + "\n");
+
+  // A fetcher that always fails (simulates gh missing or network error).
+  const cache = createTitleCache({ fetchTitle: () => { throw new Error("gh not found"); } });
+  readSnapshot({ statePath, eventsPath, escalationsPath: join(dir, "none.md"), config: CONFIG, now: NOW, repoSlug: "praveenvijayan/Ratchet", titleCache: cache });
+  await new Promise((r) => setTimeout(r, 10));
+  const snap = readSnapshot({ statePath, eventsPath, escalationsPath: join(dir, "none.md"), config: CONFIG, now: NOW, repoSlug: "praveenvijayan/Ratchet", titleCache: cache });
+  const w = snap.workers.find((w) => w.issue === 9);
+  assert.equal(w.issueTitle, null, "unfetchable title yields null — not an error");
+  assert.equal(w.issueUrl, "https://github.com/praveenvijayan/Ratchet/issues/9", "the issue link still renders");
+
+  // The page shows a placeholder for unfetchable titles, never an error.
+  await withServer({ statePath, eventsPath, escalationsPath: join(dir, "none.md"), repoSlug: "praveenvijayan/Ratchet", fetchTitle: () => null }, async (base) => {
+    const page = await fetchText(`${base}/`);
+    assert.match(page.body, /issue-title empty/, "the page shows a placeholder class for unfetchable titles");
+    // The non-title rendering still shows the bare issue number
+    assert.match(page.body, /function issueCell/, "issueCell renders the bare number when no title is available");
+  });
+});
+
 // --- #171 Criterion 1: a row with a live worker pid in an active (non-terminal)
 // status shows its claim age against the claim timeout, with the overdue
 // highlight only when age exceeds the timeout. -------------------------------
@@ -559,6 +649,27 @@ await inTempDir(async (dir) => {
     assert.match(script, /if \(w\.claimStartTs == null\) return "—"/, "ageText returns a placeholder dash when there is no event");
   });
 });
+
+// --- #178 Criterion 4: every criterion above has exactly one test named after
+// it. --------------------------------------------------------------------------
+{
+  const selfPath = fileURLToPath(import.meta.url);
+  const selfText = readFileSync(selfPath, "utf8");
+  const planDir = join(dirname(selfPath), "..", "plan");
+  const planPath = existsSync(join(planDir, "0088-herd-dashboard-issue-titles.md"))
+    ? join(planDir, "0088-herd-dashboard-issue-titles.md")
+    : join(planDir, "done", "0088-herd-dashboard-issue-titles.md");
+  const planText = readFileSync(planPath, "utf8");
+
+  const criteriaSection = /##\s+Acceptance criteria\s*([\s\S]*?)(?:\n##\s|$)/.exec(planText)[1];
+  const criteriaCount = (criteriaSection.match(/^-\s*\[[ x]\]/gim) || []).length;
+
+  const markers = [...selfText.matchAll(/^\/\/ --- #178 Criterion (\d+):/gim)].map((m) => Number(m[1]));
+  const unique = new Set(markers);
+  assert.equal(markers.length, unique.size, "each #178 criterion is tested exactly once (no duplicate markers)");
+  assert.equal(markers.length, criteriaCount, `one test per #178 acceptance criterion (${criteriaCount})`);
+  for (let n = 1; n <= criteriaCount; n++) assert.ok(unique.has(n), `#178 criterion ${n} has a test`);
+}
 
 // --- #171 Criterion 4: every criterion above has exactly one test named after
 // it. --------------------------------------------------------------------------
@@ -727,5 +838,4 @@ await inTempDir(async (dir) => {
   for (let n = 1; n <= criteriaCount; n++) assert.ok(unique.has(n), `#179 criterion ${n} has a test`);
 }
 
-console.log("PASS herd-ui.test.mjs (23 criteria)");
-
+console.log("PASS herd-ui.test.mjs (27 criteria)");

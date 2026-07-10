@@ -9,12 +9,17 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { main, loadConfig, normalizeConfig, substitute, resolveAdapter, adapterAvailability, executableOnPath, defaultConfig, headlessFlagWarnings, HEADLESS_PERMISSION_FLAGS, HerdConfigError, DEFAULTS, extractUsage, USAGE_FIELDS } from "./herd.mjs";
+import { main, loadConfig, normalizeConfig, substitute, resolveAdapter, adapterAvailability, executableOnPath, defaultConfig, headlessFlagWarnings, HEADLESS_PERMISSION_FLAGS, HerdConfigError, DEFAULTS, extractUsage, USAGE_FIELDS, CONFIG_PATH } from "./herd.mjs";
+import { resolveRepoRoot, ratchetPaths, RepoRootError } from "./herd-survey.mjs";
 
 // Run `fn` with cwd set to a fresh temp dir, then clean up — lets CLI-level
 // tests exercise the cwd-relative default config path without side effects.
 function inTempDir(fn) {
   const dir = mkdtempSync(join(tmpdir(), "herd-"));
+  // `main` anchors the config at the repo root (nearest `.git`); mark this temp
+  // dir as a checkout so it resolves to itself, exercising the cwd-relative
+  // default config path without escaping to the real repo.
+  mkdirSync(join(dir, ".git"));
   const cwd = process.cwd();
   try {
     return process.chdir(dir), fn(dir);
@@ -910,4 +915,59 @@ withStubOpencode((binDir) => {
   }
 }
 
-console.log("PASS herd.test.mjs (45 criteria + issue #163: 4 criteria)");
+// Criterion (#174 AC1): every herd script reads and writes the same `.ratchet/`
+// files regardless of the directory it is invoked from within the repo — the
+// root resolver and its derived paths are cwd-independent, and `init` invoked
+// from a subdir writes (and `run` reads back) the one config at the repo root.
+{
+  const root = mkdtempSync(join(tmpdir(), "herd-root-"));
+  mkdirSync(join(root, ".git"));
+  const sub = join(root, "scripts", "nested");
+  mkdirSync(sub, { recursive: true });
+  const cwd = process.cwd();
+  try {
+    assert.equal(resolveRepoRoot(sub), resolveRepoRoot(root), "same root resolved from any subdir");
+    assert.deepEqual(ratchetPaths(resolveRepoRoot(sub)), ratchetPaths(resolveRepoRoot(root)), "same .ratchet/* paths from any subdir");
+    process.chdir(sub);
+    assert.equal(capture(() => main(["init"])).code, 0, "init from a subdir succeeds");
+    assert.ok(existsSync(join(root, CONFIG_PATH)), "init writes .ratchet/herd.json at the repo root");
+    assert.ok(!existsSync(join(sub, ".ratchet")), "init never creates a stray .ratchet/ in the subdir");
+    assert.equal(capture(() => main(["run"])).code, 0, "run from a subdir reads the root config back");
+  } finally {
+    process.chdir(cwd);
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+// Criterion (#174 AC2): invoked from outside any checkout, a herd script exits
+// non-zero with a one-line error naming the path it could not resolve, and never
+// silently creates a new `.ratchet/` directory.
+{
+  const outside = mkdtempSync(join(tmpdir(), "herd-nogit-"));
+  const cwd = process.cwd();
+  try {
+    process.chdir(outside);
+    const here = process.cwd();
+    const r = capture(() => main(["init"]));
+    assert.equal(r.code, 1, "outside a checkout exits non-zero");
+    assert.ok(!r.err.includes("\n"), "the error is a single line");
+    assert.ok(r.err.includes(here), "the error names the path it could not resolve");
+    assert.ok(!existsSync(join(here, ".ratchet")), "no .ratchet/ is silently created");
+    assert.throws(() => resolveRepoRoot(here), RepoRootError, "the failure is the dedicated RepoRootError");
+  } finally {
+    process.chdir(cwd);
+    rmSync(outside, { recursive: true, force: true });
+  }
+}
+
+// Criterion (#174 AC3): each #174 criterion above has exactly one test named
+// after it, counted by scanning this file's own source.
+{
+  const here = readFileSync(new URL("./herd.test.mjs", import.meta.url), "utf8");
+  for (const ac of ["AC1", "AC2", "AC3"]) {
+    const hits = (here.match(new RegExp(`#174 ${ac}\\)`, "g")) || []).length;
+    assert.equal(hits, 1, `#174 ${ac} has exactly one test named after it`);
+  }
+}
+
+console.log("PASS herd.test.mjs (45 criteria + issue #163: 4 criteria + issue #174: 3 criteria)");

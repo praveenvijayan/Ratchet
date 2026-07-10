@@ -13,7 +13,7 @@
 // exercised offline with no network and no spawned CLIs. Zero dependencies.
 
 import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync, readdirSync, statSync, rmSync } from "node:fs";
-import { dirname, basename, join } from "node:path";
+import { dirname, basename, join, resolve } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -26,6 +26,45 @@ export const EVENTS_FILE = ".ratchet/events.jsonl";
 // map; the deterministic form of "spread work across adapters" that avoids
 // Math.random, so a supervisor's dispatch order is reproducible offline.
 export const ROUTING_FILE = ".ratchet/herd-routing.json";
+
+// Repo-root path resolution. The constants above are repo-relative names; every
+// herd script anchors them at the repository root, NOT the process cwd, so a
+// script invoked from any subdirectory reads and writes the one true `.ratchet/`
+// — and a script invoked from outside any checkout fails loudly instead of
+// silently spawning a fresh, empty `.ratchet/` wherever it happens to stand.
+export class RepoRootError extends Error {}
+
+// Walk up from `startDir` to the nearest ancestor that is a git checkout (its
+// `.git` is a directory in a normal clone, a file inside a worktree — existsSync
+// accepts both). Throws RepoRootError naming `startDir` when no checkout
+// encloses it, so the caller can exit non-zero rather than resolve to cwd.
+export function resolveRepoRoot(startDir = process.cwd()) {
+  let dir = resolve(startDir);
+  for (;;) {
+    if (existsSync(join(dir, ".git"))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) {
+      throw new RepoRootError(
+        `herd: not inside a Ratchet checkout — no .git found at or above ${startDir}`,
+      );
+    }
+    dir = parent;
+  }
+}
+
+// The absolute `.ratchet/*` paths every herd stage reads and writes, anchored at
+// `root`. Derived from the relative constants above so the file names stay
+// defined in exactly one place.
+export function ratchetPaths(root) {
+  return {
+    root,
+    statePath: join(root, STATE_FILE),
+    escalationsPath: join(root, ESCALATIONS_FILE),
+    eventsPath: join(root, EVENTS_FILE),
+    routingPath: join(root, ROUTING_FILE),
+  };
+}
+
 // Status of the survey's stale-claim sentinel: a bookkeeping entry
 // (pid/adapter/pr null) that records a stale claim ref already escalated so it
 // is escalated exactly once. It is NOT a worker. Exported as the single source
@@ -113,6 +152,14 @@ export async function claimRefPresent(gh, issue) {
   } catch {
     return false;
   }
+}
+
+// Is GitHub issue #N still open? True on OPEN, false on CLOSED. Throws on a
+// transient gh failure so the caller can skip this ref this poll and retry on
+// the next — a blip never changes the escalation outcome. `gh` is injected.
+export async function issueIsOpen(gh, issue) {
+  const data = await gh(["issue", "view", String(issue), "--json", "state"]);
+  return data?.state === "OPEN";
 }
 
 // Given the claim refs on origin plus current reality, return the issues whose
@@ -432,16 +479,35 @@ export async function pollOnce({
     for (const issue of stale) {
       if (state[String(issue)]?.status === STALE_CLAIM_STATUS) continue; // already escalated once
       const del = deleteRefCommand(issue);
-      appendEscalation(escalationsPath, {
-        now: stamp,
-        issue,
-        what:
-          `stale claim ref agent/issue-${issue} on origin: no live worker and no open PR, yet the ref still holds the claim, ` +
-          `so every future worker 422s and refuses the issue. Delete it to free the issue: ${del}`,
-        logFile: null,
-        action: `run \`${del}\` to delete the stale claim ref, then re-queue the issue if its work is unfinished`,
-      });
-      state[String(issue)] = { adapter: null, pid: null, logFile: null, attempts: 0, status: STALE_CLAIM_STATUS, pr: null };
+      let open;
+      try {
+        open = await issueIsOpen(gh, issue);
+      } catch (e) {
+        log(`herd: issue-state check failed for #${issue}: ${e.message}; skipping this stale ref this poll.`);
+        continue;
+      }
+      if (open) {
+        appendEscalation(escalationsPath, {
+          now: stamp,
+          issue,
+          what:
+            `stale claim ref agent/issue-${issue} on origin: no live worker and no open PR, yet the ref still holds the claim, ` +
+            `so every future worker 422s and refuses the issue. Delete it to free the issue: ${del}`,
+          logFile: null,
+          action: `run \`${del}\` to delete the stale claim ref, then re-queue the issue if its work is unfinished`,
+        });
+        state[String(issue)] = { adapter: null, pid: null, logFile: null, attempts: 0, status: STALE_CLAIM_STATUS, pr: null };
+      } else {
+        appendEscalation(escalationsPath, {
+          now: stamp,
+          issue,
+          what:
+            `stale claim ref agent/issue-${issue} on origin: the issue is closed (work done), so the ref is pure garbage — ` +
+            `nothing to re-queue. Delete it: ${del}`,
+          logFile: null,
+          action: `run \`${del}\` to delete the stale claim ref`,
+        });
+      }
       staleEscalated += 1;
     }
   }

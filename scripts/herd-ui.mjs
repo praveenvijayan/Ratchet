@@ -13,12 +13,14 @@
 
 import { createServer as httpCreateServer } from "node:http";
 import { existsSync, readFileSync, openSync, readSync, fstatSync, closeSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFileSync, execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { realpathSync } from "node:fs";
 
-import { readState, STATE_FILE, EVENTS_FILE, ESCALATIONS_FILE } from "./herd-survey.mjs";
-import { DEFAULTS, loadConfig, HerdConfigError } from "./herd.mjs";
+import { join } from "node:path";
+import { readState, STATE_FILE, EVENTS_FILE, ESCALATIONS_FILE, resolveRepoRoot, ratchetPaths } from "./herd-survey.mjs";
+import { DEFAULTS, CONFIG_PATH, loadConfig, HerdConfigError } from "./herd.mjs";
 import { defaultAvatarFor } from "./herd-avatars.mjs";
 import { TERMINAL_STATUS } from "./herd-monitor.mjs";
 
@@ -204,6 +206,7 @@ export function buildWorkers({ state, events, config, now = Date.now(), repoSlug
       claimTimeoutSeconds: config.claimTimeoutSeconds,
       pr: e.pr ?? null,
       prUrl: prUrl(repoSlug, e.pr ?? null),
+      issueUrl: repoSlug ? `https://github.com/${repoSlug}/issues/${issue}` : null,
       logFile: e.logFile ?? null,
     });
   }
@@ -235,8 +238,61 @@ export function groupWorkers(workers) {
   return out;
 }
 
+// --- issue titles -------------------------------------------------------------
+
+const pexec = promisify(execFile);
+
+// Fetch a single issue's title from GitHub via `gh`. Returns the title string,
+// or null on any failure (gh missing, network error, 404). Never throws — a
+// title that cannot be fetched degrades to a placeholder, not a broken row.
+export async function defaultFetchTitle(issue, repoSlug) {
+  const args = repoSlug
+    ? ["issue", "view", String(issue), "--repo", repoSlug, "--json", "title", "--jq", ".title"]
+    : ["issue", "view", String(issue), "--json", "title", "--jq", ".title"];
+  try {
+    const { stdout } = await pexec("gh", args);
+    const title = stdout.trim();
+    return title || null;
+  } catch {
+    return null;
+  }
+}
+
+// A per-server title cache so `gh` is called at most once per issue — never on
+// every poll. `ensure` starts an async fetch if the issue is new (idempotent —
+// a pending or resolved entry is never re-fetched); `get` returns the title
+// string, null (fetch failed), or undefined (not yet resolved). The snapshot
+// picks up the title on the next poll after the fetch resolves, and the
+// change-key pushes it to the browser via SSE.
+export function createTitleCache({ fetchTitle = defaultFetchTitle, log = () => {} } = {}) {
+  const cache = new Map(); // issue number -> { title: string | null | undefined, state: "pending" | "resolved" }
+
+  return {
+    ensure(issue, repoSlug) {
+      const n = Number(issue);
+      if (cache.has(n)) return;
+      cache.set(n, { title: undefined, state: "pending" });
+      Promise.resolve()
+        .then(() => fetchTitle(n, repoSlug))
+        .then((title) => {
+          cache.set(n, { title: title ?? null, state: "resolved" });
+        })
+        .catch(() => {
+          cache.set(n, { title: null, state: "resolved" });
+        });
+    },
+    get(issue) {
+      const entry = cache.get(Number(issue));
+      return entry ? entry.title : undefined;
+    },
+  };
+}
+
 // The full dashboard payload. Never throws: every source is read tolerantly, so
 // missing state/events/escalations yield an empty snapshot carrying `hint`.
+// When a titleCache is provided, each worker row carries an issueTitle (the
+// cached title, or null while pending/failed) and the title fetch is triggered
+// at most once per issue.
 export function readSnapshot({
   statePath = STATE_FILE,
   eventsPath = EVENTS_FILE,
@@ -244,11 +300,18 @@ export function readSnapshot({
   config,
   now = Date.now(),
   repoSlug = null,
+  titleCache = null,
 } = {}) {
   const state = readState(statePath);
   const events = readEvents(eventsPath);
   const escalations = parseEscalations(escalationsPath);
   const workers = buildWorkers({ state, events, config, now, repoSlug });
+  if (titleCache) {
+    for (const w of workers) {
+      titleCache.ensure(w.issue, repoSlug);
+      w.issueTitle = titleCache.get(w.issue) ?? null;
+    }
+  }
   const hint = workers.length === 0 && escalations.length === 0 ? EMPTY_HINT : null;
   return { workers, escalations, hint };
 }
@@ -328,8 +391,10 @@ export function createDashboardServer({
   repoSlug = null,
   now = Date.now,
   pollMs = 1000,
+  fetchTitle = null,
 } = {}) {
-  const snap = () => readSnapshot({ statePath, eventsPath, escalationsPath, config, now: now(), repoSlug });
+  const titleCache = createTitleCache({ fetchTitle: fetchTitle || defaultFetchTitle });
+  const snap = () => readSnapshot({ statePath, eventsPath, escalationsPath, config, now: now(), repoSlug, titleCache });
 
   const server = httpCreateServer((req, res) => {
     const url = new URL(req.url, "http://localhost");
@@ -449,9 +514,15 @@ export function parsePort(argv) {
 // listenOrFail) on a port clash so the CLI wrapper can exit non-zero.
 export async function run(argv, { log = console.log, cwd = process.cwd() } = {}) {
   const port = parsePort(argv);
-  const config = loadConfigOrDefaults();
+  // Anchor the dashboard's files at the repo root, not the cwd, so it renders the
+  // supervisor's real state from any subdirectory — and throws (caught by the CLI
+  // guard below into a non-zero exit) rather than an empty dashboard when run
+  // from outside any checkout.
+  const root = resolveRepoRoot(cwd);
+  const { statePath, eventsPath, escalationsPath } = ratchetPaths(root);
+  const config = loadConfigOrDefaults(join(root, CONFIG_PATH));
   const repoSlug = resolveRepoSlug(gitOriginUrl(cwd));
-  const server = createDashboardServer({ config, repoSlug });
+  const server = createDashboardServer({ statePath, eventsPath, escalationsPath, config, repoSlug });
   const bound = await listenOrFail(server, port);
   log(`Herd dashboard on http://localhost:${bound}  (Ctrl-C to stop)`);
   return { server, port: bound };
@@ -517,8 +588,13 @@ export const PAGE_HTML = `<!doctype html>
   a { color:var(--accent); }
   .logpane { margin-top:18px; }
   .logpane h2 { font-size:14px; margin:0 0 6px; }
+  .logsearch { width:100%; padding:6px 10px; border:1px solid var(--line); border-radius:6px; font:inherit; color:var(--fg); background:var(--card); margin-bottom:8px; }
+  .logsearch:focus { outline:none; border-color:var(--accent); }
   pre.log { background:var(--card); border:1px solid var(--line); border-radius:6px; padding:12px; max-height:360px; overflow:auto; white-space:pre-wrap; word-break:break-word; margin:0; font:12px/1.5 ui-monospace, monospace; }
   .empty { color:var(--muted); }
+  .issue-title { color:var(--muted); font-size:13px; }
+  .issue-title.empty { font-style:italic; }
+  .lognomatch { color:var(--muted); padding:12px; }
 </style>
 </head>
 <body>
@@ -544,12 +620,14 @@ export const PAGE_HTML = `<!doctype html>
   </div>
   <div class="logpane" id="logpane" hidden>
     <h2 id="logtitle"></h2>
+    <input type="search" id="logsearch" class="logsearch" placeholder="Filter log lines…" autocomplete="off">
+    <div id="lognomatch" class="lognomatch" hidden>No matches.</div>
     <pre class="log" id="log"></pre>
   </div>
 </main>
 <script>
   const $ = (id) => document.getElementById(id);
-  let selected = null, logSource = null, panelOpen = false, snapshot = { workers: [], escalations: [], hint: null };
+  let selected = null, logSource = null, logBuffer = "", panelOpen = false, snapshot = { workers: [], escalations: [], hint: null };
 
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
 
@@ -585,6 +663,16 @@ export const PAGE_HTML = `<!doctype html>
     return '<span class="gauge ' + cls + '">' + w.attempts + " / " + w.reworkCap + "</span>";
   }
 
+  function issueCell(w) {
+    const num = "#" + esc(w.issue);
+    const link = w.issueUrl ? '<a href="' + esc(w.issueUrl) + '" target="_blank" rel="noopener">' + num + "</a>" : num;
+    if (w.issueTitle) {
+      const title = esc(w.issueTitle);
+      return link + ' <span class="issue-title">' + title + "</span>";
+    }
+    return link + ' <span class="issue-title empty">—</span>';
+  }
+
   function renderEscalations() {
     const el = $("escalations");
     if (!snapshot.escalations.length) { el.innerHTML = '<div class="empty">No errors.</div>'; return; }
@@ -616,7 +704,7 @@ export const PAGE_HTML = `<!doctype html>
     const pr = w.prUrl ? '<a href="' + esc(w.prUrl) + '" target="_blank" rel="noopener">#' + esc(w.pr) + "</a>"
       : (w.pr != null ? "#" + esc(w.pr) : '<span class="empty">—</span>');
     return '<tr class="worker' + (w.issue === selected ? " sel" : "") + '" data-issue="' + w.issue + '">' +
-      "<td>#" + esc(w.issue) + "</td>" +
+      "<td>" + issueCell(w) + "</td>" +
       '<td class="status">' + esc(w.status) + "</td>" +
       '<td><span class="adapter">' + avatarImg(w) + "<span>" + esc(w.adapter || "—") + "</span></span></td>" +
       "<td>" + attemptsText(w) + "</td>" +
@@ -662,12 +750,44 @@ export const PAGE_HTML = `<!doctype html>
     const pane = $("logpane");
     pane.hidden = false;
     $("logtitle").textContent = "Log — issue #" + issue;
-    $("log").textContent = "";
+    $("logsearch").value = "";
+    logBuffer = "";
+    renderLog();
     renderWorkers();
     logSource = new EventSource("/api/log?issue=" + issue);
-    logSource.addEventListener("log", (ev) => { $("log").textContent += JSON.parse(ev.data); $("log").scrollTop = $("log").scrollHeight; });
-    logSource.addEventListener("note", (ev) => { $("log").textContent = JSON.parse(ev.data); });
+    logSource.addEventListener("log", (ev) => { logBuffer += JSON.parse(ev.data); renderLog(); });
+    logSource.addEventListener("note", (ev) => { logBuffer = JSON.parse(ev.data); renderLog(); });
   }
+
+  // Re-render the log pane from logBuffer, applying the active search query.
+  // An empty query shows the full tail; a non-empty query filters to matching
+  // lines (case-insensitive); zero matches shows a "no matches" message, never
+  // a blank pane. New tailed lines arrive via the log/note handlers above, which
+  // append to logBuffer and call renderLog, so the filter is always respected.
+  function renderLog() {
+    const q = $("logsearch").value.trim().toLowerCase();
+    const pre = $("log");
+    const nomatch = $("lognomatch");
+    if (!q) {
+      pre.hidden = false;
+      pre.textContent = logBuffer;
+      nomatch.hidden = true;
+      pre.scrollTop = pre.scrollHeight;
+      return;
+    }
+    const matched = logBuffer.split("\\n").filter((l) => l.toLowerCase().includes(q));
+    if (matched.length === 0 && logBuffer.length > 0) {
+      pre.hidden = true;
+      nomatch.hidden = false;
+    } else {
+      pre.hidden = false;
+      pre.textContent = matched.join("\\n");
+      nomatch.hidden = true;
+      pre.scrollTop = pre.scrollHeight;
+    }
+  }
+
+  $("logsearch").addEventListener("input", renderLog);
 
   function render() { renderErrToggle(); renderEscalations(); renderWorkers(); }
 
