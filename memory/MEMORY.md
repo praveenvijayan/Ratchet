@@ -46,6 +46,11 @@ Rules:
   label → that close; sweeps are counted from `sweep-stale-claims`'
   `Stale claim swept:` comment marker. Engine `scripts/ratchet-metrics.mjs` (#40),
   skill (#20).
+- The review-time label flip is system-closed: `review-verdict` (triggered on
+  `pull_request_review: submitted`) is the single owner of the
+  in-review → changes-requested transition; herd's supervisor and chat agents
+  rely on it rather than duplicating the check. One-directional — the flip back
+  to in-review after rework stays with the agent (#197).
 
 ## Gotchas & fragile areas
 - (e.g.) Payments module has no test harness; integration tests hit the sandbox API (#88).
