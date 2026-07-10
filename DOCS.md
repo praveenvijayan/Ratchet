@@ -202,6 +202,8 @@ scripts/
   herd-dispatch.test.mjs        Regression test for herd dispatcher
   herd-monitor.mjs              ratchet-herd worker monitor: verify/resume/escalate
   herd-monitor.test.mjs         Regression test for herd monitor
+  herd-retention.mjs            ratchet-herd retention: prune events.jsonl + herd-escalations.md
+  herd-retention.test.mjs       Regression test for herd retention
   herd-verify.mjs               ratchet-herd PR verifier: conflict rework/escalate
   herd-verify.test.mjs          Regression test for herd PR verify
   herd-review.mjs               ratchet-herd review-verdict reactor: changes-requested rework/escalate
@@ -212,6 +214,7 @@ scripts/
   herd-avatar.test.mjs          Regression test for dashboard adapter avatars
   herd-ui-log-search.test.mjs   Regression test for log drill-down search/filter
   herd-ui-escalation.test.mjs   Regression test for escalation dedup/resolution
+  herd-ui-acknowledge.test.mjs  Regression test for escalation copy/acknowledge
   herd-ui-adapter-failures.test.mjs Regression test for per-adapter dispatch-failure aggregation
   herd-ui-summary-strip.test.mjs Regression test for the one-glance fleet-summary strip
   plan-sync-concurrency.test.mjs Workflow concurrency regression test
@@ -706,7 +709,7 @@ gh secret set FACTORY_PAT          # enable workflow chaining
 
 # Fleet supervisor (optional, ratchet-herd)
 node scripts/herd.mjs init         # write a default .ratchet/herd.json
-node scripts/herd.mjs run          # survey → dispatch → monitor → verify → review, one issue per worker
+node scripts/herd.mjs run          # survey → monitor → verify → review → retention → dispatch, one issue per worker
 ```
 
 ---
@@ -917,6 +920,19 @@ pass, and every filesystem hiccup is swallowed so log hygiene never crashes a
 poll. Set `logRetentionDays` in `.ratchet/herd.json`; a non-positive or
 non-integer value is rejected on load with a one-line error naming the file and
 field.
+
+The same `logRetentionDays` window bounds the two other append-only files —
+`events.jsonl` and `herd-escalations.md` — via the `retention` stage
+(`scripts/herd-retention.mjs`), which runs every poll (dry-run included, like log
+pruning). An event line older than the window is dropped unless its issue still
+has a live worker, whose history is kept regardless of age; an undated or
+unparseable line is always kept. An escalation block is dropped only when it is
+**both** older than the window **and** resolved per the same model the dashboard
+uses (a stale-claim escalation whose ref is gone, or a PR-concluded escalation
+whose issue has since closed) — an unresolved escalation never ages out, so a live
+alert is never lost. Blocks are sliced from the raw text, so multi-line log tails
+survive verbatim. The stage reports how many event lines and escalation blocks it
+pruned on its poll summary line.
 
 ### Events: `.ratchet/events.jsonl`
 

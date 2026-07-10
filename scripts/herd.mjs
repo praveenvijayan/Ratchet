@@ -21,6 +21,7 @@ import { dispatchOne, surveyReady } from "./herd-dispatch.mjs";
 import { monitorOnce } from "./herd-monitor.mjs";
 import { verifyOnce } from "./herd-verify.mjs";
 import { reviewOnce } from "./herd-review.mjs";
+import { retentionOnce } from "./herd-retention.mjs";
 
 // Config location, relative to the repo root. Entrypoints anchor it there via
 // resolveRepoRoot so `init`/`run` touch the same file from any subdirectory.
@@ -553,6 +554,12 @@ if (isMain) {
           o.log(`herd: review failed: ${e.message}; continuing to dispatch.`);
         });
       }
+      // Bound events.jsonl / herd-escalations.md growth (mirrors pruneLogs, which
+      // pollOnce runs); it only reads and rewrites local files, so — like log
+      // pruning — it runs every poll, dry-run included.
+      await retentionOnce({ ...o, config }).catch((e) => {
+        o.log(`herd: retention failed: ${e.message}; continuing to dispatch.`);
+      });
       const ready = await surveyReady(o.gh).catch((e) => {
         o.log(`herd: dispatch survey failed: ${e.message}; skipping dispatch this poll.`);
         return [];
