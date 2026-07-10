@@ -24,6 +24,7 @@
     { "path": ".github/workflows/archive-closed-plans.yml", "class": "framework", "profile": "core" },
     { "path": ".github/workflows/release.yml", "class": "framework", "profile": "release" },
     { "path": ".github/workflows/ratchet-run.yml", "class": "framework", "profile": "unattended-ci" },
+    { "path": "scripts/bootstrap.sh", "class": "framework", "profile": "core" },
     { "path": "scripts/plan-sync.mjs", "class": "framework", "profile": "core" },
     { "path": "scripts/unblock-dependents.mjs", "class": "framework", "profile": "core" },
     { "path": "scripts/sweep-stale-claims.mjs", "class": "framework", "profile": "core" },
