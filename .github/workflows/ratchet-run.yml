@@ -118,7 +118,7 @@ jobs:
             Follow the operating manual in AGENTS.md exactly.
             Work issue #${{ steps.pick.outputs.number }} end to end:
             - Claim it: branch agent/issue-${{ steps.pick.outputs.number }} from
-              up-to-date main, set label state:in-progress.
+              up-to-date main, set label state:in-progress and remove state:ready.
             - Build to the issue's acceptance criteria, small commits.
             - Run the gates in GATES.md in order, fail-fast. Never open a red PR.
             - Open a PR whose first line is "Closes #${{ steps.pick.outputs.number }}",
