@@ -18,8 +18,9 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { realpathSync } from "node:fs";
 
-import { readState, STATE_FILE, EVENTS_FILE, ESCALATIONS_FILE } from "./herd-survey.mjs";
-import { DEFAULTS, loadConfig, HerdConfigError } from "./herd.mjs";
+import { join } from "node:path";
+import { readState, STATE_FILE, EVENTS_FILE, ESCALATIONS_FILE, resolveRepoRoot, ratchetPaths } from "./herd-survey.mjs";
+import { DEFAULTS, CONFIG_PATH, loadConfig, HerdConfigError } from "./herd.mjs";
 import { defaultAvatarFor } from "./herd-avatars.mjs";
 import { TERMINAL_STATUS } from "./herd-monitor.mjs";
 
@@ -452,9 +453,15 @@ export function parsePort(argv) {
 // listenOrFail) on a port clash so the CLI wrapper can exit non-zero.
 export async function run(argv, { log = console.log, cwd = process.cwd() } = {}) {
   const port = parsePort(argv);
-  const config = loadConfigOrDefaults();
+  // Anchor the dashboard's files at the repo root, not the cwd, so it renders the
+  // supervisor's real state from any subdirectory — and throws (caught by the CLI
+  // guard below into a non-zero exit) rather than an empty dashboard when run
+  // from outside any checkout.
+  const root = resolveRepoRoot(cwd);
+  const { statePath, eventsPath, escalationsPath } = ratchetPaths(root);
+  const config = loadConfigOrDefaults(join(root, CONFIG_PATH));
   const repoSlug = resolveRepoSlug(gitOriginUrl(cwd));
-  const server = createDashboardServer({ config, repoSlug });
+  const server = createDashboardServer({ statePath, eventsPath, escalationsPath, config, repoSlug });
   const bound = await listenOrFail(server, port);
   log(`Herd dashboard on http://localhost:${bound}  (Ctrl-C to stop)`);
   return { server, port: bound };
@@ -516,10 +523,13 @@ export const PAGE_HTML = `<!doctype html>
   a { color:var(--accent); }
   .logpane { margin-top:18px; }
   .logpane h2 { font-size:14px; margin:0 0 6px; }
+  .logsearch { width:100%; padding:6px 10px; border:1px solid var(--line); border-radius:6px; font:inherit; color:var(--fg); background:var(--card); margin-bottom:8px; }
+  .logsearch:focus { outline:none; border-color:var(--accent); }
   pre.log { background:var(--card); border:1px solid var(--line); border-radius:6px; padding:12px; max-height:360px; overflow:auto; white-space:pre-wrap; word-break:break-word; margin:0; font:12px/1.5 ui-monospace, monospace; }
   .empty { color:var(--muted); }
   .issue-title { color:var(--muted); font-size:13px; }
   .issue-title.empty { font-style:italic; }
+  .lognomatch { color:var(--muted); padding:12px; }
 </style>
 </head>
 <body>
@@ -545,12 +555,14 @@ export const PAGE_HTML = `<!doctype html>
   </div>
   <div class="logpane" id="logpane" hidden>
     <h2 id="logtitle"></h2>
+    <input type="search" id="logsearch" class="logsearch" placeholder="Filter log lines…" autocomplete="off">
+    <div id="lognomatch" class="lognomatch" hidden>No matches.</div>
     <pre class="log" id="log"></pre>
   </div>
 </main>
 <script>
   const $ = (id) => document.getElementById(id);
-  let selected = null, logSource = null, panelOpen = false, snapshot = { workers: [], escalations: [], hint: null };
+  let selected = null, logSource = null, logBuffer = "", panelOpen = false, snapshot = { workers: [], escalations: [], hint: null };
 
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
 
@@ -645,12 +657,44 @@ export const PAGE_HTML = `<!doctype html>
     const pane = $("logpane");
     pane.hidden = false;
     $("logtitle").textContent = "Log — issue #" + issue;
-    $("log").textContent = "";
+    $("logsearch").value = "";
+    logBuffer = "";
+    renderLog();
     renderWorkers();
     logSource = new EventSource("/api/log?issue=" + issue);
-    logSource.addEventListener("log", (ev) => { $("log").textContent += JSON.parse(ev.data); $("log").scrollTop = $("log").scrollHeight; });
-    logSource.addEventListener("note", (ev) => { $("log").textContent = JSON.parse(ev.data); });
+    logSource.addEventListener("log", (ev) => { logBuffer += JSON.parse(ev.data); renderLog(); });
+    logSource.addEventListener("note", (ev) => { logBuffer = JSON.parse(ev.data); renderLog(); });
   }
+
+  // Re-render the log pane from logBuffer, applying the active search query.
+  // An empty query shows the full tail; a non-empty query filters to matching
+  // lines (case-insensitive); zero matches shows a "no matches" message, never
+  // a blank pane. New tailed lines arrive via the log/note handlers above, which
+  // append to logBuffer and call renderLog, so the filter is always respected.
+  function renderLog() {
+    const q = $("logsearch").value.trim().toLowerCase();
+    const pre = $("log");
+    const nomatch = $("lognomatch");
+    if (!q) {
+      pre.hidden = false;
+      pre.textContent = logBuffer;
+      nomatch.hidden = true;
+      pre.scrollTop = pre.scrollHeight;
+      return;
+    }
+    const matched = logBuffer.split("\\n").filter((l) => l.toLowerCase().includes(q));
+    if (matched.length === 0 && logBuffer.length > 0) {
+      pre.hidden = true;
+      nomatch.hidden = false;
+    } else {
+      pre.hidden = false;
+      pre.textContent = matched.join("\\n");
+      nomatch.hidden = true;
+      pre.scrollTop = pre.scrollHeight;
+    }
+  }
+
+  $("logsearch").addEventListener("input", renderLog);
 
   function render() { renderErrToggle(); renderEscalations(); renderWorkers(); }
 

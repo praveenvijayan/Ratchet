@@ -57,6 +57,7 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 | 4x    | test: skill-parity              | `node scripts/skill-parity.test.mjs`              | exit 0 |
 | 4y    | test: herd-ui                   | `node scripts/herd-ui.test.mjs`                   | exit 0 |
 | 4y2   | test: herd-avatar               | `node scripts/herd-avatar.test.mjs`               | exit 0 |
+| 4y3   | test: herd-ui-log-search        | `node scripts/herd-ui-log-search.test.mjs`        | exit 0 |
 | 4r    | test-coverage                   | `node scripts/gates-coverage.mjs`                 | exit 0 |
 | 4z    | skill-parity                    | `node scripts/skill-parity.mjs`                   | exit 0 |
 | 5     | build       | TODO: build command               | —              |
