@@ -107,6 +107,42 @@ export function latestClaimTs(events, issue) {
   return ts;
 }
 
+// The timestamp of the newest heartbeat event, or null when the stream carries
+// none — the supervisor has never been seen. Heartbeats are fleet-wide and
+// carry no issue, so this scans only by event type.
+export function latestHeartbeatTs(events) {
+  let ts = null;
+  for (const e of events) {
+    if (e.event !== "heartbeat") continue;
+    if (ts === null || String(e.ts) > ts) ts = String(e.ts);
+  }
+  return ts;
+}
+
+// How long the dashboard tolerates silence before it alarms, derived from the
+// poll interval: a heartbeat lands every `pollSeconds`, so missing more than a
+// couple of polls means the supervisor has stopped. The factor gives one whole
+// missed poll of slack past that before the banner fires, so a single slow poll
+// never cries wolf.
+export const HEARTBEAT_SILENCE_FACTOR = 2.5;
+export function heartbeatThresholdSeconds(pollSeconds) {
+  const base = Number.isFinite(pollSeconds) && pollSeconds > 0 ? pollSeconds : DEFAULTS.pollSeconds;
+  return Math.max(1, Math.round(base * HEARTBEAT_SILENCE_FACTOR));
+}
+
+// Classify supervisor liveness from the last heartbeat: "unseen" when there is
+// none at all, "silent" when the newest is older than the threshold, "live"
+// otherwise. Pure and clock-injectable so the server, the API, and the browser
+// tick all reach the same verdict from the same inputs.
+export function heartbeatStatus({ lastHeartbeatTs, thresholdSeconds, now = Date.now() }) {
+  const parsed = lastHeartbeatTs ? Date.parse(lastHeartbeatTs) : NaN;
+  // No heartbeat, or one whose timestamp will not parse, is "never seen" — never
+  // silently reported as live with a nonsense age.
+  if (!Number.isFinite(parsed)) return { state: "unseen", ageSeconds: null };
+  const ageSeconds = Math.max(0, Math.floor((now - parsed) / 1000));
+  return { state: ageSeconds > thresholdSeconds ? "silent" : "live", ageSeconds };
+}
+
 // Build a clickable PR URL from an "owner/repo" slug, or null when the slug is
 // unknown (git remote absent) so the link simply does not render.
 export function prUrl(repoSlug, prNumber) {
@@ -404,7 +440,17 @@ export function readSnapshot({
     }
   }
   const hint = workers.length === 0 && escalations.length === 0 ? EMPTY_HINT : null;
-  return { workers, escalations, hint };
+
+  // Supervisor liveness, distinct from UI-server liveness. lastHeartbeatTs and
+  // thresholdSeconds are sent so the browser can re-derive the age (and the
+  // silent/live transition) locally every second; ageSeconds/state are the
+  // server-side snapshot for the API and tests.
+  const lastHeartbeatTs = latestHeartbeatTs(events);
+  const thresholdSeconds = heartbeatThresholdSeconds(config?.pollSeconds);
+  const { state: hbState, ageSeconds } = heartbeatStatus({ lastHeartbeatTs, thresholdSeconds, now });
+  const heartbeat = { lastHeartbeatTs, thresholdSeconds, ageSeconds, state: hbState };
+
+  return { workers, escalations, hint, heartbeat };
 }
 
 // A change key that ignores the ever-advancing clock, so the live stream pushes
@@ -412,7 +458,12 @@ export function readSnapshot({
 // an age ticked. Ages are recomputed by the browser from claimStartTs.
 export function snapshotKey(snapshot) {
   const workers = snapshot.workers.map(({ claimAgeSeconds, ...rest }) => rest);
-  return JSON.stringify({ workers, escalations: snapshot.escalations, hint: snapshot.hint });
+  // Drop the clock-derived heartbeat fields (ageSeconds/state) for the same
+  // reason as claim ages: the browser recomputes them each second, so keeping
+  // them here would push a frame every tick. A new heartbeat changes
+  // lastHeartbeatTs, which does re-push.
+  const { ageSeconds, state, ...heartbeat } = snapshot.heartbeat || {};
+  return JSON.stringify({ workers, escalations: snapshot.escalations, hint: snapshot.hint, heartbeat });
 }
 
 // --- incremental log tail ----------------------------------------------------
@@ -644,6 +695,9 @@ export const PAGE_HTML = `<!doctype html>
   header .dot.live { background:#2da44e; }
   main { padding:20px; max-width:1100px; margin:0 auto; }
   .hint { color:var(--muted); padding:40px 0; text-align:center; }
+  .hbbanner { border-radius:6px; padding:12px 16px; margin-bottom:16px; font-weight:600; border:1px solid; border-left-width:4px; }
+  .hbbanner.silent { color:var(--over); border-color:var(--over); background:color-mix(in srgb, var(--over) 10%, transparent); }
+  .hbbanner.unseen { color:var(--warn); border-color:var(--warn); background:color-mix(in srgb, var(--warn) 10%, transparent); }
   .layout { display:flex; gap:16px; align-items:flex-start; }
   .fleet { flex:1 1 auto; min-width:0; }
   .fleet-toolbar { display:flex; align-items:center; gap:12px; margin-bottom:12px; }
@@ -703,6 +757,7 @@ export const PAGE_HTML = `<!doctype html>
   <span><span class="dot" id="livedot"></span> <span id="livetext" class="empty">connecting…</span></span>
 </header>
 <main>
+  <div id="hbbanner" class="hbbanner" role="status" hidden></div>
   <div class="layout" id="layout">
     <div class="fleet" id="fleet">
       <div class="fleet-toolbar">
@@ -727,7 +782,8 @@ export const PAGE_HTML = `<!doctype html>
 </main>
 <script>
   const $ = (id) => document.getElementById(id);
-  let selected = null, logSource = null, logBuffer = "", panelOpen = false, snapshot = { workers: [], escalations: [], hint: null };
+  let selected = null, logSource = null, logBuffer = "", panelOpen = false, gotSnapshot = false;
+  let snapshot = { workers: [], escalations: [], hint: null, heartbeat: null };
 
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
 
@@ -874,6 +930,43 @@ export const PAGE_HTML = `<!doctype html>
     logSource.addEventListener("note", (ev) => { logBuffer = JSON.parse(ev.data); renderLog(); });
   }
 
+  function durText(secs) {
+    if (secs < 60) return secs + "s";
+    const m = Math.floor(secs / 60), s = secs % 60;
+    return s ? m + "m" + s + "s" : m + "m";
+  }
+
+  // Supervisor liveness, recomputed locally every tick from the last heartbeat
+  // so the age advances and the silent banner appears without a page reload or a
+  // server push. The green dot means "supervisor still polling" — never merely
+  // "UI server up": with no heartbeat at all the dot stays grey and labelled.
+  function renderHeartbeat() {
+    if (!gotSnapshot) return;
+    const hb = snapshot.heartbeat || {};
+    const dot = $("livedot"), text = $("livetext"), banner = $("hbbanner");
+    text.classList.remove("empty");
+    if (hb.lastHeartbeatTs == null || !Number.isFinite(Date.parse(hb.lastHeartbeatTs))) {
+      dot.classList.remove("live");
+      text.textContent = "supervisor not seen";
+      banner.hidden = false;
+      banner.className = "hbbanner unseen";
+      banner.textContent = "Supervisor has not been seen — no heartbeat in the event stream yet.";
+      return;
+    }
+    const age = Math.max(0, Math.floor((Date.now() - Date.parse(hb.lastHeartbeatTs)) / 1000));
+    if (age > hb.thresholdSeconds) {
+      dot.classList.remove("live");
+      text.textContent = "supervisor silent";
+      banner.hidden = false;
+      banner.className = "hbbanner silent";
+      banner.textContent = "Supervisor silent since " + durText(age) + " — last heartbeat " + durText(age) + " ago.";
+    } else {
+      dot.classList.add("live");
+      text.textContent = "supervisor live · heartbeat " + durText(age) + " ago";
+      banner.hidden = true;
+    }
+  }
+
   // Re-render the log pane from logBuffer, applying the active search query.
   // An empty query shows the full tail; a non-empty query filters to matching
   // lines (case-insensitive); zero matches shows a "no matches" message, never
@@ -904,7 +997,7 @@ export const PAGE_HTML = `<!doctype html>
 
   $("logsearch").addEventListener("input", renderLog);
 
-  function render() { renderErrToggle(); renderEscalations(); renderWorkers(); }
+  function render() { renderErrToggle(); renderEscalations(); renderWorkers(); renderHeartbeat(); }
 
   $("errtoggle").addEventListener("click", () => { panelOpen = !panelOpen; applyPanel(); });
   $("errclose").addEventListener("click", () => { panelOpen = false; applyPanel(); });
@@ -912,15 +1005,17 @@ export const PAGE_HTML = `<!doctype html>
   const stream = new EventSource("/api/stream");
   stream.addEventListener("snapshot", (ev) => {
     snapshot = JSON.parse(ev.data);
-    $("livedot").classList.add("live");
-    $("livetext").textContent = "live";
-    $("livetext").classList.remove("empty");
+    gotSnapshot = true;
     render();
   });
-  stream.onerror = () => { $("livedot").classList.remove("live"); $("livetext").textContent = "reconnecting…"; };
 
-  // Tick ages locally once a second without waiting on a server push.
-  setInterval(() => { if (snapshot.workers.length) renderWorkers(); }, 1000);
+  // Tick locally once a second without waiting on a server push: claim ages
+  // advance, and the heartbeat age climbs so the silent banner appears on its
+  // own the moment the supervisor stops emitting — the whole point of the alarm.
+  setInterval(() => {
+    if (snapshot.workers.length) renderWorkers();
+    renderHeartbeat();
+  }, 1000);
 </script>
 </body>
 </html>`;

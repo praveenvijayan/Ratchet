@@ -81,6 +81,10 @@ export const HERD_EVENT_TYPES = Object.freeze([
   "worker-exit",
   "worker-kill",
   "escalation",
+  // Liveness proof: the supervisor appends one of these per poll pass so the
+  // dashboard can tell "still polling" apart from "UI server merely up". Unlike
+  // every other event it is not about an issue, so it carries no `issue` field.
+  "heartbeat",
 ]);
 
 // Statuses the pipeline has already resolved — a stage escalated or handed them
@@ -225,7 +229,10 @@ export function writeRouting(path, cursors) {
 
 export function formatHerdEvent({ now = Date.now(), event, issue, adapter, pid, logFile, attempts, pr, status, costUsd, tokensIn, tokensOut }) {
   if (!HERD_EVENT_TYPES.includes(event)) throw new Error(`unknown herd event type: ${event}`);
-  const line = { ts: new Date(now).toISOString(), event, issue: Number(issue) };
+  const line = { ts: new Date(now).toISOString(), event };
+  // Every event but `heartbeat` is about an issue; a heartbeat is fleet-wide, so
+  // it is logged with no `issue` field rather than a meaningless one.
+  if (issue !== undefined && issue !== null) line.issue = Number(issue);
   // Usage fields (costUsd/tokensIn/tokensOut) are optional: omitted when
   // undefined (an adapter with no usage mapping), but a declared-yet-unreadable
   // value is passed as null and recorded as null — the absence of a mapping and
@@ -387,6 +394,18 @@ export async function pollOnce({
   config = null,
   prune = pruneLogs,
 }) {
+  const stamp = now ?? Date.now();
+
+  // Heartbeat first, before anything that can fail. The point of the heartbeat
+  // is to prove the supervisor is alive and still polling, so it must land once
+  // per poll pass whether or not the survey below succeeds — a poll whose gh
+  // survey fails is a live supervisor with a transient outage, not a dead one.
+  // Its append failure is swallowed, not warned: a heartbeat fires every poll,
+  // so a warning per poll on a broken events path would flood the log — and the
+  // user-facing signal for missing heartbeats is the dashboard's "supervisor
+  // not seen / silent" banner, not a log line.
+  appendHerdEvent(eventsPath, { now: stamp, event: "heartbeat" }, () => {});
+
   let reality;
   try {
     reality = await surveyReality(gh);
@@ -397,8 +416,6 @@ export async function pollOnce({
 
   const openPrNumbers = new Set(reality.openPrs.map((p) => Number(p.number)));
   const { state, changes } = reconcileState(readState(statePath), { openPrNumbers }, isAlive);
-
-  const stamp = now ?? Date.now();
   for (const c of changes) {
     appendEscalation(escalationsPath, {
       now: stamp,
