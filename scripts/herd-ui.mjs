@@ -19,6 +19,7 @@ import { realpathSync } from "node:fs";
 
 import { readState, STATE_FILE, EVENTS_FILE, ESCALATIONS_FILE } from "./herd-survey.mjs";
 import { DEFAULTS, loadConfig, HerdConfigError } from "./herd.mjs";
+import { TERMINAL_STATUS } from "./herd-monitor.mjs";
 
 export const DEFAULT_PORT = 4780;
 
@@ -141,15 +142,18 @@ export function buildWorkers({ state, events, config, now = Date.now(), repoSlug
     const claimStartTs = latestClaimTs(events, issue);
     const claimAgeSeconds =
       claimStartTs !== null ? Math.max(0, Math.floor((now - Date.parse(claimStartTs)) / 1000)) : null;
+    const status = e.status ?? "unknown";
+    const claimActive = e.pid != null && !TERMINAL_STATUS.has(status);
     rows.push({
       issue,
-      status: e.status ?? "unknown",
+      status,
       adapter: e.adapter ?? null,
       pid: e.pid ?? null,
       attempts: e.attempts ?? 0,
       reworkCap: config.reworkCap,
       claimStartTs,
       claimAgeSeconds,
+      claimActive,
       claimTimeoutSeconds: config.claimTimeoutSeconds,
       pr: e.pr ?? null,
       prUrl: prUrl(repoSlug, e.pr ?? null),
@@ -473,9 +477,12 @@ const PAGE_HTML = `<!doctype html>
   function ageText(w) {
     if (w.claimStartTs == null) return "—";
     const secs = Math.max(0, Math.floor((Date.now() - Date.parse(w.claimStartTs)) / 1000));
-    const cls = secs > w.claimTimeoutSeconds ? "over" : secs > w.claimTimeoutSeconds * 0.75 ? "warn" : "";
     const t = secs >= 60 ? Math.floor(secs / 60) + "m" + (secs % 60) + "s" : secs + "s";
-    return '<span class="gauge ' + cls + '">' + t + " / " + w.claimTimeoutSeconds + "s</span>";
+    if (w.claimActive) {
+      const cls = secs > w.claimTimeoutSeconds ? "over" : secs > w.claimTimeoutSeconds * 0.75 ? "warn" : "";
+      return '<span class="gauge ' + cls + '">' + t + " / " + w.claimTimeoutSeconds + "s</span>";
+    }
+    return '<span class="gauge">' + t + "</span>";
   }
   function attemptsText(w) {
     const cls = w.attempts >= w.reworkCap ? "over" : w.attempts >= w.reworkCap ? "warn" : "";
@@ -520,7 +527,7 @@ const PAGE_HTML = `<!doctype html>
         "<td>" + ageText(w) + "</td>" +
         "<td>" + pr + "</td></tr>";
     }).join("");
-    host.innerHTML = '<table><thead><tr><th>Issue</th><th>Status</th><th>Adapter</th><th>Attempts</th><th>Claim age</th><th>PR</th></tr></thead><tbody>' + rows + "</tbody></table>";
+    host.innerHTML = '<table><thead><tr><th>Issue</th><th>Status</th><th>Adapter</th><th>Attempts</th><th>Age</th><th>PR</th></tr></thead><tbody>' + rows + "</tbody></table>";
     host.querySelectorAll("tr.worker").forEach((tr) => tr.addEventListener("click", () => select(Number(tr.dataset.issue))));
   }
 
