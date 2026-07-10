@@ -229,6 +229,8 @@ scripts/
   run-gates.test.mjs            Regression test for the gate runner
   skill-parity.mjs              Guard: every skill has agents/openai.yaml + byte-identical .claude/plugin mirrors
   skill-parity.test.mjs         Regression test for the cross-agent parity guard
+  state-label-exclusivity.mjs   Enforce one state:* label per issue on a labeled event
+  state-label-exclusivity.test.mjs Regression test for state-label exclusivity
   sweep-lease.mjs               Shared claim lease freshness rule
   sweep-lease.test.mjs          Regression test for renewable leases
   sweep-stale-claims.mjs        Return abandoned work to the queue
@@ -244,6 +246,7 @@ scripts/
   ratchet-run.yml               OPTIONAL CI runner (off by default)
   release.yml                   OPTIONAL release tag + changelog lane
   unblock-dependents.yml        On issue close, promote unblocked dependents
+  state-label-exclusivity.yml   On label add, keep one state:* label per issue
   sweep-stale-claims.yml        Return abandoned work to the queue
 .agents/skills/<name>/          Canonical skills (Codex + Antigravity)
 .claude/skills/<name>/          Mirror for Claude Code
