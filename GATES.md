@@ -55,6 +55,7 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 | 4u    | test: herd-dispatch             | `node scripts/herd-dispatch.test.mjs`             | exit 0 |
 | 4v    | test: herd-monitor              | `node scripts/herd-monitor.test.mjs`              | exit 0 |
 | 4w    | test: herd-verify               | `node scripts/herd-verify.test.mjs`               | exit 0 |
+| 4w1   | test: herd-review               | `node scripts/herd-review.test.mjs`               | exit 0 |
 | 4x    | test: skill-parity              | `node scripts/skill-parity.test.mjs`              | exit 0 |
 | 4y    | test: herd-ui                   | `node scripts/herd-ui.test.mjs`                   | exit 0 |
 | 4y2   | test: herd-avatar               | `node scripts/herd-avatar.test.mjs`               | exit 0 |
