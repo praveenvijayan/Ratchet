@@ -32,6 +32,12 @@ export const CONFIG_PATH = ".ratchet/herd.json";
 export const SELECTION_POLICIES = Object.freeze(["failover", "round-robin"]);
 export const DEFAULT_POLICY = "failover";
 
+// The usage numbers a herd worker can report on its worker-exit event. An
+// adapter declares how to read each of these from its own log via a `usage`
+// mapping (see normalizeConfig / extractUsage); the framework never knows any
+// CLI's log format — the mapping is config, like {model}.
+export const USAGE_FIELDS = Object.freeze(["costUsd", "tokensIn", "tokensOut"]);
+
 // Optional top-level fields and the defaults applied when they are omitted.
 export const DEFAULTS = Object.freeze({
   maxWorkers: 3,
@@ -108,6 +114,37 @@ export function substitute(template, vars = {}) {
   return Array.isArray(template) ? template.map(render) : render(template);
 }
 
+// Extract an adapter's usage numbers from its log text using its config-driven
+// `usage` mapping — each field a regex whose first capture group is the number.
+// Pure and total: a field whose pattern is invalid, does not match, or captures
+// a non-number resolves to null and is named in `unresolved`, so the caller can
+// warn without extraction ever throwing (the worker-exit path must never crash).
+// Returns { values: { costUsd, tokensIn, tokensOut }, unresolved: [field, ...] }.
+export function extractUsage(usage, logText) {
+  const text = typeof logText === "string" ? logText : "";
+  const values = {};
+  const unresolved = [];
+  for (const field of USAGE_FIELDS) {
+    const pattern = usage && usage[field];
+    let value = null;
+    if (typeof pattern === "string" && pattern !== "") {
+      try {
+        const m = new RegExp(pattern).exec(text);
+        if (m && m[1] !== undefined) {
+          const n = Number(m[1]);
+          if (Number.isFinite(n)) value = n;
+        }
+      } catch {
+        // An invalid regex slipped past config validation — treat as unresolved
+        // rather than throw; a bad mapping must not crash the supervisor.
+      }
+    }
+    values[field] = value;
+    if (value === null) unresolved.push(field);
+  }
+  return { values, unresolved };
+}
+
 const isPlainObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 
 // Validate a parsed config object and return a normalized copy: optional
@@ -149,6 +186,23 @@ export function normalizeConfig(raw, file = CONFIG_PATH) {
     ].some((part) => /\{model\}/.test(String(part)));
     if (usesModel && !hasModel)
       fail(`adapter "${name}" uses {model} but declares no "model" field.`);
+    // Optional: a config-driven mapping declaring how to extract this adapter's
+    // cost and token counts from its own log output. Each field is a regex whose
+    // first capture group holds the number, so the core reads values it was
+    // handed without knowing any CLI's log format — the same purity bar as
+    // {model}. When declared, all three fields are required; a missing or
+    // non-string field fails here, naming the adapter and the field on one line.
+    let usage;
+    if ("usage" in adapter) {
+      if (!isPlainObject(adapter.usage))
+        fail(`adapter "${name}" has a "usage" that is not an object mapping ${USAGE_FIELDS.join(", ")} to extraction patterns.`);
+      for (const field of USAGE_FIELDS) {
+        const pattern = adapter.usage[field];
+        if (typeof pattern !== "string" || pattern === "")
+          fail(`adapter "${name}" usage.${field} must be a non-empty string pattern.`);
+      }
+      usage = { costUsd: adapter.usage.costUsd, tokensIn: adapter.usage.tokensIn, tokensOut: adapter.usage.tokensOut };
+    }
     adapters[name] = {
       launch: adapter.launch.slice(),
       // No distinct resume command → resume the same way it launches.
@@ -162,6 +216,9 @@ export function normalizeConfig(raw, file = CONFIG_PATH) {
       // Optional: present only when declared, so a model-free adapter is byte-for-byte
       // the shape it was before {model} existed (back-compat).
       ...(hasModel ? { model: adapter.model } : {}),
+      // Optional: present only when declared, so an adapter with no usage mapping
+      // keeps its exact prior shape and its exit event omits the usage fields.
+      ...(usage ? { usage } : {}),
     };
   }
 

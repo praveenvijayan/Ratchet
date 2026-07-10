@@ -25,6 +25,7 @@ import {
 import { dispatchOne, recordExit } from "./herd-dispatch.mjs";
 import { monitorOnce } from "./herd-monitor.mjs";
 import { verifyOnce } from "./herd-verify.mjs";
+import { normalizeConfig } from "./herd.mjs";
 
 const NOW = Date.UTC(2026, 6, 9, 12, 0, 0); // fixed clock — no Date.now dependence
 
@@ -506,4 +507,77 @@ await inTempDir(async () => {
   assert.match(summary, /2 log file\(s\) pruned/, "the summary line reports the number pruned this pass");
 });
 
-console.log("PASS herd-survey.test.mjs (7 criteria + issue #137: 4 criteria + issue #143: 5 criteria + issue #138: 5 criteria + issue #139: 3 criteria)");
+// A raw config whose one adapter declares a usage mapping — each field a regex
+// whose first capture group is the number the core extracts from the log.
+const usageRaw = {
+  adapters: {
+    claude: {
+      launch: ["claude", "-p", "{prompt}"],
+      usage: { costUsd: "cost=\\$([0-9.]+)", tokensIn: "in=(\\d+)", tokensOut: "out=(\\d+)" },
+    },
+  },
+  routing: { default: "claude" },
+};
+
+// Criterion (#163 AC2): when an adapter declares usage, the worker-exit event in
+// the event stream carries the extracted costUsd, tokensIn, and tokensOut.
+await inTempDir(async () => {
+  const config = normalizeConfig(usageRaw);
+  mkdirSync("logs", { recursive: true });
+  writeFileSync("logs/issue-70.log", "starting\ncost=$1.23\nin=4096 out=888\ndone\n");
+  writeFileSync("s.json", JSON.stringify({ 70: { adapter: "claude", pid: 700, logFile: "logs/issue-70.log", attempts: 1, status: "dispatched", pr: null } }));
+  const warns = [];
+  recordExit("s.json", 70, 0, null, { config, eventsPath: "events.jsonl", now: () => NOW, warn: (m) => warns.push(m) });
+  const exit = readEvents("events.jsonl").find((e) => e.event === "worker-exit" && e.issue === 70);
+  assert.ok(exit, "a worker-exit event was written");
+  assert.equal(exit.costUsd, 1.23, "costUsd is extracted from the worker's log");
+  assert.equal(exit.tokensIn, 4096, "tokensIn is extracted from the worker's log");
+  assert.equal(exit.tokensOut, 888, "tokensOut is extracted from the worker's log");
+  assert.deepEqual(warns.filter((m) => /usage field/.test(m)), [], "a fully-read usage log warns about nothing");
+});
+
+// Criterion (#163 AC3): an adapter that declares no usage mapping dispatches and
+// exits exactly as before — its worker-exit event omits the usage fields.
+await inTempDir(async () => {
+  const config = normalizeConfig({ adapters: { claude: { launch: ["claude", "-p", "{prompt}"] } }, routing: { default: "claude" } });
+  assert.ok(!("usage" in config.adapters.claude), "a mapping-free adapter carries no usage field (unchanged shape)");
+  mkdirSync("logs", { recursive: true });
+  writeFileSync("logs/issue-71.log", "cost=$9.99 in=1 out=2\n"); // present but never consulted
+  writeFileSync("s.json", JSON.stringify({ 71: { adapter: "claude", pid: 701, logFile: "logs/issue-71.log", attempts: 1, status: "dispatched", pr: null } }));
+  recordExit("s.json", 71, 0, null, { config, eventsPath: "events.jsonl", now: () => NOW, warn: () => {} });
+  const exit = readEvents("events.jsonl").find((e) => e.event === "worker-exit" && e.issue === 71);
+  assert.ok(exit, "the worker-exit event is still written");
+  for (const field of ["costUsd", "tokensIn", "tokensOut"])
+    assert.ok(!(field in exit), `no usage mapping -> the event omits ${field}`);
+  assert.equal(exit.adapter, "claude", "the pre-existing worker-exit fields are unchanged");
+});
+
+// Criterion (#163 AC5): a log lacking the declared usage values (adapter
+// crashed, truncated output, or the file is gone) records the usage fields as
+// null and logs one one-line warning; recordExit never throws, so the poll continues.
+await inTempDir(async () => {
+  const config = normalizeConfig(usageRaw);
+  mkdirSync("logs", { recursive: true });
+  // Case A: the log exists but the numbers the mapping expects are absent.
+  writeFileSync("logs/issue-72.log", "worker started, then crashed before reporting usage\n");
+  writeFileSync("s.json", JSON.stringify({ 72: { adapter: "claude", pid: 720, logFile: "logs/issue-72.log", attempts: 1, status: "dispatched", pr: null } }));
+  const warnsA = [];
+  assert.doesNotThrow(() => recordExit("s.json", 72, 0, null, { config, eventsPath: "events.jsonl", now: () => NOW, warn: (m) => warnsA.push(m) }));
+  const exitA = readEvents("events.jsonl").find((e) => e.event === "worker-exit" && e.issue === 72);
+  assert.equal(exitA.costUsd, null, "an unreadable value is recorded as null (costUsd)");
+  assert.equal(exitA.tokensIn, null, "an unreadable value is recorded as null (tokensIn)");
+  assert.equal(exitA.tokensOut, null, "an unreadable value is recorded as null (tokensOut)");
+  const usageWarnsA = warnsA.filter((m) => /usage field/.test(m));
+  assert.equal(usageWarnsA.length, 1, "exactly one usage warning is logged");
+  assert.ok(!usageWarnsA[0].includes("\n"), "the warning is a single line");
+
+  // Case B: the log file is gone entirely — still nulls + a warning, no throw.
+  writeFileSync("s2.json", JSON.stringify({ 73: { adapter: "claude", pid: 730, logFile: "logs/does-not-exist.log", attempts: 1, status: "dispatched", pr: null } }));
+  const warnsB = [];
+  assert.doesNotThrow(() => recordExit("s2.json", 73, 0, null, { config, eventsPath: "events2.jsonl", now: () => NOW, warn: (m) => warnsB.push(m) }));
+  const exitB = readEvents("events2.jsonl").find((e) => e.event === "worker-exit" && e.issue === 73);
+  assert.equal(exitB.costUsd, null, "a missing log file records null, not a crash");
+  assert.ok(warnsB.some((m) => /usage field/.test(m)), "the missing-log case still warns on one line");
+});
+
+console.log("PASS herd-survey.test.mjs (7 criteria + issue #137: 4 criteria + issue #143: 5 criteria + issue #138: 5 criteria + issue #139: 3 criteria + issue #163: 3 criteria)");

@@ -153,10 +153,14 @@ export function writeRouting(path, cursors) {
   writeFileSync(path, JSON.stringify(cursors, null, 2) + "\n");
 }
 
-export function formatHerdEvent({ now = Date.now(), event, issue, adapter, pid, logFile, attempts, pr, status }) {
+export function formatHerdEvent({ now = Date.now(), event, issue, adapter, pid, logFile, attempts, pr, status, costUsd, tokensIn, tokensOut }) {
   if (!HERD_EVENT_TYPES.includes(event)) throw new Error(`unknown herd event type: ${event}`);
   const line = { ts: new Date(now).toISOString(), event, issue: Number(issue) };
-  for (const [key, value] of Object.entries({ adapter, pid, logFile, attempts, pr, status })) {
+  // Usage fields (costUsd/tokensIn/tokensOut) are optional: omitted when
+  // undefined (an adapter with no usage mapping), but a declared-yet-unreadable
+  // value is passed as null and recorded as null — the absence of a mapping and
+  // the failure to read one are deliberately distinct on the wire.
+  for (const [key, value] of Object.entries({ adapter, pid, logFile, attempts, pr, status, costUsd, tokensIn, tokensOut })) {
     if (value !== undefined) line[key] = value;
   }
   return line;
