@@ -131,10 +131,13 @@ One or two sentences: what this is and why it exists.
 
 ### Rules the sync enforces
 
-- **`title` + `priority` required.** Without them the file is skipped and logged.
+- **`title` + `priority` required.** Without them the sync aborts: it logs
+  the offending file and exits non-zero, changing nothing — no file is
+  partially synced, no issue is created or updated.
 - **Priority is a closed set.** `priority` must be exactly `high`, `medium`, or
-  `low`. Any other value is a hard skip for that file, logged as an invalid
-  priority, because silently sorting a bad value would corrupt triage order.
+  `low`. Any other value aborts the sync the same way (the file is not
+  "skipped" — the entire run stops, logged as an invalid priority, because
+  silently sorting a bad value would corrupt triage order.
 - **Unknown frontmatter keys are ignored with a warning.** `title`, `priority`,
   `labels`, and `blocked_by` are the only keys the compiler understands. Any
   other key is logged as `WARNING: <file> has unknown frontmatter key '<key>'`
