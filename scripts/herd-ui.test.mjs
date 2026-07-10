@@ -23,6 +23,8 @@ import {
   prUrl,
   resolveRepoSlug,
   buildWorkers,
+  aggregateChecks,
+  createChecksCache,
   readSnapshot,
   snapshotKey,
   tailFrom,
@@ -578,5 +580,138 @@ await inTempDir(async (dir) => {
   for (let n = 1; n <= criteriaCount; n++) assert.ok(unique.has(n), `#171 criterion ${n} has a test`);
 }
 
-console.log("PASS herd-ui.test.mjs (18 criteria)");
+// --- #181 Criterion 1: a row with an open PR shows its combined checks status:
+// passing, failing, or pending. ----------------------------------------------
+await inTempDir(async (dir) => {
+  const statePath = join(dir, "state.json");
+  const eventsPath = join(dir, "events.jsonl");
+  const start = new Date(NOW - 90_000).toISOString();
+  writeFileSync(statePath, JSON.stringify({
+    5: { adapter: "codex", pid: 222, attempts: 2, status: "in-review", pr: 42, logFile: "l5.log" },
+    7: { adapter: "claude", pid: 111, attempts: 1, status: "dispatched", pr: null, logFile: "l7.log" },
+  }));
+  writeFileSync(eventsPath, JSON.stringify({ ts: start, event: "dispatch", issue: 5 }) + "\n");
+
+  // aggregateChecks: the pure derivation behind the combined status
+  assert.equal(aggregateChecks([{ name: "ci", state: "SUCCESS" }]).status, "passing", "all success -> passing");
+  assert.equal(aggregateChecks([{ name: "ci", state: "FAILURE" }]).status, "failing", "any failure -> failing");
+  assert.equal(aggregateChecks([{ name: "ci", state: "PENDING" }]).status, "pending", "pending -> pending");
+  assert.equal(aggregateChecks([]).status, "pending", "no checks yet -> pending");
+  assert.equal(aggregateChecks([{ name: "ci", state: "SUCCESS" }, { name: "lint", state: "FAILURE" }]).status, "failing", "mixed with a failure -> failing");
+  assert.equal(aggregateChecks([{ name: "ci", state: "SUCCESS" }, { name: "lint", state: "PENDING" }]).status, "pending", "success + pending -> pending");
+
+  // The snapshot attaches the checks status to the worker row with a PR
+  const cache = createChecksCache({ fetchChecks: () => ({ status: "passing" }) });
+  readSnapshot({ statePath, eventsPath, escalationsPath: join(dir, "none.md"), config: CONFIG, now: NOW, repoSlug: "praveenvijayan/Ratchet", checksCache: cache });
+  await new Promise((r) => setTimeout(r, 10));
+  const snap = readSnapshot({ statePath, eventsPath, escalationsPath: join(dir, "none.md"), config: CONFIG, now: NOW, repoSlug: "praveenvijayan/Ratchet", checksCache: cache });
+  const w5 = snap.workers.find((w) => w.issue === 5);
+  const w7 = snap.workers.find((w) => w.issue === 7);
+  assert.equal(w5.pr, 42, "row 5 has an open PR");
+  assert.equal(w5.checksStatus, "passing", "row with an open PR shows its combined checks status");
+  assert.ok(w5.checksFetchedAt != null, "the status carries a fetched-at timestamp");
+  assert.equal(w7.pr, null, "row 7 has no PR");
+  assert.equal(w7.checksStatus, undefined, "a row without a PR has no checks status");
+
+  // The page renders the checks status next to the PR link
+  await withServer({ statePath, eventsPath, escalationsPath: join(dir, "none.md"), repoSlug: "praveenvijayan/Ratchet", fetchChecks: () => ({ status: "passing" }) }, async (base) => {
+    const page = await fetchText(`${base}/`);
+    assert.match(page.body, /class="checks/, "the page has a checks status element");
+    assert.match(page.body, /function checksClass/, "the page has a checksClass function");
+  });
+});
+
+// --- #181 Criterion 2: the status refreshes periodically without a page reload;
+// the last-fetched time is visible. ------------------------------------------
+await inTempDir(async (dir) => {
+  const statePath = join(dir, "state.json");
+  const eventsPath = join(dir, "events.jsonl");
+  const start = new Date(NOW - 90_000).toISOString();
+  writeFileSync(statePath, JSON.stringify({
+    5: { adapter: "codex", pid: 222, attempts: 2, status: "in-review", pr: 42, logFile: "l5.log" },
+  }));
+  writeFileSync(eventsPath, JSON.stringify({ ts: start, event: "dispatch", issue: 5 }) + "\n");
+
+  const fetchLog = [];
+  let callCount = 0;
+  const cache = createChecksCache({
+    fetchChecks: (pr) => { callCount++; fetchLog.push(callCount); return { status: "passing" }; },
+    refreshMs: 20, // very short for the test
+  });
+
+  // First poll: triggers fetch #1
+  readSnapshot({ statePath, eventsPath, escalationsPath: join(dir, "none.md"), config: CONFIG, now: NOW, repoSlug: "praveenvijayan/Ratchet", checksCache: cache });
+  await new Promise((r) => setTimeout(r, 10));
+  // Second poll: fetch resolved, fetchAt is set
+  const snap1 = readSnapshot({ statePath, eventsPath, escalationsPath: join(dir, "none.md"), config: CONFIG, now: NOW, repoSlug: "praveenvijayan/Ratchet", checksCache: cache });
+  const w1 = snap1.workers.find((w) => w.issue === 5);
+  assert.ok(w1.checksFetchedAt != null, "the last-fetched time is visible on the row");
+  assert.equal(w1.checksStatus, "passing", "status is present");
+
+  // Wait beyond refreshMs, then poll again — should re-fetch
+  await new Promise((r) => setTimeout(r, 30));
+  readSnapshot({ statePath, eventsPath, escalationsPath: join(dir, "none.md"), config: CONFIG, now: NOW, repoSlug: "praveenvijayan/Ratchet", checksCache: cache });
+  await new Promise((r) => setTimeout(r, 10));
+  const snap2 = readSnapshot({ statePath, eventsPath, escalationsPath: join(dir, "none.md"), config: CONFIG, now: NOW, repoSlug: "praveenvijayan/Ratchet", checksCache: cache });
+  const w2 = snap2.workers.find((w) => w.issue === 5);
+  assert.ok(callCount >= 2, "the status refreshed (fetchChecks called again after refreshMs)");
+  assert.ok(w2.checksFetchedAt >= w1.checksFetchedAt, "the fetched-at time moved forward on refresh");
+
+  // The page renders the last-fetched time
+  await withServer({ statePath, eventsPath, escalationsPath: join(dir, "none.md"), repoSlug: "praveenvijayan/Ratchet", fetchChecks: () => ({ status: "passing" }), checksRefreshMs: 50 }, async (base) => {
+    const page = await fetchText(`${base}/`);
+    assert.match(page.body, /checksFetchedAt/, "the page reads checksFetchedAt from the snapshot");
+    assert.match(page.body, /function checksAgo/, "the page computes a human-readable time-ago from the fetched-at timestamp");
+  });
+});
+
+// --- #181 Criterion 3: a checks query failure shows an "unknown" state on the
+// row, never a stale "passing" presented as current or a broken row. ---------
+await inTempDir(async (dir) => {
+  const statePath = join(dir, "state.json");
+  const eventsPath = join(dir, "events.jsonl");
+  const start = new Date(NOW - 90_000).toISOString();
+  writeFileSync(statePath, JSON.stringify({
+    5: { adapter: "codex", pid: 222, attempts: 2, status: "in-review", pr: 42, logFile: "l5.log" },
+  }));
+  writeFileSync(eventsPath, JSON.stringify({ ts: start, event: "dispatch", issue: 5 }) + "\n");
+
+  // A fetcher that always fails (simulates gh missing or network error)
+  const cache = createChecksCache({ fetchChecks: () => { throw new Error("gh not found"); } });
+  readSnapshot({ statePath, eventsPath, escalationsPath: join(dir, "none.md"), config: CONFIG, now: NOW, repoSlug: "praveenvijayan/Ratchet", checksCache: cache });
+  await new Promise((r) => setTimeout(r, 10));
+  const snap = readSnapshot({ statePath, eventsPath, escalationsPath: join(dir, "none.md"), config: CONFIG, now: NOW, repoSlug: "praveenvijayan/Ratchet", checksCache: cache });
+  const w = snap.workers.find((w) => w.issue === 5);
+  assert.equal(w.checksStatus, "unknown", "a failed query shows 'unknown', never a stale 'passing'");
+  assert.ok(w.checksFetchedAt != null, "the failed attempt still carries a fetched-at time");
+
+  // The page renders "unknown" with the unknown class, never a broken row
+  await withServer({ statePath, eventsPath, escalationsPath: join(dir, "none.md"), repoSlug: "praveenvijayan/Ratchet", fetchChecks: () => { throw new Error("fail"); } }, async (base) => {
+    const page = await fetchText(`${base}/`);
+    assert.match(page.body, /checks\.unknown/, "the page styles unknown checks distinctly (not passing/failing/pending)");
+  });
+});
+
+// --- #181 Criterion 4: every criterion above has exactly one test named after
+// it. --------------------------------------------------------------------------
+{
+  const selfPath = fileURLToPath(import.meta.url);
+  const selfText = readFileSync(selfPath, "utf8");
+  const planDir = join(dirname(selfPath), "..", "plan");
+  const planPath = existsSync(join(planDir, "0091-herd-dashboard-pr-checks.md"))
+    ? join(planDir, "0091-herd-dashboard-pr-checks.md")
+    : join(planDir, "done", "0091-herd-dashboard-pr-checks.md");
+  const planText = readFileSync(planPath, "utf8");
+
+  const criteriaSection = /##\s+Acceptance criteria\s*([\s\S]*?)(?:\n##\s|$)/.exec(planText)[1];
+  const criteriaCount = (criteriaSection.match(/^-\s*\[[ x]\]/gim) || []).length;
+
+  const markers = [...selfText.matchAll(/^\/\/ --- #181 Criterion (\d+):/gim)].map((m) => Number(m[1]));
+  const unique = new Set(markers);
+  assert.equal(markers.length, unique.size, "each #181 criterion is tested exactly once (no duplicate markers)");
+  assert.equal(markers.length, criteriaCount, `one test per #181 acceptance criterion (${criteriaCount})`);
+  for (let n = 1; n <= criteriaCount; n++) assert.ok(unique.has(n), `#181 criterion ${n} has a test`);
+}
+
+console.log("PASS herd-ui.test.mjs (22 criteria)");
 

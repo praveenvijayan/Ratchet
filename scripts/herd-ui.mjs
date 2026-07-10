@@ -13,7 +13,8 @@
 
 import { createServer as httpCreateServer } from "node:http";
 import { existsSync, readFileSync, openSync, readSync, fstatSync, closeSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFileSync, execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { realpathSync } from "node:fs";
 
@@ -174,8 +175,91 @@ export function buildWorkers({ state, events, config, now = Date.now(), repoSlug
   return rows;
 }
 
+// --- PR checks ----------------------------------------------------------------
+
+const pexec = promisify(execFile);
+
+// Aggregate per-check states into a single combined status. The `gh pr checks
+// --json name,state` states are: SUCCESS, FAILURE, PENDING, SKIPPED, NEUTRAL,
+// etc. Any failure makes the row "failing"; all-clear makes it "passing"; any
+// pending (no failures) makes it "pending". An empty list means no checks
+// have run yet — "pending". Anything unrecognised is "unknown".
+export function aggregateChecks(checks) {
+  if (!Array.isArray(checks) || checks.length === 0) return { status: "pending" };
+  const states = checks.map((c) => String(c.state || "").toUpperCase());
+  if (states.some((s) => s === "FAILURE" || s === "ERROR" || s === "CANCELLED" || s === "TIMED_OUT"))
+    return { status: "failing" };
+  if (states.some((s) => s === "PENDING" || s === "QUEUED" || s === "IN_PROGRESS" || s === "WAITING"))
+    return { status: "pending" };
+  if (states.every((s) => s === "SUCCESS" || s === "NEUTRAL" || s === "SKIPPED" || s === ""))
+    return { status: "passing" };
+  return { status: "unknown" };
+}
+
+// Fetch a PR's combined checks status via `gh pr checks`. Returns
+// { status, fetchedAt } on success, or { status: "unknown", fetchedAt } on any
+// failure (gh missing, network error, 404). Never throws — a failed query
+// surfaces as "unknown", never a broken row.
+export async function defaultFetchChecks(pr, repoSlug) {
+  const args = repoSlug
+    ? ["pr", "checks", String(pr), "--repo", repoSlug, "--json", "name,state"]
+    : ["pr", "checks", String(pr), "--json", "name,state"];
+  try {
+    const { stdout } = await pexec("gh", args);
+    return aggregateChecks(JSON.parse(stdout));
+  } catch {
+    return { status: "unknown" };
+  }
+}
+
+// A per-server checks cache so `gh` is called at most once per refreshMs per PR
+// — not on every poll. `ensure` starts an async fetch if the PR is new or its
+// cached result is older than refreshMs (idempotent — a pending fetch is never
+// duplicated); `get` returns { status, fetchedAt } or undefined (not yet
+// resolved). The snapshot picks up the status on the next poll after the fetch
+// resolves, and the change-key pushes it to the browser via SSE.
+export function createChecksCache({ fetchChecks = defaultFetchChecks, refreshMs = 30_000 } = {}) {
+  const cache = new Map(); // pr number -> { status, fetchedAt, pending }
+
+  function doFetch(n, repoSlug) {
+    const existing = cache.get(n);
+    if (existing) existing.pending = true;
+    else cache.set(n, { status: "pending", fetchedAt: null, pending: true });
+    Promise.resolve()
+      .then(() => fetchChecks(n, repoSlug))
+      .then((result) => {
+        cache.set(n, { status: result.status || "unknown", fetchedAt: Date.now(), pending: false });
+      })
+      .catch(() => {
+        cache.set(n, { status: "unknown", fetchedAt: Date.now(), pending: false });
+      });
+  }
+
+  return {
+    ensure(pr, repoSlug) {
+      const n = Number(pr);
+      if (!n) return;
+      const entry = cache.get(n);
+      const now = Date.now();
+      if (!entry) {
+        doFetch(n, repoSlug);
+      } else if (!entry.pending && entry.fetchedAt != null && now - entry.fetchedAt > refreshMs) {
+        doFetch(n, repoSlug);
+      }
+    },
+    get(pr) {
+      const entry = cache.get(Number(pr));
+      if (!entry) return undefined;
+      return { status: entry.status, fetchedAt: entry.fetchedAt };
+    },
+  };
+}
+
 // The full dashboard payload. Never throws: every source is read tolerantly, so
 // missing state/events/escalations yield an empty snapshot carrying `hint`.
+// When a checksCache is provided, each worker row with an open PR carries its
+// combined checks status (passing/failing/pending/unknown) and the last-fetched
+// timestamp; the fetch is triggered at most once per refreshMs per PR.
 export function readSnapshot({
   statePath = STATE_FILE,
   eventsPath = EVENTS_FILE,
@@ -183,11 +267,22 @@ export function readSnapshot({
   config,
   now = Date.now(),
   repoSlug = null,
+  checksCache = null,
 } = {}) {
   const state = readState(statePath);
   const events = readEvents(eventsPath);
   const escalations = parseEscalations(escalationsPath);
   const workers = buildWorkers({ state, events, config, now, repoSlug });
+  if (checksCache) {
+    for (const w of workers) {
+      if (w.pr != null) {
+        checksCache.ensure(w.pr, repoSlug);
+        const cached = checksCache.get(w.pr);
+        w.checksStatus = cached ? cached.status : null;
+        w.checksFetchedAt = cached && cached.fetchedAt != null ? cached.fetchedAt : null;
+      }
+    }
+  }
   const hint = workers.length === 0 && escalations.length === 0 ? EMPTY_HINT : null;
   return { workers, escalations, hint };
 }
@@ -267,8 +362,11 @@ export function createDashboardServer({
   repoSlug = null,
   now = Date.now,
   pollMs = 1000,
+  fetchChecks = null,
+  checksRefreshMs = 30_000,
 } = {}) {
-  const snap = () => readSnapshot({ statePath, eventsPath, escalationsPath, config, now: now(), repoSlug });
+  const checksCache = createChecksCache({ fetchChecks: fetchChecks || defaultFetchChecks, refreshMs: checksRefreshMs });
+  const snap = () => readSnapshot({ statePath, eventsPath, escalationsPath, config, now: now(), repoSlug, checksCache });
 
   const server = httpCreateServer((req, res) => {
     const url = new URL(req.url, "http://localhost");
@@ -454,6 +552,12 @@ export const PAGE_HTML = `<!doctype html>
   .logpane h2 { font-size:14px; margin:0 0 6px; }
   pre.log { background:var(--card); border:1px solid var(--line); border-radius:6px; padding:12px; max-height:360px; overflow:auto; white-space:pre-wrap; word-break:break-word; margin:0; font:12px/1.5 ui-monospace, monospace; }
   .empty { color:var(--muted); }
+  .checks { font-size:12px; font-weight:600; margin-left:4px; }
+  .checks.pass { color:#2da44e; }
+  .checks.fail { color:var(--over); }
+  .checks.pend { color:var(--warn); }
+  .checks.unknown { color:var(--muted); font-style:italic; font-weight:400; }
+  .checks-time { font-size:11px; color:var(--muted); margin-left:2px; }
 </style>
 </head>
 <body>
@@ -519,6 +623,17 @@ export const PAGE_HTML = `<!doctype html>
     const cls = w.attempts >= w.reworkCap ? "over" : w.attempts >= w.reworkCap ? "warn" : "";
     return '<span class="gauge ' + cls + '">' + w.attempts + " / " + w.reworkCap + "</span>";
   }
+  function checksClass(s) {
+    return s === "passing" ? "pass" : s === "failing" ? "fail" : s === "pending" ? "pend" : "unknown";
+  }
+  function checksTitle(w) {
+    if (!w.checksFetchedAt) return "checks status: " + esc(w.checksStatus);
+    return "checks: " + esc(w.checksStatus) + " · fetched " + new Date(w.checksFetchedAt).toLocaleTimeString();
+  }
+  function checksAgo(ts) {
+    const secs = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+    return secs >= 60 ? Math.floor(secs / 60) + "m ago" : secs + "s ago";
+  }
 
   function renderEscalations() {
     const el = $("escalations");
@@ -550,13 +665,17 @@ export const PAGE_HTML = `<!doctype html>
     const rows = snapshot.workers.map((w) => {
       const pr = w.prUrl ? '<a href="' + esc(w.prUrl) + '" target="_blank" rel="noopener">#' + esc(w.pr) + "</a>"
         : (w.pr != null ? "#" + esc(w.pr) : '<span class="empty">—</span>');
+      const checks = w.checksStatus
+        ? '<span class="checks ' + checksClass(w.checksStatus) + '" title="' + checksTitle(w) + '">' + esc(w.checksStatus) + "</span>" +
+          (w.checksFetchedAt ? '<span class="checks-time">' + esc(checksAgo(w.checksFetchedAt)) + "</span>" : "")
+        : "";
       return '<tr class="worker' + (w.issue === selected ? " sel" : "") + '" data-issue="' + w.issue + '">' +
         "<td>#" + esc(w.issue) + "</td>" +
         '<td class="status">' + esc(w.status) + "</td>" +
         '<td><span class="adapter">' + avatarImg(w) + "<span>" + esc(w.adapter || "—") + "</span></span></td>" +
         "<td>" + attemptsText(w) + "</td>" +
         "<td>" + ageText(w) + "</td>" +
-        "<td>" + pr + "</td></tr>";
+        "<td>" + pr + checks + "</td></tr>";
     }).join("");
     host.innerHTML = '<table><thead><tr><th>Issue</th><th>Status</th><th>Adapter</th><th>Attempts</th><th>Age</th><th>PR</th></tr></thead><tbody>' + rows + "</tbody></table>";
     host.querySelectorAll("tr.worker").forEach((tr) => tr.addEventListener("click", () => select(Number(tr.dataset.issue))));
