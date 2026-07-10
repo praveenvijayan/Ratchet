@@ -204,6 +204,8 @@ scripts/
   herd-monitor.test.mjs         Regression test for herd monitor
   herd-verify.mjs               ratchet-herd PR verifier: conflict rework/escalate
   herd-verify.test.mjs          Regression test for herd PR verify
+  herd-review.mjs               ratchet-herd review-verdict reactor: changes-requested rework/escalate
+  herd-review.test.mjs          Regression test for herd review reactor
   herd-ui.mjs                   ratchet-herd local web dashboard (node:http + SSE)
   herd-ui.test.mjs              Regression test for the herd web dashboard
   herd-avatars.mjs              Bundled default mascot avatars for the dashboard
@@ -211,6 +213,7 @@ scripts/
   herd-ui-log-search.test.mjs   Regression test for log drill-down search/filter
   herd-ui-escalation.test.mjs   Regression test for escalation dedup/resolution
   herd-ui-acknowledge.test.mjs  Regression test for escalation copy/acknowledge
+  herd-ui-adapter-failures.test.mjs Regression test for per-adapter dispatch-failure aggregation
   plan-sync-concurrency.test.mjs Workflow concurrency regression test
   plan-sync.mjs                 Deterministic plan→issue compiler
   plan-sync.test.mjs            Regression test for the compiler
@@ -703,7 +706,7 @@ gh secret set FACTORY_PAT          # enable workflow chaining
 
 # Fleet supervisor (optional, ratchet-herd)
 node scripts/herd.mjs init         # write a default .ratchet/herd.json
-node scripts/herd.mjs run          # survey → dispatch → monitor → verify, one issue per worker
+node scripts/herd.mjs run          # survey → dispatch → monitor → verify → review, one issue per worker
 ```
 
 ---
@@ -932,6 +935,28 @@ Each line is one JSON object with:
 The file is append-only across supervisor restarts. If writing the event stream
 fails, the supervisor prints one warning naming `.ratchet/events.jsonl` and
 keeps polling; observability must never stop dispatch.
+
+### Reacting to review verdicts
+
+Verification ends a worker at the terminal status `ready-for-review`, and nothing
+reopens it — so in chat mode a human notices a Request Changes review and runs
+`/ratchet-next` to rework it, but a headless herd worker has already exited. The
+`review` stage (`scripts/herd-review.mjs`, last in each poll) plays that human
+role: it reads the `reviewDecision` of every tracked, ready-for-review PR and, on
+`CHANGES_REQUESTED`, dispatches exactly one rework worker on the issue's existing
+branch, its prompt pointing at the PR's review feedback. The rework counts against
+the same `reworkCap` as conflict rework and monitor resume; at the cap the PR is
+escalated naming it and the cap, never re-dispatched.
+
+The stage is detection + dispatch only — it never sets a label. The review-time
+flip to `state:changes-requested` is owned by the `review-verdict` workflow, and
+the flip back to `state:in-review` is the dispatched worker's own last step
+(AGENTS.md step 6). That label is the reactor's dedup: a `reviewDecision` stays
+`CHANGES_REQUESTED` until a new review is submitted, so it does not change when the
+rework lands; the reactor dispatches only while the issue still carries
+`state:changes-requested`, and stands down once the worker flips it back. A live
+rework worker on the entry is never dispatched twice, and a transient failure
+reading the verdict leaves every entry untouched for the next poll.
 
 ### Supervisor invariants
 

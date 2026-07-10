@@ -229,6 +229,45 @@ export function extractCommand(action) {
   return m ? m[1] : null;
 }
 
+// --- adapter failure aggregation (0095) --------------------------------------
+
+// Per-adapter dispatch stats derived purely from the event stream. Each
+// `dispatch` event carries the routed adapter and a status of "dispatched" (the
+// worker started) or "dispatch-failed" (it never did). Group by adapter,
+// counting dispatches, failures, and successes. A dispatch with no named adapter
+// is a route-level failure (no adapter was available), not attributable to any
+// one adapter, so it is skipped. Adapters with no recorded dispatch never enter
+// the map, so they are omitted rather than shown as 0/0. Sorted worst-first so
+// the most-failing adapter reads at a glance.
+export function adapterDispatchStats(events) {
+  const map = new Map();
+  for (const e of events || []) {
+    if (e.event !== "dispatch") continue;
+    const adapter = e.adapter;
+    if (!adapter) continue;
+    if (!map.has(adapter)) map.set(adapter, { adapter, dispatches: 0, failures: 0, successes: 0 });
+    const s = map.get(adapter);
+    s.dispatches += 1;
+    if (e.status === "dispatch-failed") s.failures += 1;
+    else s.successes += 1;
+  }
+  return [...map.values()].sort((a, b) => b.failures - a.failures || a.adapter.localeCompare(b.adapter));
+}
+
+// The small failure count at which an all-failing adapter is called out as
+// broken. Below it, a one-off failure stays just an individual escalation.
+export const BROKEN_ADAPTER_THRESHOLD = 3;
+
+// Adapters that look broken: at least `threshold` dispatches, every one of which
+// failed. Returned as one aggregate alert per adapter — naming it and its
+// failure ratio — to show alongside, not multiply, the individual escalations.
+// An adapter with any success is a transient blip, never flagged.
+export function brokenAdapters(stats, threshold = BROKEN_ADAPTER_THRESHOLD) {
+  return (stats || [])
+    .filter((s) => s.successes === 0 && s.failures >= threshold)
+    .map((s) => ({ adapter: s.adapter, failures: s.failures, dispatches: s.dispatches, ratio: `${s.failures}/${s.dispatches}` }));
+}
+
 // --- derivations (pure) ------------------------------------------------------
 
 // The timestamp the current attempt on `issue` began: the most recent dispatch
@@ -708,7 +747,13 @@ export function readSnapshot({
   const { state: hbState, ageSeconds } = heartbeatStatus({ lastHeartbeatTs, thresholdSeconds, now });
   const heartbeat = { lastHeartbeatTs, thresholdSeconds, ageSeconds, state: hbState };
 
-  return { workers, escalations, hint, totals, heartbeat };
+  // Per-adapter failure visibility (0095): fold repeated dispatch failures on
+  // one adapter into a single aggregate alert plus a breakdown, so a broken
+  // adapter reads as one problem rather than N unrelated escalations.
+  const adapters = adapterDispatchStats(events);
+  const broken = brokenAdapters(adapters);
+
+  return { workers, escalations, hint, totals, heartbeat, adapters, brokenAdapters: broken };
 }
 
 // A change key that ignores the ever-advancing clock, so the live stream pushes
@@ -721,7 +766,15 @@ export function snapshotKey(snapshot) {
   // them here would push a frame every tick. A new heartbeat changes
   // lastHeartbeatTs, which does re-push.
   const { ageSeconds, state, ...heartbeat } = snapshot.heartbeat || {};
-  return JSON.stringify({ workers, escalations: snapshot.escalations, hint: snapshot.hint, totals: snapshot.totals ?? null, heartbeat });
+  return JSON.stringify({
+    workers,
+    escalations: snapshot.escalations,
+    hint: snapshot.hint,
+    totals: snapshot.totals ?? null,
+    heartbeat,
+    adapters: snapshot.adapters ?? [],
+    brokenAdapters: snapshot.brokenAdapters ?? [],
+  });
 }
 
 // --- incremental log tail ----------------------------------------------------
@@ -1036,6 +1089,13 @@ export const PAGE_HTML = `<!doctype html>
   .errpanel-head h2 { font-size:14px; margin:0; }
   .errpanel-head .errclose { background:none; border:none; cursor:pointer; font-size:16px; color:var(--muted); padding:2px 6px; border-radius:4px; }
   .errpanel-head .errclose:hover { background:color-mix(in srgb, var(--fg) 10%, transparent); }
+  .adapterhealth { padding:10px 14px 0; }
+  .adapterhealth:empty { display:none; }
+  .adapter-alert { border:1px solid var(--over); border-left-width:4px; border-radius:6px; padding:8px 12px; margin-bottom:8px; color:var(--over); }
+  .adapter-breakdown { width:100%; border-collapse:collapse; margin-bottom:8px; }
+  .adapter-breakdown th, .adapter-breakdown td { text-align:right; padding:3px 6px; }
+  .adapter-breakdown th:first-child, .adapter-breakdown td:first-child { text-align:left; }
+  .adapter-breakdown tr.broken td { color:var(--over); font-variant-numeric:tabular-nums; }
   .escalations { padding:10px 14px; }
   .esc { border:1px solid var(--over); border-left-width:4px; border-radius:6px; padding:10px 14px; margin-bottom:8px; }
   .esc.resolved { border-color:var(--line); opacity:0.6; }
@@ -1114,6 +1174,7 @@ export const PAGE_HTML = `<!doctype html>
         <h2>Errors &amp; escalations</h2>
         <button id="errclose" class="errclose" type="button" aria-label="Close error panel">\u2715</button>
       </div>
+      <div class="adapterhealth" id="adapterhealth"></div>
       <div class="escalations" id="escalations"></div>
     </aside>
   </div>
@@ -1128,7 +1189,7 @@ export const PAGE_HTML = `<!doctype html>
 <script>
   const $ = (id) => document.getElementById(id);
   let selected = null, logSource = null, timelineSource = null, logBuffer = "", timelineBuffer = [], panelOpen = false, gotSnapshot = false;
-  let snapshot = { workers: [], escalations: [], hint: null, heartbeat: null };
+  let snapshot = { workers: [], escalations: [], hint: null, heartbeat: null, adapters: [], brokenAdapters: [] };
 
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
 
@@ -1218,8 +1279,34 @@ export const PAGE_HTML = `<!doctype html>
     }).join("");
   }
 
+  // Aggregate per-adapter failure view (0095): the broken-adapter alerts sit
+  // above the individual escalations, and a breakdown table shows dispatches /
+  // failures / successes per adapter so the worst one reads at a glance.
+  function renderAdapterHealth() {
+    const el = $("adapterhealth");
+    if (!el) return;
+    const broken = snapshot.brokenAdapters || [];
+    const stats = snapshot.adapters || [];
+    let html = broken
+      .map((b) => '<div class="adapter-alert">adapter <strong>' + esc(b.adapter) + "</strong> failed " + esc(b.ratio) + " dispatches</div>")
+      .join("");
+    if (stats.length) {
+      html += '<table class="adapter-breakdown"><thead><tr><th>Adapter</th><th>Disp.</th><th>Fail</th><th>OK</th></tr></thead><tbody>' +
+        stats
+          .map((s) => {
+            const cls = s.successes === 0 && s.failures > 0 ? ' class="broken"' : "";
+            return "<tr" + cls + "><td>" + esc(s.adapter) + "</td><td>" + esc(s.dispatches) + "</td><td>" + esc(s.failures) + "</td><td>" + esc(s.successes) + "</td></tr>";
+          })
+          .join("") +
+        "</tbody></table>";
+    }
+    el.innerHTML = html;
+  }
+
   function renderErrToggle() {
-    const count = snapshot.escalations.filter((e) => !e.resolved).length;
+    // The aggregate broken-adapter alerts count toward the badge alongside the
+    // unresolved escalations, so a broken adapter is visible with the panel shut.
+    const count = snapshot.escalations.filter((e) => !e.resolved).length + (snapshot.brokenAdapters || []).length;
     const badge = $("errcount");
     badge.textContent = String(count);
     badge.classList.toggle("zero", count === 0);
@@ -1453,7 +1540,7 @@ export const PAGE_HTML = `<!doctype html>
     el.textContent = "Fleet: " + usdText(t.costUsd) + " · " + tokText(t.tokensIn) + " in · " + tokText(t.tokensOut) + " out";
   }
 
-  function render() { renderErrToggle(); renderEscalations(); renderWorkers(); renderTotals(); renderHeartbeat(); }
+  function render() { renderErrToggle(); renderAdapterHealth(); renderEscalations(); renderWorkers(); renderTotals(); renderHeartbeat(); }
 
   $("errtoggle").addEventListener("click", () => { panelOpen = !panelOpen; applyPanel(); });
   $("errclose").addEventListener("click", () => { panelOpen = false; applyPanel(); });
