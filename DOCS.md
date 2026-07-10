@@ -213,6 +213,7 @@ scripts/
   herd-ui-log-search.test.mjs   Regression test for log drill-down search/filter
   herd-ui-escalation.test.mjs   Regression test for escalation dedup/resolution
   herd-ui-adapter-failures.test.mjs Regression test for per-adapter dispatch-failure aggregation
+  herd-ui-summary-strip.test.mjs Regression test for the one-glance fleet-summary strip
   plan-sync-concurrency.test.mjs Workflow concurrency regression test
   plan-sync.mjs                 Deterministic plan→issue compiler
   plan-sync.test.mjs            Regression test for the compiler
