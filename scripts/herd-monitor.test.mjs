@@ -170,4 +170,26 @@ await inTempDir(async () => {
   await until(() => readState("s2.json")["6"].exitCode === 3);
 });
 
-console.log("PASS herd-monitor.test.mjs (5 criteria + exit-capture seam)");
+// --- Issue #169: stop the survey/monitor ping-pong that re-escalates stale
+// claims every poll. The monitor side of the fix. ---
+
+// #169 AC1) A state entry with status "stale-claim" is never classified by the
+// monitor as a dead or failed worker and never produces a monitor escalation:
+// the survey-owned sentinel (pid/adapter null) is skipped, untouched, so it can
+// never be resumed-then-escalated (which flipped its status and let the survey
+// re-escalate it every poll).
+await inTempDir(async () => {
+  const sentinel = { adapter: null, pid: null, logFile: null, attempts: 0, status: "stale-claim", pr: null };
+  writeStateFile("s.json", { 175: { ...sentinel } });
+  const r = await monitorOnce({
+    config: mkConfig(), statePath: "s.json", escalationsPath: "e.md", eventsPath: "ev.jsonl",
+    gh: async () => [], isAlive: () => false,
+    spawn: noSpawn("the monitor must never resume a stale-claim sentinel"),
+    now: () => NOW, log: () => {},
+  });
+  assert.equal(existsSync("e.md"), false, "the monitor writes no escalation for a stale-claim sentinel");
+  assert.deepEqual(r.transitions, [], "the stale-claim sentinel produces no monitor transition");
+  assert.deepEqual(readState("s.json")["175"], sentinel, "the sentinel entry is left exactly as the survey wrote it");
+});
+
+console.log("PASS herd-monitor.test.mjs (5 criteria + #169: 1 + exit-capture seam)");
