@@ -13,6 +13,7 @@
 
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { VERSION_LOCATIONS } from "./version-consistency.mjs";
 
 // Local convenience: load .env if present (Actions sets env vars directly).
 // Never overrides an already-set variable. .env must be gitignored.
@@ -58,6 +59,10 @@ async function gh(token, method, path, { body, allow404 = false } = {}) {
   return res.status === 204 ? null : res.json();
 }
 
+function apiPath(path) {
+  return path.split("/").map(encodeURIComponent).join("/");
+}
+
 // True only when a 422 body reports the *tag* already exists — GitHub's
 // validation error carries an `errors[]` entry of {field:"tag_name",
 // code:"already_exists"}. Any other 422 (an invalid target_commitish, a
@@ -89,6 +94,40 @@ function bumpVersion(parts, bump) {
   else if (bump === "minor") { minor += 1; patch = 0; }
   else { patch += 1; }
   return `${parts.prefix}${major}.${minor}.${patch}`;
+}
+
+function bareVersion(version) {
+  const parts = parseVersion(version);
+  if (!parts) throw new Error(`Internal error: computed invalid release version '${version}'.`);
+  return `${parts.major}.${parts.minor}.${parts.patch}`;
+}
+
+function updateVersionFile(file, text, version) {
+  const bare = bareVersion(version);
+  if (file === ".ratchet-version") return `${bare}\n`;
+  if (file === "plugin/.claude-plugin/plugin.json") {
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch (e) {
+      throw new Error(`Cannot update ${file}: invalid JSON (${e.message}).`);
+    }
+    parsed.version = bare;
+    return `${JSON.stringify(parsed, null, 2)}\n`;
+  }
+  if (file === "README.md") {
+    if (!/framework-v?\d+\.\d+\.\d+/.test(text)) {
+      throw new Error("Cannot update README.md: no framework-vX.Y.Z badge found.");
+    }
+    return text.replace(/framework-v?\d+\.\d+\.\d+/, `framework-v${bare}`);
+  }
+  if (file === "DOCS.md") {
+    if (!/^Version\s+v?\d+\.\d+\.\d+/m.test(text)) {
+      throw new Error("Cannot update DOCS.md: no Version X.Y.Z header found.");
+    }
+    return text.replace(/^Version\s+v?\d+\.\d+\.\d+/m, `Version ${bare}`);
+  }
+  throw new Error(`Cannot update unknown version location ${file}.`);
 }
 
 // Numeric compare of two parsed versions. > 0 when `a` is newer than `b`.
@@ -150,6 +189,82 @@ async function mergedPRsSince(token, repo, since) {
   return merged.sort((a, b) => (a.merged_at < b.merged_at ? 1 : -1));
 }
 
+async function readRepoFile(token, repo, file, ref) {
+  const res = await gh(token, "GET", `/repos/${repo}/contents/${apiPath(file)}?ref=${encodeURIComponent(ref)}`);
+  if (typeof res.content !== "string") {
+    throw new Error(`Cannot read ${file}: GitHub API did not return file content.`);
+  }
+  return Buffer.from(res.content.replace(/\n/g, ""), "base64").toString("utf8");
+}
+
+async function createVersionBumpPr(token, repo, { version, defaultBranch, baseSha, changelog }) {
+  const branchName = `release/${version}`;
+  const title = `chore: release ${version}`;
+
+  const baseCommit = await gh(token, "GET", `/repos/${repo}/git/commits/${baseSha}`);
+  const baseTree = baseCommit?.tree?.sha;
+  if (!baseTree) {
+    throw new Error(`Cannot create release bump: default branch commit ${baseSha} has no tree SHA.`);
+  }
+
+  await gh(token, "POST", `/repos/${repo}/git/refs`, {
+    body: {
+      ref: `refs/heads/${branchName}`,
+      sha: baseSha,
+    },
+  });
+
+  const tree = [];
+  for (const loc of VERSION_LOCATIONS) {
+    const file = loc.file.split("\\").join("/");
+    const current = await readRepoFile(token, repo, file, baseSha);
+    tree.push({
+      path: file,
+      mode: "100644",
+      type: "blob",
+      content: updateVersionFile(file, current, version),
+    });
+  }
+
+  const newTree = await gh(token, "POST", `/repos/${repo}/git/trees`, {
+    body: {
+      base_tree: baseTree,
+      tree,
+    },
+  });
+  const commit = await gh(token, "POST", `/repos/${repo}/git/commits`, {
+    body: {
+      message: `chore: release ${version}`,
+      tree: newTree.sha,
+      parents: [baseSha],
+    },
+  });
+
+  await gh(token, "PATCH", `/repos/${repo}/git/refs/heads/${branchName}`, {
+    body: {
+      sha: commit.sha,
+      force: false,
+    },
+  });
+
+  const pr = await gh(token, "POST", `/repos/${repo}/pulls`, {
+    body: {
+      title,
+      head: branchName,
+      base: defaultBranch,
+      body: [
+        `Release bump for ${version}.`,
+        "",
+        "This release lane uses the publish-then-bump-PR path: the tag/release is published from this bumped commit immediately, while the version-file write-back reaches the default branch only after this reviewable PR is merged.",
+        "",
+        changelog,
+      ].join("\n"),
+    },
+  });
+
+  return { branchName, commitSha: commit.sha, pr };
+}
+
 export async function main() {
   const token = process.env.GITHUB_TOKEN || process.env.GITHUB_PAT;
   const repo = process.env.GITHUB_REPOSITORY;
@@ -204,6 +319,11 @@ export async function main() {
   // default branch from the repo so the tag lands on it.
   const repoMeta = await gh(token, "GET", `/repos/${repo}`);
   const defaultBranch = repoMeta?.default_branch || "main";
+  const defaultRef = await gh(token, "GET", `/repos/${repo}/git/ref/heads/${defaultBranch}`);
+  const baseSha = defaultRef?.object?.sha;
+  if (!baseSha) {
+    throw new Error(`Cannot resolve default branch '${defaultBranch}' to a commit SHA.`);
+  }
 
   const today = new Date().toISOString().slice(0, 10);
   const lines = prs.map((pr) => `- ${pr.title} (#${pr.number})`);
@@ -215,13 +335,20 @@ export async function main() {
     `_${prs.length} merged PR(s) since ${lastTag || "the start of the project"}._`,
   ].join("\n");
 
+  const bumpPr = await createVersionBumpPr(token, repo, {
+    version,
+    defaultBranch,
+    baseSha,
+    changelog,
+  });
+
   let release;
   try {
     release = await gh(token, "POST", `/repos/${repo}/releases`, {
       body: {
         tag_name: version,
         name: version,
-        target_commitish: defaultBranch,
+        target_commitish: bumpPr.commitSha,
         body: changelog,
       },
     });
@@ -241,12 +368,14 @@ export async function main() {
   }
 
   console.log(`Released ${version} from ${prs.length} merged PR(s).`);
+  if (bumpPr.pr?.html_url) console.log(`Version bump PR: ${bumpPr.pr.html_url}`);
   console.log(changelog);
   if (release?.html_url) console.log(release.html_url);
   setOutput("released", "true");
   setOutput("version", version);
   setOutput("release_url", release?.html_url || "");
-  return { released: true, version, count: prs.length };
+  setOutput("bump_pr_url", bumpPr.pr?.html_url || "");
+  return { released: true, version, count: prs.length, bump: bumpPr };
 }
 
 // Auto-run only when executed directly (`node scripts/release.mjs`), never when

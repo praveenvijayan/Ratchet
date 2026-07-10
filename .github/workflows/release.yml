@@ -31,7 +31,8 @@ on:
         options: [patch, minor, major]
 
 permissions:
-  contents: write        # create the tag and the GitHub release
+  contents: write        # create the bump branch, tag, and GitHub release
+  pull-requests: write   # open the reviewable version bump PR
 
 concurrency:
   group: release           # never two releases racing on the same tag sequence
@@ -44,7 +45,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          ref: main
+          ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:

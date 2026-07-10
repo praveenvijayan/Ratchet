@@ -35,16 +35,74 @@ const badTarget = () => fail(422, { message: "Validation Failed", errors: [{ res
 // pre-flight collision check); `failCreate` makes the release POST return a
 // tag-collision 422; `createResponse`, when set, overrides the POST response
 // (e.g. an invalid-target 422); `defaultBranch` is the repo's default branch.
-// Created releases are captured for assertions.
-function mockGitHub({ latest, pulls, tags = [], existingTags = null, failCreate = false, createResponse = null, defaultBranch = "main" }) {
+// Created releases are captured for assertions, with extra arrays attached for
+// the bump PR path: `created.pullRequests`, `created.trees`, `created.refs`.
+function mockGitHub({
+  latest,
+  pulls,
+  tags = [],
+  existingTags = null,
+  failCreate = false,
+  createResponse = null,
+  defaultBranch = "main",
+  failBranch = false,
+  failPull = false,
+}) {
   const refTags = existingTags ?? tags;
   const created = [];
+  const pullRequests = [];
+  const trees = [];
+  const refs = new Map([[`refs/heads/${defaultBranch}`, "base-sha"]]);
+  created.pullRequests = pullRequests;
+  created.trees = trees;
+  created.refs = refs;
+  const contents = {
+    ".ratchet-version": "3.6.0\n",
+    "plugin/.claude-plugin/plugin.json": `${JSON.stringify({ name: "ratchet", version: "3.6.0" }, null, 2)}\n`,
+    "README.md": "![framework version](https://img.shields.io/badge/framework-v3.6.0-ea8f3c)\n",
+    "DOCS.md": "Version 3.6.0 · MIT\n",
+  };
   globalThis.fetch = async (url, opts = {}) => {
     const { pathname, searchParams } = new URL(url);
     const method = opts.method || "GET";
     const body = opts.body ? JSON.parse(opts.body) : null;
     if (method === "GET" && pathname === "/repos/o/r") {
       return respond({ default_branch: defaultBranch });
+    }
+    if (method === "GET" && pathname === `/repos/o/r/git/ref/heads/${defaultBranch}`) {
+      return respond({ object: { sha: refs.get(`refs/heads/${defaultBranch}`) } });
+    }
+    if (method === "GET" && pathname === "/repos/o/r/git/commits/base-sha") {
+      return respond({ sha: "base-sha", tree: { sha: "base-tree" } });
+    }
+    if (method === "POST" && pathname === "/repos/o/r/git/refs") {
+      if (failBranch || refs.has(body.ref)) {
+        return fail(422, { message: "Reference already exists" });
+      }
+      refs.set(body.ref, body.sha);
+      return respond({ ref: body.ref, object: { sha: body.sha } }, 201);
+    }
+    if (method === "GET" && pathname.startsWith("/repos/o/r/contents/")) {
+      const file = decodeURIComponent(pathname.slice("/repos/o/r/contents/".length));
+      if (!Object.hasOwn(contents, file)) return notFound();
+      return respond({ content: Buffer.from(contents[file], "utf8").toString("base64") });
+    }
+    if (method === "POST" && pathname === "/repos/o/r/git/trees") {
+      trees.push(body);
+      return respond({ sha: `tree-${trees.length}` }, 201);
+    }
+    if (method === "POST" && pathname === "/repos/o/r/git/commits") {
+      return respond({ sha: "commit-1" }, 201);
+    }
+    if (method === "PATCH" && pathname.startsWith("/repos/o/r/git/refs/heads/")) {
+      const branch = decodeURIComponent(pathname.slice("/repos/o/r/git/refs/heads/".length));
+      refs.set(`refs/heads/${branch}`, body.sha);
+      return respond({ ref: `refs/heads/${branch}`, object: { sha: body.sha } });
+    }
+    if (method === "POST" && pathname === "/repos/o/r/pulls") {
+      if (failPull) return fail(422, { message: "Validation Failed", errors: [{ field: "head", code: "invalid" }] });
+      pullRequests.push(body);
+      return respond({ ...body, html_url: `https://github.com/o/r/pull/${pullRequests.length}` }, 201);
     }
     if (method === "GET" && pathname === "/repos/o/r/releases/latest") {
       return latest === null ? notFound() : respond(latest);
@@ -68,6 +126,15 @@ function mockGitHub({ latest, pulls, tags = [], existingTags = null, failCreate 
     throw new Error(`unexpected request: ${method} ${url}`);
   };
   return created;
+}
+
+function assertVersionTree(created, version) {
+  assert.equal(created.trees.length, 1, "one version bump tree is created");
+  const entries = new Map(created.trees[0].tree.map((entry) => [entry.path, entry.content]));
+  assert.equal(entries.get(".ratchet-version"), `${version}\n`, ".ratchet-version carries released version");
+  assert.equal(JSON.parse(entries.get("plugin/.claude-plugin/plugin.json")).version, version, "plugin manifest carries released version");
+  assert.ok(entries.get("README.md").includes(`framework-v${version}`), "README badge carries released version");
+  assert.ok(entries.get("DOCS.md").startsWith(`Version ${version}`), "DOCS header carries released version");
 }
 
 // Capture console.log for message assertions; returns the collected lines.
@@ -113,14 +180,20 @@ try {
   let result = await main();
   assert.equal(result.released, true, "a batch of merged PRs must produce a release");
   assert.equal(created.length, 1, "exactly one release is created");
-  assert.equal(created[0].target_commitish, "main", "the release targets the repo's default branch (main here), not a hardcoded value");
+  assert.equal(created.pullRequests.length, 1, "one reviewable version bump PR is opened");
+  assert.equal(created.pullRequests[0].base, "main", "the bump PR targets the repo's default branch");
+  assert.equal(created.pullRequests[0].head, "release/v1.3.0", "the bump PR comes from the release branch");
+  assert.equal(created[0].target_commitish, "commit-1", "the release tag targets the bumped commit, not the stale branch head");
+  assert.equal(created.refs.get("refs/heads/main"), "base-sha", "the release lane never updates the default branch directly");
   assert.equal(created[0].tag_name, "v1.3.0", `minor bump of v1.2.3 must be v1.3.0, got ${created[0].tag_name}`);
+  assertVersionTree(created, "1.3.0");
   assert.ok(created[0].body.includes("Add feature X (#42)"), "changelog must list a merged PR by title and number");
   assert.ok(created[0].body.includes("Fix bug Y (#41)"), "changelog must list every PR merged since the last tag");
   assert.ok(!created[0].body.includes("Old thing"), "PRs merged before the last tag are excluded");
   assert.ok(!created[0].body.includes("Never merged"), "unmerged PRs are excluded");
   assert.match(readOutput(), /^released=true$/m, "a published release must expose released=true to the workflow");
   assert.match(readOutput(), /^version=v1\.3\.0$/m, "a published release must expose the version to deploy");
+  assert.match(readOutput(), /^bump_pr_url=https:\/\/github\.com\/o\/r\/pull\/1$/m, "a published release exposes the bump PR URL");
 
   // --- 4. no merges since the last tag: clean exit, a message, no error --------
   process.env.RELEASE_BUMP = "patch";
@@ -250,7 +323,42 @@ try {
   result = await main();
   assert.equal(result.released, true, "a master-default repo cuts a release");
   assert.equal(created.length, 1, "exactly one release is created on a master-default repo");
-  assert.equal(created[0].target_commitish, "master", `the release must target the default branch 'master', got ${created[0].target_commitish}`);
+  assert.equal(created.pullRequests.length, 1, "a master-default repo opens the bump PR");
+  assert.equal(created.pullRequests[0].base, "master", "the bump PR targets master, not hardcoded main");
+  assert.equal(created.refs.get("refs/heads/master"), "base-sha", "the release lane never updates master directly");
+  assert.equal(created[0].target_commitish, "commit-1", `the release must target the bumped commit, got ${created[0].target_commitish}`);
+  assertVersionTree(created, "1.2.4");
+
+  // --- AC4. bump branch creation failure aborts before publishing a tag -------
+  process.env.RELEASE_BUMP = "patch";
+  created = mockGitHub({
+    latest: { tag_name: "v1.2.3", published_at: "2026-01-01T00:00:00Z" },
+    tags: ["v1.2.3"],
+    failBranch: true,
+    pulls: [{ number: 74, title: "New work", merged_at: "2026-02-01T00:00:00Z" }],
+  });
+  await assert.rejects(
+    () => main(),
+    (e) => e.message.includes("Reference already exists"),
+    "a branch creation failure surfaces GitHub's real message",
+  );
+  assert.equal(created.length, 0, "branch creation failure must not publish a release/tag");
+  assert.equal(created.pullRequests.length, 0, "branch creation failure must not open a PR");
+
+  // --- AC4. bump PR creation failure aborts before publishing a tag -----------
+  process.env.RELEASE_BUMP = "patch";
+  created = mockGitHub({
+    latest: { tag_name: "v1.2.3", published_at: "2026-01-01T00:00:00Z" },
+    tags: ["v1.2.3"],
+    failPull: true,
+    pulls: [{ number: 75, title: "New work", merged_at: "2026-02-01T00:00:00Z" }],
+  });
+  await assert.rejects(
+    () => main(),
+    (e) => e.message.includes("Validation Failed") && e.message.includes("head"),
+    "a PR creation failure surfaces GitHub's real message",
+  );
+  assert.equal(created.length, 0, "PR creation failure must not publish a release/tag");
 
   // --- invalid bump: a clear error, not a stack trace --------------------------
   process.env.RELEASE_BUMP = "sideways";
@@ -266,6 +374,8 @@ try {
   const workflow = readFileSync(fileURLToPath(new URL("../.github/workflows/release.yml", import.meta.url)), "utf8");
   assert.ok(workflow.includes("vars.RATCHET_RELEASE == 'true'"), "the release job must be gated on RATCHET_RELEASE (off by default)");
   assert.ok(workflow.includes("workflow_dispatch"), "the release lane runs on demand");
+  assert.ok(workflow.includes("pull-requests: write"), "the release workflow can open the reviewable version bump PR");
+  assert.ok(workflow.includes("github.event.repository.default_branch"), "checkout must follow the repo default branch, not hardcoded main");
 
   // --- #62. deploy gate is opt-in, post-publish, and visibly failing ----------
   assert.ok(workflow.includes("vars.RATCHET_DEPLOY == 'true'"), "deploy must be gated on explicit RATCHET_DEPLOY opt-in");
