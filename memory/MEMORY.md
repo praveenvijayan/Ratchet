@@ -54,6 +54,12 @@ Rules:
 
 ## Gotchas & fragile areas
 - (e.g.) Payments module has no test harness; integration tests hit the sandbox API (#88).
+- `scripts/*.test.mjs` per-criterion self-counts must derive from their own
+  `Criterion N` markers and never read a closable issue's `plan/NNNN-*.md` at
+  runtime — `archive-closed-plans` moves those files to `plan/done/` on close,
+  which would break the test. A regression guard in `docs-refresh.test.mjs`
+  greps every test source for a repo-plan-dir read + a `NNNN-` slug and fails
+  (#191). Temp-dir fixtures and `plan/README.md` are exempt.
 - `archive-closed-plans` archives a slug only when it has ≥1 issue and *every*
   issue bearing that `plan-id` marker is closed — one open issue vetoes the move
   (a duplicate/split marker must not let a closed twin archive live work). It
