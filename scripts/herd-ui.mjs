@@ -383,9 +383,10 @@ export async function run(argv, { log = console.log, cwd = process.cwd() } = {})
 }
 
 // The single inline page: no external requests, no build step. It fetches the
-// snapshot, subscribes to the live stream, renders escalations above the worker
-// list, and streams one selected worker's log. Ages tick locally from
-// claimStartTs so the server pushes only on real change.
+// snapshot, subscribes to the live stream, renders escalations inside a
+// toggleable side panel beside the worker list, and streams one selected
+// worker's log. Ages tick locally from claimStartTs so the server pushes only
+// on real change.
 const PAGE_HTML = `<!doctype html>
 <html lang="en">
 <head>
@@ -403,8 +404,20 @@ const PAGE_HTML = `<!doctype html>
   header .dot.live { background:#2da44e; }
   main { padding:20px; max-width:1100px; margin:0 auto; }
   .hint { color:var(--muted); padding:40px 0; text-align:center; }
-  .escalations { margin-bottom:20px; }
-  .esc { background:var(--card); border:1px solid var(--over); border-left-width:4px; border-radius:6px; padding:10px 14px; margin-bottom:8px; }
+  .layout { display:flex; gap:16px; align-items:flex-start; }
+  .fleet { flex:1 1 auto; min-width:0; }
+  .fleet-toolbar { display:flex; align-items:center; gap:12px; margin-bottom:12px; }
+  .errtoggle { display:inline-flex; align-items:center; gap:6px; background:var(--card); border:1px solid var(--line); border-radius:6px; padding:6px 12px; cursor:pointer; font:inherit; color:var(--fg); }
+  .errtoggle:hover { border-color:var(--accent); }
+  .errcount { background:var(--over); color:#fff; border-radius:10px; padding:1px 7px; font-size:12px; font-weight:600; min-width:20px; text-align:center; }
+  .errcount.zero { background:var(--muted); }
+  .errpanel { flex:0 0 360px; background:var(--card); border:1px solid var(--line); border-radius:6px; overflow:auto; max-height:calc(100vh - 120px); align-self:stretch; }
+  .errpanel-head { display:flex; align-items:center; justify-content:space-between; padding:10px 14px; border-bottom:1px solid var(--line); }
+  .errpanel-head h2 { font-size:14px; margin:0; }
+  .errpanel-head .errclose { background:none; border:none; cursor:pointer; font-size:16px; color:var(--muted); padding:2px 6px; border-radius:4px; }
+  .errpanel-head .errclose:hover { background:color-mix(in srgb, var(--fg) 10%, transparent); }
+  .escalations { padding:10px 14px; }
+  .esc { border:1px solid var(--over); border-left-width:4px; border-radius:6px; padding:10px 14px; margin-bottom:8px; }
   .esc .top { font-weight:600; }
   .esc .what { margin:4px 0; }
   .esc .meta { color:var(--muted); font-size:12px; }
@@ -431,8 +444,21 @@ const PAGE_HTML = `<!doctype html>
   <span><span class="dot" id="livedot"></span> <span id="livetext" class="empty">connecting…</span></span>
 </header>
 <main>
-  <div class="escalations" id="escalations"></div>
-  <div id="workers"></div>
+  <div class="layout" id="layout">
+    <div class="fleet" id="fleet">
+      <div class="fleet-toolbar">
+        <button id="errtoggle" class="errtoggle" type="button"><span>Errors</span> <span id="errcount" class="errcount zero">0</span></button>
+      </div>
+      <div id="workers"></div>
+    </div>
+    <aside class="errpanel" id="errpanel" hidden>
+      <div class="errpanel-head">
+        <h2>Errors &amp; escalations</h2>
+        <button id="errclose" class="errclose" type="button" aria-label="Close error panel">\u2715</button>
+      </div>
+      <div class="escalations" id="escalations"></div>
+    </aside>
+  </div>
   <div class="logpane" id="logpane" hidden>
     <h2 id="logtitle"></h2>
     <pre class="log" id="log"></pre>
@@ -440,7 +466,7 @@ const PAGE_HTML = `<!doctype html>
 </main>
 <script>
   const $ = (id) => document.getElementById(id);
-  let selected = null, logSource = null, snapshot = { workers: [], escalations: [], hint: null };
+  let selected = null, logSource = null, panelOpen = false, snapshot = { workers: [], escalations: [], hint: null };
 
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
 
@@ -458,12 +484,23 @@ const PAGE_HTML = `<!doctype html>
 
   function renderEscalations() {
     const el = $("escalations");
-    if (!snapshot.escalations.length) { el.innerHTML = ""; return; }
+    if (!snapshot.escalations.length) { el.innerHTML = '<div class="empty">No errors.</div>'; return; }
     el.innerHTML = snapshot.escalations.map((e) =>
       '<div class="esc"><div class="top">issue #' + esc(e.issue) + "</div>" +
       '<div class="what">' + esc(e.what) + "</div>" +
       '<div class="meta">' + esc(e.ts) + (e.action ? " · " + esc(e.action) : "") + "</div></div>"
     ).join("");
+  }
+
+  function renderErrToggle() {
+    const count = snapshot.escalations.length;
+    const badge = $("errcount");
+    badge.textContent = String(count);
+    badge.classList.toggle("zero", count === 0);
+  }
+
+  function applyPanel() {
+    $("errpanel").hidden = !panelOpen;
   }
 
   function renderWorkers() {
@@ -501,7 +538,10 @@ const PAGE_HTML = `<!doctype html>
     logSource.addEventListener("note", (ev) => { $("log").textContent = JSON.parse(ev.data); });
   }
 
-  function render() { renderEscalations(); renderWorkers(); }
+  function render() { renderErrToggle(); renderEscalations(); renderWorkers(); }
+
+  $("errtoggle").addEventListener("click", () => { panelOpen = !panelOpen; applyPanel(); });
+  $("errclose").addEventListener("click", () => { panelOpen = false; applyPanel(); });
 
   const stream = new EventSource("/api/stream");
   stream.addEventListener("snapshot", (ev) => {
