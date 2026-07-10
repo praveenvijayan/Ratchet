@@ -4,6 +4,7 @@
 
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -59,4 +60,62 @@ const agents = read("AGENTS.md");
   assert.match(agents, /`state:in-progress`[\s\S]*`state:in-review`[\s\S]*`state:changes-requested`/, "AGENTS must name extended sweep states");
 }
 
-console.log("PASS docs-refresh.test.mjs (6 criteria, documentation inventory)");
+// --- #191 Criterion 1: node scripts/herd-ui.test.mjs exits 0 with the
+// repository in its current state (plan/0069-*.md archived under plan/done/),
+// and the test:herd-ui gate passes under run-gates (it is wired in GATES.md).
+{
+  const herdUi = readFileSync(`${root}scripts/herd-ui.test.mjs`, "utf8");
+  assert.doesNotMatch(herdUi, /readFileSync\([^)]*plan[\\/]"?0?069/, "herd-ui.test.mjs reads no plan/0069 file at runtime");
+  const ran = spawnSync(process.execPath, ["scripts/herd-ui.test.mjs"], { cwd: root });
+  assert.equal(ran.status, 0, `herd-ui.test.mjs should exit 0 with plan/0069 archived (stderr: ${ran.stderr.toString().slice(0, 200)})`);
+  const gates = read("GATES.md");
+  assert.match(gates, /test:\s*herd-ui\s*\|\s*`node scripts\/herd-ui\.test\.mjs`/, "GATES.md wires the test:herd-ui gate");
+}
+
+// --- #191 Criterion 2: herd-ui.test.mjs's per-criterion self-count is derived
+// from its own Criterion N markers and reads no plan/NNNN-*.md file at runtime,
+// so archiving a plan when its issue closes can never break it.
+{
+  const src = readFileSync(`${root}scripts/herd-ui.test.mjs`, "utf8");
+  const REPO_PLAN_DIR = /["']\.\.["']\s*,\s*["']plan["']|\.\.\/plan\b/;
+  const ISSUE_SLUG = /\d{4}-[a-z0-9-]+\.md/i;
+  assert.ok(!REPO_PLAN_DIR.test(src), "herd-ui.test.mjs never resolves the repo plan/ dir relative to its source");
+  assert.ok(!ISSUE_SLUG.test(src), "herd-ui.test.mjs references no NNNN-*.md plan slug at runtime");
+  assert.match(src, /CRITERIA_COUNT/, "each self-count is driven by a marker count, not a plan file");
+  assert.doesNotMatch(src, /\bplanText\b/, "no planText variable remains (the old plan-derived count is gone)");
+  assert.doesNotMatch(src, /\bcriteriaSection\b/, "no criteriaSection variable remains (no plan criteria are parsed)");
+}
+
+// --- #191 Criterion 3: no scripts/*.test.mjs reads a closable issue's
+// plan/NNNN-*.md at runtime for a pass/fail assertion. Reading plan/README.md
+// or a purpose-built fixture in a temp dir is fine — those never resolve the
+// repo plan/ dir relative to the source, so they don't trip this guard.
+{
+  const REPO_PLAN_DIR = /["']\.\.["']\s*,\s*["']plan["']|\.\.\/plan\b/;
+  const ISSUE_SLUG = /\d{4}-[a-z0-9-]+\.md/i;
+  const testFiles = readdirSync(`${root}scripts`)
+    .filter((f) => f.endsWith(".test.mjs") && f !== "docs-refresh.test.mjs");
+  const offenders = [];
+  for (const f of testFiles) {
+    const s = readFileSync(`${root}scripts/${f}`, "utf8");
+    if (REPO_PLAN_DIR.test(s) && ISSUE_SLUG.test(s)) offenders.push(f);
+  }
+  assert.deepEqual(offenders, [], `no test may read a closable issue's plan/NNNN-*.md at runtime (offenders: ${offenders.join(", ") || "none"})`);
+}
+
+// --- #191 Criterion 4: every criterion above has exactly one test named after
+// it. The plan file carried four #191 acceptance criteria; this counts its own
+// `#191 Criterion N` markers and proves there is exactly one per criterion,
+// 1..4. It counts markers in THIS file only — it never reads the plan file at
+// runtime, so archiving the plan when the issue closes can never break it.
+{
+  const CRITERIA_COUNT = 4;
+  const selfText = readFileSync(fileURLToPath(import.meta.url), "utf8");
+  const markers = [...selfText.matchAll(/^\/\/ --- #191 Criterion (\d+):/gim)].map((m) => Number(m[1]));
+  const unique = new Set(markers);
+  assert.equal(markers.length, unique.size, "each #191 criterion is tested exactly once (no duplicate markers)");
+  assert.equal(markers.length, CRITERIA_COUNT, `one test per #191 acceptance criterion (${CRITERIA_COUNT})`);
+  for (let n = 1; n <= CRITERIA_COUNT; n++) assert.ok(unique.has(n), `#191 criterion ${n} has a test`);
+}
+
+console.log("PASS docs-refresh.test.mjs (6 #60 criteria + 4 #191 criteria)");
