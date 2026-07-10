@@ -170,6 +170,42 @@ export function gitOriginUrl(cwd = process.cwd()) {
   }
 }
 
+// Lifecycle groups the dashboard buckets rows into, in display order: live
+// workers first, then work awaiting human review, then anything escalated for a
+// human, then finished/terminal rows, and finally a catch-all so a status with
+// no mapping is still visible rather than silently dropped. Exported so the
+// browser renders the same ordered, labelled sections the server classifies to.
+export const LIFECYCLE_GROUPS = Object.freeze([
+  { key: "live", label: "Live" },
+  { key: "awaiting-review", label: "Awaiting review" },
+  { key: "escalated", label: "Escalated" },
+  { key: "terminal", label: "Terminal" },
+  { key: "other", label: "Other" },
+]);
+
+// Status → lifecycle group. Covers the full status vocabulary the supervisor
+// writes (dispatch/monitor/verify/survey); "stale-claim" is grouped as escalated
+// because, like an escalation, it needs a human to clear it. Anything unmapped
+// falls to "other" so a new or unexpected status never vanishes from the table.
+const STATUS_GROUP = Object.freeze({
+  working: "live",
+  dispatched: "live",
+  resumed: "live",
+  reworking: "live",
+  "awaiting-verification": "awaiting-review",
+  "ready-for-review": "awaiting-review",
+  "in-review": "awaiting-review",
+  escalated: "escalated",
+  "verify-escalated": "escalated",
+  "dispatch-failed": "escalated",
+  "stale-claim": "escalated",
+  dead: "terminal",
+  "pr-concluded": "terminal",
+});
+export function lifecycleGroup(status) {
+  return STATUS_GROUP[status] || "other";
+}
+
 // One worker view-row per state entry, adapter-agnostic — every field comes from
 // the state file and the event stream, never from an adapter's log. claimStartTs
 // is sent to the browser so it can tick the age locally; claimAgeSeconds is the
@@ -193,6 +229,7 @@ export function buildWorkers({ state, events, config, now = Date.now(), repoSlug
     rows.push({
       issue,
       status,
+      group: lifecycleGroup(status),
       adapter: e.adapter ?? null,
       avatar,
       defaultAvatar: defaultAvatarFor(e.adapter ?? null),
@@ -211,6 +248,30 @@ export function buildWorkers({ state, events, config, now = Date.now(), repoSlug
   }
   rows.sort((a, b) => a.issue - b.issue);
   return rows;
+}
+
+// Bucket issue-sorted worker rows into lifecycle groups for display: only
+// non-empty groups, in LIFECYCLE_GROUPS order, each keeping its rows' issue
+// order. A group key outside LIFECYCLE_GROUPS (should never happen — lifecycleGroup
+// only emits known keys) is still appended so no row can ever disappear. Pure;
+// the browser renders the identical structure so server and client never drift.
+export function groupWorkers(workers) {
+  const buckets = new Map();
+  for (const w of workers || []) {
+    const g = w.group || "other";
+    if (!buckets.has(g)) buckets.set(g, []);
+    buckets.get(g).push(w);
+  }
+  const known = LIFECYCLE_GROUPS.map((g) => g.key);
+  const out = [];
+  for (const { key, label } of LIFECYCLE_GROUPS) {
+    const rows = buckets.get(key);
+    if (rows && rows.length) out.push({ key, label, rows });
+  }
+  for (const key of [...buckets.keys()].filter((k) => !known.includes(k)).sort()) {
+    out.push({ key, label: key, rows: buckets.get(key) });
+  }
+  return out;
 }
 
 // --- issue titles -------------------------------------------------------------
@@ -567,6 +628,10 @@ export const PAGE_HTML = `<!doctype html>
   tr.worker { cursor:pointer; }
   tr.worker:hover { background:color-mix(in srgb, var(--accent) 8%, transparent); }
   tr.worker.sel { background:color-mix(in srgb, var(--accent) 16%, transparent); }
+  .lifecycle-group { margin-bottom:18px; }
+  .lifecycle-group:last-child { margin-bottom:0; }
+  .group-head { display:flex; align-items:center; gap:8px; margin:0 0 6px; font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:.03em; color:var(--muted); }
+  .group-count { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:0 7px; font-size:11px; font-weight:600; color:var(--fg); }
   .gauge.warn { color:var(--warn); }
   .gauge.over { color:var(--over); font-weight:600; }
   .status { font-variant:small-caps; }
@@ -685,24 +750,52 @@ export const PAGE_HTML = `<!doctype html>
     $("errpanel").hidden = !panelOpen;
   }
 
+  // Display order and labels of the lifecycle groups — mirrors the server's
+  // LIFECYCLE_GROUPS. "other" is the catch-all so an unmapped status is always
+  // shown, never dropped.
+  const GROUP_ORDER = [["live", "Live"], ["awaiting-review", "Awaiting review"], ["escalated", "Escalated"], ["terminal", "Terminal"], ["other", "Other"]];
+  const THEAD = '<thead><tr><th>Issue</th><th>Status</th><th>Adapter</th><th>Attempts</th><th>Age</th><th>PR</th></tr></thead>';
+
+  function rowHtml(w) {
+    const pr = w.prUrl ? '<a href="' + esc(w.prUrl) + '" target="_blank" rel="noopener">#' + esc(w.pr) + "</a>"
+      : (w.pr != null ? "#" + esc(w.pr) : '<span class="empty">—</span>');
+    return '<tr class="worker' + (w.issue === selected ? " sel" : "") + '" data-issue="' + w.issue + '">' +
+      "<td>" + issueCell(w) + "</td>" +
+      '<td class="status">' + esc(w.status) + "</td>" +
+      '<td><span class="adapter">' + avatarImg(w) + "<span>" + esc(w.adapter || "—") + "</span></span></td>" +
+      "<td>" + attemptsText(w) + "</td>" +
+      "<td>" + ageText(w) + "</td>" +
+      "<td>" + pr + "</td></tr>";
+  }
+
   function renderWorkers() {
     const host = $("workers");
     if (!snapshot.workers.length) {
       host.innerHTML = snapshot.hint ? '<div class="hint">' + esc(snapshot.hint) + "</div>" : '<div class="hint">No workers.</div>';
       return;
     }
-    const rows = snapshot.workers.map((w) => {
-      const pr = w.prUrl ? '<a href="' + esc(w.prUrl) + '" target="_blank" rel="noopener">#' + esc(w.pr) + "</a>"
-        : (w.pr != null ? "#" + esc(w.pr) : '<span class="empty">—</span>');
-      return '<tr class="worker' + (w.issue === selected ? " sel" : "") + '" data-issue="' + w.issue + '">' +
-        "<td>" + issueCell(w) + "</td>" +
-        '<td class="status">' + esc(w.status) + "</td>" +
-        '<td><span class="adapter">' + avatarImg(w) + "<span>" + esc(w.adapter || "—") + "</span></span></td>" +
-        "<td>" + attemptsText(w) + "</td>" +
-        "<td>" + ageText(w) + "</td>" +
-        "<td>" + pr + "</td></tr>";
-    }).join("");
-    host.innerHTML = '<table><thead><tr><th>Issue</th><th>Status</th><th>Adapter</th><th>Attempts</th><th>Age</th><th>PR</th></tr></thead><tbody>' + rows + "</tbody></table>";
+    // Bucket rows by lifecycle group. snapshot.workers is issue-sorted, so each
+    // bucket stays in issue order without re-sorting.
+    const buckets = new Map();
+    for (const w of snapshot.workers) {
+      const g = w.group || "other";
+      if (!buckets.has(g)) buckets.set(g, []);
+      buckets.get(g).push(w);
+    }
+    const known = new Set(GROUP_ORDER.map(([k]) => k));
+    const labelOf = (k) => (GROUP_ORDER.find(([kk]) => kk === k) || [k, k])[1];
+    // Known groups in fixed order, then any unforeseen group appended (a drift
+    // guard so a row can never disappear even if a new group key reaches here).
+    const order = GROUP_ORDER.map(([k]) => k).concat([...buckets.keys()].filter((k) => !known.has(k)).sort());
+    let html = "";
+    for (const key of order) {
+      const rows = buckets.get(key);
+      if (!rows || !rows.length) continue; // an empty group renders nothing
+      html += '<section class="lifecycle-group" data-group="' + esc(key) + '">' +
+        '<h3 class="group-head">' + esc(labelOf(key)) + ' <span class="group-count">' + rows.length + "</span></h3>" +
+        "<table>" + THEAD + "<tbody>" + rows.map(rowHtml).join("") + "</tbody></table></section>";
+    }
+    host.innerHTML = html;
     host.querySelectorAll("tr.worker").forEach((tr) => tr.addEventListener("click", () => select(Number(tr.dataset.issue))));
   }
 
