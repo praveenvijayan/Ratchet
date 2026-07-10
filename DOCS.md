@@ -231,7 +231,8 @@ scripts/
   ratchet-init-skill.test.mjs   Regression test for the init skill contract
   ratchet-metrics.mjs           Read-only loop health metrics
   ratchet-metrics.test.mjs      Regression test for loop metrics
-  ratchet-uninstall.sh          Remove framework files on a review branch
+  ratchet-uninstall.sh          Remove exactly what bootstrap.sh installed, per .ratchet-install.json
+  ratchet-uninstall.test.mjs    End-to-end test for the manifest-driven uninstaller
   ratchet-update.sh             Pull framework updates, preserve project files
   ratchet-update.test.mjs       Regression test for the updater
   ratchet-watch.mjs             Webhook receiver / event classifier
