@@ -17,8 +17,9 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { realpathSync } from "node:fs";
 
-import { readState, STATE_FILE, EVENTS_FILE, ESCALATIONS_FILE } from "./herd-survey.mjs";
-import { DEFAULTS, loadConfig, HerdConfigError } from "./herd.mjs";
+import { join } from "node:path";
+import { readState, STATE_FILE, EVENTS_FILE, ESCALATIONS_FILE, resolveRepoRoot, ratchetPaths } from "./herd-survey.mjs";
+import { DEFAULTS, CONFIG_PATH, loadConfig, HerdConfigError } from "./herd.mjs";
 import { defaultAvatarFor } from "./herd-avatars.mjs";
 import { TERMINAL_STATUS } from "./herd-monitor.mjs";
 
@@ -388,9 +389,15 @@ export function parsePort(argv) {
 // listenOrFail) on a port clash so the CLI wrapper can exit non-zero.
 export async function run(argv, { log = console.log, cwd = process.cwd() } = {}) {
   const port = parsePort(argv);
-  const config = loadConfigOrDefaults();
+  // Anchor the dashboard's files at the repo root, not the cwd, so it renders the
+  // supervisor's real state from any subdirectory — and throws (caught by the CLI
+  // guard below into a non-zero exit) rather than an empty dashboard when run
+  // from outside any checkout.
+  const root = resolveRepoRoot(cwd);
+  const { statePath, eventsPath, escalationsPath } = ratchetPaths(root);
+  const config = loadConfigOrDefaults(join(root, CONFIG_PATH));
   const repoSlug = resolveRepoSlug(gitOriginUrl(cwd));
-  const server = createDashboardServer({ config, repoSlug });
+  const server = createDashboardServer({ statePath, eventsPath, escalationsPath, config, repoSlug });
   const bound = await listenOrFail(server, port);
   log(`Herd dashboard on http://localhost:${bound}  (Ctrl-C to stop)`);
   return { server, port: bound };
