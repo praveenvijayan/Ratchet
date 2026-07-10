@@ -37,11 +37,20 @@ else
 fi
 
 echo "Fetching '$REF' from $REMOTE_URL ..."
-git fetch --quiet ratchet "$REF" --tags
+git fetch --quiet ratchet "$REF" --tags 2>/dev/null || true
 
 SRC="ratchet/$REF"
 git rev-parse --verify --quiet "${SRC}^{commit}" >/dev/null || SRC="$REF"   # tag case
 git rev-parse --verify --quiet "${SRC}^{commit}" >/dev/null || { echo "Cannot resolve ref '$REF' upstream."; exit 1; }
+
+normalize_version() {
+  local raw="$1"
+  if [[ "$raw" =~ ^v?([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+    printf '%s.%s.%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}"
+  else
+    printf '%s\n' "$raw"
+  fi
+}
 
 echo "Updating framework files from $SRC ..."
 git checkout "$SRC" -- "${FRAMEWORK_PATHS[@]}"
@@ -49,9 +58,9 @@ git checkout "$SRC" -- "${FRAMEWORK_PATHS[@]}"
 if [ -x ./setup.sh ]; then ./setup.sh >/dev/null 2>&1 && echo "Skill mirrors re-synced."; fi
 
 # Record the new version (prefer upstream's .ratchet-version if present)
-NEWVER="$REF"
+NEWVER="$(normalize_version "$REF")"
 if git cat-file -e "${SRC}:.ratchet-version" 2>/dev/null; then
-  NEWVER="$(git show "${SRC}:.ratchet-version" | head -n1 | tr -d '[:space:]')"
+  NEWVER="$(normalize_version "$(git show "${SRC}:.ratchet-version" | head -n1 | tr -d '[:space:]')")"
 fi
 printf '%s\n' "$NEWVER" > .ratchet-version
 
