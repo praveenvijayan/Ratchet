@@ -11,10 +11,10 @@
 // tests drive stub adapter CLIs offline with no real fleet.
 // Zero dependencies. Requires Node 20+.
 
-import { mkdirSync, openSync, closeSync } from "node:fs";
+import { mkdirSync, openSync, closeSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { spawn } from "node:child_process";
-import { resolveAdapter, substitute } from "./herd.mjs";
+import { resolveAdapter, substitute, extractUsage } from "./herd.mjs";
 import {
   STATE_FILE,
   ESCALATIONS_FILE,
@@ -110,7 +110,7 @@ export function spawnWorker(argv, env, logFile, onExit, onError) {
 // exitCode to tell a clean stop (0) from a crash. Fired from the spawn's `exit`
 // listener, so it re-reads the file to avoid clobbering a concurrent poll write
 // and no-ops if the entry was already reconciled away.
-export function recordExit(path, issue, code, signal, { eventsPath = EVENTS_FILE, now = Date.now, warn = console.warn } = {}) {
+export function recordExit(path, issue, code, signal, { config, eventsPath = EVENTS_FILE, now = Date.now, warn = console.warn } = {}) {
   const state = readState(path);
   const entry = state[issue];
   if (!entry) return;
@@ -119,6 +119,31 @@ export function recordExit(path, issue, code, signal, { eventsPath = EVENTS_FILE
   entry.exitSignal = signal || null;
   entry.pid = null;
   writeState(path, state);
+
+  // If this worker's adapter declares a usage mapping, read its cost/token
+  // numbers from the log and carry them on the worker-exit event so any consumer
+  // reads one adapter-agnostic source. An adapter with no mapping omits the
+  // fields entirely (back-compat). A log that can't be read (crashed/truncated
+  // worker) or lacks the declared values records the fields as null and warns —
+  // the exit path never throws, so the poll always continues.
+  let usage;
+  const adapter = config && config.adapters ? config.adapters[entry.adapter] : undefined;
+  if (adapter && adapter.usage) {
+    let logText = "";
+    try {
+      if (entry.logFile) logText = readFileSync(entry.logFile, "utf8");
+    } catch {
+      // Unreadable or missing log — extraction below yields nulls and warns.
+    }
+    const { values, unresolved } = extractUsage(adapter.usage, logText);
+    usage = values;
+    if (unresolved.length)
+      warn(
+        `herd: warning: could not read usage field(s) ${unresolved.join(", ")} for adapter "${entry.adapter}" ` +
+          `from ${entry.logFile || "(no log file)"}; recorded as null.`,
+      );
+  }
+
   appendHerdEvent(eventsPath, {
     now: now(),
     event: "worker-exit",
@@ -129,6 +154,7 @@ export function recordExit(path, issue, code, signal, { eventsPath = EVENTS_FILE
     attempts: entry.attempts,
     pr: entry.pr,
     status: entry.status,
+    ...(usage || {}),
   }, warn);
 }
 
@@ -249,7 +275,7 @@ export async function dispatchOne(opts) {
     writeRouting(routingPath, cursors);
   }
 
-  const onExit = (code, signal) => recordExit(statePath, issue.number, code, signal, { eventsPath, now, warn: log });
+  const onExit = (code, signal) => recordExit(statePath, issue.number, code, signal, { config, eventsPath, now, warn: log });
   const pid = spawnFn(plan.argv, plan.env, plan.logFile, onExit);
 
   // A missing or unexecutable adapter binary never starts, so spawn returns no

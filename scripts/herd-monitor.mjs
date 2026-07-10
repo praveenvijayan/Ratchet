@@ -168,7 +168,7 @@ export async function monitorOnce(opts) {
       } else {
         let pid = null;
         try {
-          pid = spawnFn(resume.argv, resume.env, resume.logFile, (code, signal) => recordExit(statePath, issue, code, signal, { eventsPath, now, warn: log }));
+          pid = spawnFn(resume.argv, resume.env, resume.logFile, (code, signal) => recordExit(statePath, issue, code, signal, { config, eventsPath, now, warn: log }));
         } catch (e) {
           escalate(`resume spawn failed: ${e.message}`, "check the adapter command in .ratchet/herd.json; the resume CLI may be missing or unexecutable");
           line = `herd: issue #${issue} -> escalated (resume spawn failed: ${e.message})`;
