@@ -115,6 +115,14 @@ export async function claimRefPresent(gh, issue) {
   }
 }
 
+// Is GitHub issue #N still open? True on OPEN, false on CLOSED. Throws on a
+// transient gh failure so the caller can skip this ref this poll and retry on
+// the next — a blip never changes the escalation outcome. `gh` is injected.
+export async function issueIsOpen(gh, issue) {
+  const data = await gh(["issue", "view", String(issue), "--json", "state"]);
+  return data?.state === "OPEN";
+}
+
 // Given the claim refs on origin plus current reality, return the issues whose
 // ref is stale: no live worker in the state file AND no open PR. A ref backed by
 // a live worker (a legitimate in-flight claim) or an open PR is never returned.
@@ -432,16 +440,35 @@ export async function pollOnce({
     for (const issue of stale) {
       if (state[String(issue)]?.status === STALE_CLAIM_STATUS) continue; // already escalated once
       const del = deleteRefCommand(issue);
-      appendEscalation(escalationsPath, {
-        now: stamp,
-        issue,
-        what:
-          `stale claim ref agent/issue-${issue} on origin: no live worker and no open PR, yet the ref still holds the claim, ` +
-          `so every future worker 422s and refuses the issue. Delete it to free the issue: ${del}`,
-        logFile: null,
-        action: `run \`${del}\` to delete the stale claim ref, then re-queue the issue if its work is unfinished`,
-      });
-      state[String(issue)] = { adapter: null, pid: null, logFile: null, attempts: 0, status: STALE_CLAIM_STATUS, pr: null };
+      let open;
+      try {
+        open = await issueIsOpen(gh, issue);
+      } catch (e) {
+        log(`herd: issue-state check failed for #${issue}: ${e.message}; skipping this stale ref this poll.`);
+        continue;
+      }
+      if (open) {
+        appendEscalation(escalationsPath, {
+          now: stamp,
+          issue,
+          what:
+            `stale claim ref agent/issue-${issue} on origin: no live worker and no open PR, yet the ref still holds the claim, ` +
+            `so every future worker 422s and refuses the issue. Delete it to free the issue: ${del}`,
+          logFile: null,
+          action: `run \`${del}\` to delete the stale claim ref, then re-queue the issue if its work is unfinished`,
+        });
+        state[String(issue)] = { adapter: null, pid: null, logFile: null, attempts: 0, status: STALE_CLAIM_STATUS, pr: null };
+      } else {
+        appendEscalation(escalationsPath, {
+          now: stamp,
+          issue,
+          what:
+            `stale claim ref agent/issue-${issue} on origin: the issue is closed (work done), so the ref is pure garbage — ` +
+            `nothing to re-queue. Delete it: ${del}`,
+          logFile: null,
+          action: `run \`${del}\` to delete the stale claim ref`,
+        });
+      }
       staleEscalated += 1;
     }
   }
