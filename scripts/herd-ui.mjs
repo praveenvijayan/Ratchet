@@ -23,6 +23,7 @@ import { readState, STATE_FILE, EVENTS_FILE, ESCALATIONS_FILE, STALE_CLAIM_STATU
 import { DEFAULTS, CONFIG_PATH, loadConfig, HerdConfigError } from "./herd.mjs";
 import { defaultAvatarFor } from "./herd-avatars.mjs";
 import { TERMINAL_STATUS } from "./herd-monitor.mjs";
+import { createNotifier } from "./herd-notify.mjs";
 
 export const DEFAULT_PORT = 4780;
 
@@ -784,6 +785,7 @@ export function createDashboardServer({
   fetchChecks = null,
   checksRefreshMs = 30_000,
   fetchTitle = null,
+  notify = null,
 } = {}) {
   const checksCache = createChecksCache({ fetchChecks: fetchChecks || defaultFetchChecks, refreshMs: checksRefreshMs });
   const titleCache = createTitleCache({ fetchTitle: fetchTitle || defaultFetchTitle });
@@ -822,6 +824,13 @@ export function createDashboardServer({
           lastKey = key;
           res.write(`event: snapshot\ndata: ${JSON.stringify(snapshot)}\n\n`);
         }
+        // Fire desktop notifications for any new unresolved escalations. Fire
+        // and forget — the notifier catches its own failures and never rejects,
+        // so the SSE stream is never affected. The notifiedSet is shared across
+        // all connections (held inside the notify closure), so the first tick
+        // to see a new escalation fires the notification and subsequent ticks
+        // see it is already notified and skip.
+        if (notify) Promise.resolve(notify(snapshot.escalations)).catch(() => {});
       };
       tick();
       const timer = setInterval(tick, pollMs);
@@ -942,7 +951,7 @@ export async function run(argv, { log = console.log, cwd = process.cwd() } = {})
   const { statePath, eventsPath, escalationsPath } = ratchetPaths(root);
   const config = loadConfigOrDefaults(join(root, CONFIG_PATH));
   const repoSlug = resolveRepoSlug(gitOriginUrl(cwd));
-  const server = createDashboardServer({ statePath, eventsPath, escalationsPath, config, repoSlug });
+  const server = createDashboardServer({ statePath, eventsPath, escalationsPath, config, repoSlug, notify: createNotifier() });
   const bound = await listenOrFail(server, port);
   log(`Herd dashboard on http://localhost:${bound}  (Ctrl-C to stop)`);
   return { server, port: bound };

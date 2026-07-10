@@ -61,6 +61,7 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 | 4y2   | test: herd-avatar               | `node scripts/herd-avatar.test.mjs`               | exit 0 |
 | 4y3   | test: herd-ui-log-search        | `node scripts/herd-ui-log-search.test.mjs`        | exit 0 |
 | 4y4   | test: herd-ui-escalation        | `node scripts/herd-ui-escalation.test.mjs`        | exit 0 |
+| 4y5   | test: herd-notify               | `node scripts/herd-notify.test.mjs`               | exit 0 |
 | 4y6   | test: herd-ui-adapter-failures  | `node scripts/herd-ui-adapter-failures.test.mjs`  | exit 0 |
 | 4z1   | test: state-label-exclusivity   | `node scripts/state-label-exclusivity.test.mjs`   | exit 0 |
 | 4z2   | test: state-instructions-symmetry | `node scripts/state-instructions-symmetry.test.mjs` | exit 0 |
