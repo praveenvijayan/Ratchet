@@ -187,6 +187,8 @@ memory/
 scripts/
   archive-closed-plans-workflow.test.mjs Regression test for the archive workflow
   archive-closed-plans.mjs      Move closed issue plans into plan/done/
+  bootstrap.sh                  Install Ratchet into a host project from a pinned release (manifest + profiles)
+  bootstrap.test.mjs            End-to-end test for the bootstrap installer
   archive-closed-plans.test.mjs Regression test for the archive sweep
   criteria.mjs                  Shared acceptance-criteria readiness rule
   criteria.test.mjs             Regression test for the readiness rule
