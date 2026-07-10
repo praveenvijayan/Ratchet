@@ -206,6 +206,8 @@ scripts/
   herd-verify.test.mjs          Regression test for herd PR verify
   herd-ui.mjs                   ratchet-herd local web dashboard (node:http + SSE)
   herd-ui.test.mjs              Regression test for the herd web dashboard
+  herd-avatars.mjs              Bundled default mascot avatars for the dashboard
+  herd-avatar.test.mjs          Regression test for dashboard adapter avatars
   plan-sync-concurrency.test.mjs Workflow concurrency regression test
   plan-sync.mjs                 Deterministic plan→issue compiler
   plan-sync.test.mjs            Regression test for the compiler
