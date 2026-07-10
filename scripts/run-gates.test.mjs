@@ -13,6 +13,9 @@
 // Plus #49: a `|` inside a backticked command runs in full (AC1); a row the
 // parser cannot interpret unambiguously fails the run naming the row, and the
 // truncated command prefix never runs (AC2).
+// Plus #89: a run with zero real gates exits non-zero (red) so it is
+// distinguishable in the PR checks list (AC1); a run with at least one real
+// gate keeps the normal green success presentation (AC2).
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -107,17 +110,43 @@ const fail = "`node -e \"process.exit(3)\"`";
   assert.ok(/FAIL/i.test(summary), "the summary must mark the gate as failed");
 }
 
-// --- Criterion 4 / #58 AC3: TODO-only runs are visibly green but vacuous ---
+// --- Criterion 4 / #58 AC3 / #89: a TODO gate is skipped with a visible notice
+// (never as passed); and — changed by #89 — a TODO-only run exits non-zero so the
+// check is red (distinguishable) in the PR checks list, not green-but-vacuous ---
 {
   const { status, out, summary } = await runGates([
     { order: 1, gate: "format", command: "TODO: format command" },
   ]);
-  assert.equal(status, 0, "a TODO-only table has nothing to fail on");
+  assert.notEqual(status, 0, "a TODO-only run is vacuous and must exit non-zero (#89)");
   assert.ok(/::notice::/.test(out) && /skip/i.test(out), "a TODO gate must emit a visible skip notice");
-  assert.ok(/::warning::/.test(out) && /vacuous/i.test(out), "a TODO-only green run must emit a vacuous-check warning");
+  assert.ok(/::error::/.test(out) && /vacuous/i.test(out), "a vacuous run must emit an error annotation (#89)");
   assert.ok(/skip/i.test(summary), "the TODO gate must be shown as skipped in the summary");
-  assert.ok(/green but vacuous/i.test(summary), "the summary must visibly distinguish no-op green from verified green");
+  assert.ok(/vacuous/i.test(summary), "the summary must mark the run as vacuous");
   assert.ok(!/passed/i.test(summary), "a skipped TODO gate must never be reported as passed");
+}
+
+// --- #89 AC1: a gates run in which zero real gates executed is distinguishable
+// in the PR checks list itself — the run exits non-zero (red), not green ---
+{
+  const { status, out, summary } = await runGates([
+    { order: 1, gate: "format", command: "TODO: format command" },
+    { order: 2, gate: "lint", command: "TODO: lint command" },
+  ]);
+  assert.notEqual(status, 0, "a run with zero real gates must exit non-zero so the check is red in the PR list");
+  assert.ok(/::error::/.test(out) && /vacuous/i.test(out), "the vacuous run must emit an error annotation visible without opening the run");
+  assert.ok(/vacuous/i.test(summary), "the summary must mark the run as vacuous");
+}
+
+// --- #89 AC2: a run with at least one real gate keeps the normal success
+// presentation (exit 0, green) even when some gates are TODO ---
+{
+  const { status, summary } = await runGates([
+    { order: 1, gate: "format", command: "TODO: format command" },
+    { order: 2, gate: "test", command: echo("REAL_GATE_RAN") },
+  ]);
+  assert.equal(status, 0, "a run with at least one real gate must keep normal success (green)");
+  assert.ok(/passed/i.test(summary), "the real gate must be reported as passed");
+  assert.ok(!/vacuous/i.test(summary), "a run with a real gate must not be marked vacuous");
 }
 
 // --- #47 AC3: the summary names each distinct test gate it ran, so a reviewer
@@ -221,4 +250,4 @@ const fail = "`node -e \"process.exit(3)\"`";
   assert.ok(/after (it )?merge/i.test(section), "DOCS.md must state a config change takes effect only after merge");
 }
 
-console.log("PASS run-gates.test.mjs (10 criteria, 33 assertions)");
+console.log("PASS run-gates.test.mjs (12 criteria, 39 assertions)");
