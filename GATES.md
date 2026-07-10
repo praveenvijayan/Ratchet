@@ -72,6 +72,7 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 | 4z5   | test: manifest-check            | `node scripts/manifest-check.test.mjs`            | exit 0 |
 | 4z7   | test: bootstrap                 | `node scripts/bootstrap.test.mjs`                 | exit 0 |
 | 4z8   | test: ratchet-uninstall         | `node scripts/ratchet-uninstall.test.mjs`         | exit 0 |
+| 4z9   | test: install-lifecycle         | `node scripts/install-lifecycle.test.mjs`         | exit 0 |
 | 4r    | test-coverage                   | `node scripts/gates-coverage.mjs`                 | exit 0 |
 | 4z    | skill-parity                    | `node scripts/skill-parity.mjs`                   | exit 0 |
 | 4z4   | version-consistency             | `node scripts/version-consistency.mjs`            | exit 0 |

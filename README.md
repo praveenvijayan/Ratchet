@@ -92,15 +92,41 @@ anything it can't resolve is escalated to a human. See DOCS.md §14.
 
 ## Install
 
-1. Copy this kit into your repo (or "Use this template"), and commit it.
-2. Make sure skills are where each tool expects them:
-   ```
-   ./setup.sh                 # repo-local mirrors (works for all three on clone)
-   ./setup.sh user-claude     # optional: install for Claude Code across all repos
-   ./setup.sh user-agents     # optional: install for Codex/Antigravity across all repos
-   ```
-   Codex and Antigravity also read `.agents/skills/` directly with no setup.
-3. Run **`/ratchet-init`** in your agent. It creates the labels, detects your
+Install from a pinned release with the bootstrap script, run from inside your
+project's git repo. It downloads the tag you name, reads
+`ratchet-manifest.json`, and copies in only the framework files your chosen
+profile(s) need — it never touches `.env` or other local secrets (they aren't
+in the manifest, so they're never selected).
+
+Download it, inspect it, then run it — the safe default for anything you pipe
+into `bash`:
+
+```
+curl -fsSL https://raw.githubusercontent.com/praveenvijayan/Ratchet/<tag>/scripts/bootstrap.sh -o bootstrap.sh
+less bootstrap.sh          # read it before you run it
+bash bootstrap.sh --version <tag> --profile core
+```
+
+Or, once you trust the source, the one-line convenience form — **always pin a
+real release tag**; `--version main` installs but is not reproducible, so
+avoid piping an unpinned ref straight into `bash`:
+
+```
+curl -fsSL https://raw.githubusercontent.com/praveenvijayan/Ratchet/<tag>/scripts/bootstrap.sh | bash -s -- --version <tag>
+```
+
+`--profile` adds optional profiles on top of the always-installed `core`
+(comma-separated, e.g. `--profile watcher,herd`) — see DOCS.md §9 for what
+each one installs. `--dry-run` reports what would change without writing
+anything; `--force` is required to overwrite a conflicting existing file.
+
+Then:
+
+1. **`./setup.sh`** — generate the skill mirrors your agent reads (or
+   `./setup.sh user-claude` / `./setup.sh user-agents` to install across all
+   your repos; Codex and Antigravity also read `.agents/skills/` directly with
+   no setup).
+2. Run **`/ratchet-init`** in your agent. It creates the labels, detects your
    stack to fill `GATES.md`, and walks you through the PAT.
 
 ### Claude Code, one-command alternative

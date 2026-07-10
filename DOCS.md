@@ -189,6 +189,7 @@ scripts/
   archive-closed-plans.mjs      Move closed issue plans into plan/done/
   bootstrap.sh                  Install Ratchet into a host project from a pinned release (manifest + profiles)
   bootstrap.test.mjs            End-to-end test for the bootstrap installer
+  install-lifecycle.test.mjs    End-to-end test for bootstrap-install -> update -> uninstall
   archive-closed-plans.test.mjs Regression test for the archive sweep
   criteria.mjs                  Shared acceptance-criteria readiness rule
   criteria.test.mjs             Regression test for the readiness rule
@@ -599,12 +600,28 @@ also works because it can inspect PR state directly.
 
 ## 9. Installation and setup
 
-Ratchet is published as a GitHub **template repository** and (for Claude Code) a
-**plugin marketplace**.
+Ratchet installs from a pinned release via `scripts/bootstrap.sh`, run from
+inside your project's git repo. It downloads the tag you name, reads
+`ratchet-manifest.json` at that ref, and copies in only the `framework` files
+your chosen profile(s) select — it never creates GitHub labels, secrets, or
+branch protection, and never touches `.env` or other local secrets (they
+aren't in the manifest, so they're never selected).
 
-1. **Get the files.** Click "Use this template" on the Ratchet repo, or
-   `gh repo create my-project --template praveenvijayan/Ratchet`. This copies the
-   full tree to your new repo's root.
+1. **Download, inspect, then run it** — the safe default for anything piped
+   into `bash`:
+   ```
+   curl -fsSL https://raw.githubusercontent.com/praveenvijayan/Ratchet/<tag>/scripts/bootstrap.sh -o bootstrap.sh
+   less bootstrap.sh          # read it before you run it
+   bash bootstrap.sh --version <tag> --profile core
+   ```
+   Or, once you trust the source, the one-line convenience form — **always
+   pin a real release tag**; `--version main` installs but warns it is not
+   reproducible, so avoid piping an unpinned ref straight into `bash`:
+   ```
+   curl -fsSL https://raw.githubusercontent.com/praveenvijayan/Ratchet/<tag>/scripts/bootstrap.sh | bash -s -- --version <tag>
+   ```
+   `--dry-run` reports what would change without writing anything; an
+   existing file blocks the install until you pass `--force`.
 2. **Place the skills for your tool:**
    ```
    ./setup.sh                 # repo-local mirrors (all three tools work on clone)
@@ -621,6 +638,27 @@ Claude Code one-command alternative for the skills:
 /plugin marketplace add praveenvijayan/Ratchet
 /plugin install ratchet@ratchet
 ```
+
+### Manifest classifications and profiles
+
+`ratchet-manifest.json` is the single source of truth for what an install
+ships. Every path is classified:
+
+| Class | Meaning |
+|-------|---------|
+| `framework` | Ratchet-owned; safe to overwrite on `/ratchet-update`. Each entry also names the profile that ships it. |
+| `generated` | Scaffolded once by `bootstrap.sh` into the host project (e.g. `GATES.md`, `memory/`, `.env.example`); never overwritten again. |
+| `excluded` | Never shipped to a host project at all (tests, plan content, this repo's own README/DOCS/branding). |
+
+`core` is always installed. `--profile` adds any of:
+
+| Profile | Installs |
+|---------|----------|
+| `watcher` | The local real-time watcher (`scripts/ratchet-watch.*`) that turns a human's merge/review into a `/ratchet-next` trigger. Needs an authenticated `gh`. |
+| `release` | Versioned-release tooling (`release.mjs` + `release.yml`) for teams that cut tagged Ratchet releases. |
+| `herd` | The headless fleet supervisor (`herd*.mjs` + the `ratchet-herd` skill) that dispatches and monitors multiple agents at once. |
+| `unattended-ci` | The optional CI-based runner (`ratchet-run.yml`) for unattended execution. Off by default. |
+| `claude-plugin` | Claude Code plugin packaging (`.claude-plugin/`, `plugin/.claude-plugin/`) so Ratchet can ship through the plugin marketplace. |
 
 ---
 
@@ -648,34 +686,58 @@ gitignored; only `.env.example` is committed.
 
 ---
 
-## 11. Updating Ratchet
+## 11. Updating and uninstalling Ratchet
 
-Repos created from the template do not auto-update — upgrading is a deliberate,
-zero-merge command, because `AGENTS.md` is 100% framework; the project-specific
-files (`GATES.md` plus everything under `memory/`) live outside it.
+Repos installed via `scripts/bootstrap.sh` do not auto-update — upgrading is a
+deliberate, zero-merge command. `scripts/ratchet-update.sh` is manifest- and
+profile-aware: it reads `ratchet-manifest.json` at the target ref and pulls
+only the `framework` files for the profile(s) recorded at install time in
+`.ratchet-install.json` — never the whole tree, and never `generated`/
+project-owned paths (they are never selected).
 
 ```
 /ratchet-update           # pull upstream main onto a review branch
 /ratchet-update v1.2.0    # or a specific released tag (must exist upstream)
 ```
 
-It pulls only framework paths (skills, workflows, the whole `scripts/` tree,
-`AGENTS.md`/`DOCS.md`, pointers, `setup.sh`, `plan/README.md`),
-re-syncs the skill mirrors, bumps `.ratchet-version`, and stops for you to
-review the diff and open a PR. It never touches the project-owned set:
+It checks each recorded framework path against the content hash it saved the
+last time it wrote that path. A path the host has locally modified since
+install is skipped and listed, not silently overwritten — pass `--force` to
+replace it anyway. A clean run refreshes the selected framework files,
+re-syncs the skill mirrors, bumps `.ratchet-version` and the install record,
+and stops for you to review the diff and open a PR. It never touches:
 
-| Framework (pulled, overwrite-safe) | Project-owned (never touched) |
-|------------------------------------|-------------------------------|
-| `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `DOCS.md` | `GATES.md` (config) |
-| `.agents/`, `.claude/`, `plugin/`, `.claude-plugin/` | `memory/` (`USER.md`, `ARCHITECTURE.md`, `MEMORY.md`) |
-| `.github/workflows/`, `scripts/*`, `setup.sh` | your `plan/*.md` issue files |
-| `plan/README.md` | `.env`, `.env.example`, `README.md`, `LICENSE`, `.gitignore`, your code |
+| Preserved (never touched) |
+|----------------------------|
+| `GATES.md` (config), `memory/` (`USER.md`, `ARCHITECTURE.md`, `MEMORY.md`) |
+| your `plan/*.md` issue files |
+| `.env`, `.env.example`, `README.md`, `LICENSE`, `.gitignore`, your code |
 
 `.ratchet-version` records the installed version. Pinning an update to a tag
 (`/ratchet-update v1.2.0`) only works for a version the upstream has actually
 released; those tags are cut by the opt-in release lane (§6), which creates each
 one idempotently. Until a release is cut there may be no tags to pin to, so plain
 `/ratchet-update` tracks `main`.
+
+### Uninstalling Ratchet
+
+`scripts/ratchet-uninstall.sh` removes exactly what `bootstrap.sh` recorded in
+`.ratchet-install.json` — dry-run by default, `--yes` to apply:
+
+```
+/ratchet-uninstall                  # or: ./scripts/ratchet-uninstall.sh --yes
+```
+
+- A recorded `framework` file the host has locally modified since install
+  (hash mismatch) is **kept**, not removed.
+- `generated` files (`GATES.md`, `memory/`, `.env.example`, `.ratchet-version`,
+  skill mirrors) are **kept** unless you pass `--purge-memory` (removes
+  `memory/`) or `--purge-generated=path,path` (removes any named path).
+- `plan/*.md` (your issue specs) is **kept** unless you pass `--purge-plans`.
+- `.env` is never removed.
+- GitHub-side state — issues, labels, secrets, branches, branch protection —
+  is never touched; the script prints the `gh` commands to remove them by
+  hand if you want them gone too.
 
 ---
 
