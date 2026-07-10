@@ -20,6 +20,7 @@ import { runLoop, pollOnce, ghJson, resolveRepoRoot, ratchetPaths, RepoRootError
 import { dispatchOne, surveyReady } from "./herd-dispatch.mjs";
 import { monitorOnce } from "./herd-monitor.mjs";
 import { verifyOnce } from "./herd-verify.mjs";
+import { reviewOnce } from "./herd-review.mjs";
 
 // Config location, relative to the repo root. Entrypoints anchor it there via
 // resolveRepoRoot so `init`/`run` touch the same file from any subdirectory.
@@ -545,6 +546,11 @@ if (isMain) {
         // is a spawn — skipped on --dry-run alongside the monitor).
         await verifyOnce({ ...o, config }).catch((e) => {
           o.log(`herd: verify failed: ${e.message}; continuing to dispatch.`);
+        });
+        // React to review verdicts on ready-for-review PRs (a CHANGES_REQUESTED
+        // review dispatches a rework, so it too is a spawn — skipped on --dry-run).
+        await reviewOnce({ ...o, config }).catch((e) => {
+          o.log(`herd: review failed: ${e.message}; continuing to dispatch.`);
         });
       }
       const ready = await surveyReady(o.gh).catch((e) => {
