@@ -47,6 +47,8 @@ and an optional Claude Code plugin.
   thresholds read from GATES.md) with `pr-size-check.test.mjs`,
   `verify-issue-body.mjs` (ratchet-run's injection guard: issue body must still
   match its reviewed plan file) with `verify-issue-body.test.mjs`,
+  `review-verdict.mjs` (flips the mapped issue to state:changes-requested on a
+  Request Changes review) with `review-verdict.test.mjs`,
   `ratchet-metrics.mjs` (read-only loop-health metrics from GitHub data) with
   `ratchet-metrics.test.mjs`,
   `ratchet-watch.sh`/`.mjs` (local webhook bridge for the continuous loop),
@@ -54,7 +56,8 @@ and an optional Claude Code plugin.
 - `.github/workflows/` — the automation edge of the loop: `plan-sync`,
   `unblock-dependents`, `sweep-stale-claims`, `pr-gates` (runs the GATES.md
   gates server-side on every agent PR, plus a `size` job enforcing the scope
-  cap), and the opt-in `ratchet-run`.
+  cap), `review-verdict` (flips an issue to `state:changes-requested` on a
+  Request Changes review), and the opt-in `ratchet-run`.
 - `.agents/skills/` — the CANONICAL skill sources (one dir per `ratchet-*`
   skill: `SKILL.md` body + `agents/openai.yaml` Codex policy).
 - `.claude/skills/` and `plugin/skills/` — generated mirrors of the canonical

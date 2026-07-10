@@ -68,7 +68,7 @@ scripts/
   plan-sync.mjs                    Zero-dep deterministic plan→issue compiler
   plan-sync.test.mjs               Regression test for the compiler (node scripts/plan-sync.test.mjs)
   ratchet-update.sh                Pulls framework updates, preserves project files
-.github/workflows/               plan-sync, unblock-dependents, sweep-stale-claims, pr-gates, release, ratchet-run
+.github/workflows/               plan-sync, unblock-dependents, sweep-stale-claims, pr-gates, review-verdict, release, ratchet-run
 .env.example                     PAT documentation for local runs
 setup.sh                         Sync skills into each tool's location
 ```

@@ -225,6 +225,8 @@ scripts/
   ratchet-watch.sh              Real-time GitHub→local bridge
   release.mjs                   Opt-in release tag + changelog publisher
   release.test.mjs              Regression test for releases
+  review-verdict.mjs            Flip issue to state:changes-requested on a Request Changes review
+  review-verdict.test.mjs       Regression test for the review-verdict flip
   run-gates.mjs                 Run GATES.md locally and in CI
   run-gates.test.mjs            Regression test for the gate runner
   skill-parity.mjs              Guard: every skill has agents/openai.yaml + byte-identical .claude/plugin mirrors
@@ -243,6 +245,7 @@ scripts/
   pr-gates.yml                  Run GATES.md gates and PR size check on agent PRs
   ratchet-run.yml               OPTIONAL CI runner (off by default)
   release.yml                   OPTIONAL release tag + changelog lane
+  review-verdict.yml            On a Request Changes review, flip the mapped issue to state:changes-requested
   unblock-dependents.yml        On issue close, promote unblocked dependents
   sweep-stale-claims.yml        Return abandoned work to the queue
 .agents/skills/<name>/          Canonical skills (Codex + Antigravity)
@@ -304,6 +307,7 @@ See §8 — this is the routine that responds to a human's PR decision.
 |----------|---------|--------|
 | `plan-sync` | push to `plan/**` on `main` (i.e. planning-PR merge), or manual | Compiles `plan/*.md` into issues, idempotently (dedup via a `<!-- plan-id -->` marker). Scoped to `main` so the planning branch doesn't create issues early. |
 | `unblock-dependents` | `issues: closed` | Strips the closed issue's own `state:*` label (closed is terminal; a lingering `state:in-review` misleads), then promotes every issue whose blockers are now all closed to `state:ready`. This re-feeds the queue. |
+| `review-verdict` | `pull_request_review: submitted` | Flips the issue mapped to a PR (by `agent/issue-<N>` branch or a `Closes #<N>` body marker) from `state:in-review` to `state:changes-requested` when a Request Changes review is submitted. APPROVED/COMMENTED reviews change nothing; a PR mapping to no issue is a logged no-op. One-directional — the flip back to `state:in-review` after rework stays with the agent (AGENTS.md step 6). |
 | `sweep-stale-claims` | every 30 min, or manual | Patrols `state:in-progress`, `state:in-review`, and `state:changes-requested`. Freshness is the newest proof of life: a branch commit, a claim event, or a heartbeat issue comment containing `<!-- ratchet-heartbeat -->`. Stale zero-commit claims return to `state:ready` and have the orphan ref deleted; committed branches are kept. In-review issues with no live PR are requeued, while merged PRs whose issue stayed open are moved to `state:blocked` for human cleanup. Changes-requested work is requeued only after the inactivity window. |
 | `pr-gates` | agent PR opened, synchronized, or reopened | Runs `scripts/run-gates.mjs` as the `gates` job and `scripts/pr-size-check.mjs` as the `size` job on every `agent/issue-*` PR. Both jobs judge the PR by the **base branch's** `GATES.md`, not the copy the PR ships (see *Security: gate config is judged from the base branch* below). Branch protection should require both contexts. |
 | `ratchet-run` | PR merged, or manual | OPTIONAL, off by default. Runs an agent in CI to work the next issue. Requires `RATCHET_AUTO=true` and an agent API key. Before handing work to the agent it verifies the body/title against the reviewed plan, binds the plan marker to the picked issue number, and passes the verified issue body snapshot into the prompt (see *Security* below); most users do not enable this — the local loop (§8) is the recommended path. |

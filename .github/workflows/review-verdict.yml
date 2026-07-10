@@ -1,0 +1,33 @@
+name: review-verdict
+
+# When a human submits a Request Changes review on an agent PR, flip the
+# mapped issue from state:in-review to state:changes-requested — so the board
+# reflects the review verdict immediately, without waiting for an agent to
+# notice the rejection. One-directional by design: the flip back to
+# state:in-review after rework stays with the agent (AGENTS.md step 6), which
+# knows when its rework is complete. This workflow is the single owner of the
+# review-time flip — herd's supervisor and chat agents rely on it rather than
+# duplicating it. APPROVED/COMMENTED reviews change no labels; a PR mapping to
+# no issue is a logged no-op. The decision logic lives in
+# scripts/review-verdict.mjs so it is regression-tested off the network; this
+# workflow is only its trigger and env.
+
+on:
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  issues: write
+
+jobs:
+  flip:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+      - run: node scripts/review-verdict.mjs
+        env:
+          GITHUB_TOKEN: ${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
