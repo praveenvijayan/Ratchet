@@ -19,7 +19,7 @@
 
 import { readFileSync } from "node:fs";
 import { substitute } from "./herd.mjs";
-import { STATE_FILE, ESCALATIONS_FILE, EVENTS_FILE, readState, writeState, appendEscalation, appendHerdEvent, isPidAlive } from "./herd-survey.mjs";
+import { STATE_FILE, ESCALATIONS_FILE, EVENTS_FILE, STALE_CLAIM_STATUS, readState, writeState, appendEscalation, appendHerdEvent, isPidAlive } from "./herd-survey.mjs";
 import { spawnWorker, recordExit } from "./herd-dispatch.mjs";
 
 // Statuses the monitor has already resolved — never acted on again.
@@ -108,6 +108,11 @@ export async function monitorOnce(opts) {
   const transitions = [];
   for (const [issue, entry] of Object.entries(state)) {
     if (TERMINAL_STATUS.has(entry.status)) continue;
+    // The survey's stale-claim sentinel (pid/adapter null) is survey-owned
+    // bookkeeping, not a worker. Classifying it as a dead worker would fail to
+    // resume (adapter null), escalate, and flip its status — defeating the
+    // survey's status-equality dedup and re-escalating the same ref every poll.
+    if (entry.status === STALE_CLAIM_STATUS) continue;
     if (entry.pid != null && isAlive(entry.pid)) continue; // still working — leave it
 
     const decision = classifyExit(issue, entry, { prByHead, reworkCap: config.reworkCap });
