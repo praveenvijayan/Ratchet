@@ -2,7 +2,7 @@
 title: Herd reacts to PR review verdicts — changes-requested triggers rework and label updates
 priority: high
 labels: [herd]
-blocked_by: []
+blocked_by: [0098-review-verdict-label-workflow]
 ---
 
 A Request Changes review on a herd worker's PR does nothing: `ready-for-review`
@@ -15,8 +15,7 @@ CHANGES_REQUESTED, label stuck at `state:in-review`, no rework dispatched. The
 review loop — the core of the whole flow — is open-circuit in herd mode.
 
 ## Acceptance criteria
-- [ ] A tracked open PR whose review decision becomes CHANGES_REQUESTED moves its issue label from `state:in-review` to `state:changes-requested` on the next poll
-- [ ] The same detection dispatches a rework worker on the issue's existing branch, and the worker's prompt directs it to the PR's review feedback
+- [ ] A tracked open PR whose review decision becomes CHANGES_REQUESTED is detected on the next poll and dispatches a rework worker on the issue's existing branch, with the worker's prompt directing it to the PR's review feedback
 - [ ] The rework dispatch counts against `reworkCap`; at the cap the issue is escalated instead of re-dispatched, naming the PR and the cap
 - [ ] After the rework worker pushes and the PR updates, the issue label returns to `state:in-review`
 - [ ] An APPROVED review dispatches nothing and changes no labels — merging stays human-only
@@ -38,7 +37,6 @@ PR, reply to comments, label back to `state:in-review`) is AGENTS.md step 6 and
 stays agent-side — the dispatched rework worker executes it exactly as a chat
 agent does when a human runs /ratchet-next. The supervisor adds only detection
 and dispatch (the role the human plays in chat mode), never a second rework
-implementation. The chat flow is unchanged by this issue. The supervisor's
-label flip at detection time is deliberate minimal redundancy with the worker's
-own step-6 flip: idempotent, and it keeps the label truthful when the rework
-dispatch itself fails.
+implementation. The chat flow is unchanged by this issue. The review-time flip
+to `state:changes-requested` is owned by 0098's workflow for both flows — the
+supervisor never sets it.
