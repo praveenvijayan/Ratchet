@@ -12,6 +12,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -196,4 +197,64 @@ const withLimitsAndExcludes = (lines, files, excludes) =>
   assert.ok(!/base branch's config/i.test(res.out), "identical base and PR config must not be flagged as a change");
 }
 
-console.log("PASS pr-size-check.test.mjs (31 assertions)");
+// --- #212 AC1: files under the generated skill mirror directories are excluded
+// from the changed-file count. ---
+{
+  const files = [
+    { filename: ".claude/skills/foo/SKILL.md", additions: 200, deletions: 0 },
+    { filename: "plugin/skills/foo/SKILL.md", additions: 200, deletions: 0 },
+    { filename: "src/app.js", additions: 3, deletions: 2 },
+  ];
+  const res = await check({ gates: withLimits(10, 1), files });
+  assert.equal(res.code, 0, `mirror files must not count toward thresholds, got:\n${res.out}`);
+  assert.ok(res.out.includes("5 changed line"), `only the non-mirror file should count its lines, got:\n${res.out}`);
+  assert.ok(res.out.includes("1 file"), `only the non-mirror file should count toward files, got:\n${res.out}`);
+}
+
+// --- #212 AC2: the canonical skill source under .agents/skills/ still counts
+// toward the limit. ---
+{
+  const files = [
+    { filename: ".agents/skills/foo/SKILL.md", additions: 8, deletions: 5 },
+    { filename: "src/app.js", additions: 4, deletions: 0 },
+  ];
+  const res = await check({ gates: withLimits(400, 1), files });
+  assert.equal(res.code, 1, "the canonical .agents/skills source must still count toward the file limit");
+  assert.ok(res.out.includes("2 files"), `both the canonical skill and the source file must be counted, got:\n${res.out}`);
+}
+
+// --- #212 AC3: a PR changing one canonical skill file plus its two regenerated
+// mirrors counts as one changed file for the gate. ---
+{
+  const files = [
+    { filename: ".agents/skills/foo/SKILL.md", additions: 3, deletions: 1 },
+    { filename: ".claude/skills/foo/SKILL.md", additions: 3, deletions: 1 },
+    { filename: "plugin/skills/foo/SKILL.md", additions: 3, deletions: 1 },
+  ];
+  const res = await check({ gates: withLimits(400, 1), files });
+  assert.equal(res.code, 0, "one canonical skill edit plus its two mirrors must count as a single changed file");
+  assert.ok(res.out.includes("1 file"), `the canonical file plus two mirrors must count as one file, got:\n${res.out}`);
+}
+
+// --- #212 AC4: GATES.md documents the mirror exclusion alongside the existing
+// lockfile exclusions. ---
+{
+  const gates = readFileSync(new URL("../GATES.md", import.meta.url), "utf8");
+  const sizeSection = gates.slice(gates.indexOf("## PR size limit"));
+  assert.ok(/exclude_paths/.test(sizeSection), "the size section must describe path exclusions");
+  assert.ok(
+    sizeSection.includes(".claude/skills") && sizeSection.includes("plugin/skills"),
+    "GATES.md size section must document the generated skill mirror exclusions",
+  );
+}
+
+// --- #212 AC5: every criterion above has exactly one test named after it. ---
+{
+  const self = readFileSync(new URL("./pr-size-check.test.mjs", import.meta.url), "utf8");
+  for (const ac of ["AC1", "AC2", "AC3", "AC4", "AC5"]) {
+    const hits = (self.match(new RegExp(`#212 ${ac}:`, "g")) || []).length;
+    assert.equal(hits, 1, `#212 ${ac} must have exactly one test named after it`);
+  }
+}
+
+console.log("PASS pr-size-check.test.mjs (38 assertions)");
