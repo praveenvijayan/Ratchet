@@ -7,7 +7,18 @@
 // the workflows. Zero dependencies. Run:  node scripts/ratchet-update.test.mjs
 
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync, existsSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -114,5 +125,122 @@ const paths = frameworkPaths();
   assert.ok(!/factory-init/.test(sh), "ratchet-update.sh must not mention the nonexistent /factory-init");
   assert.ok(/\/ratchet-init/.test(sh), "ratchet-update.sh closing hint must name /ratchet-init");
 }
+
+function runGit(cwd, args) {
+  const res = spawnSync("git", args, { cwd, encoding: "utf8" });
+  assert.equal(
+    res.status,
+    0,
+    `git ${args.join(" ")} failed in ${cwd}\nstdout:\n${res.stdout}\nstderr:\n${res.stderr}`,
+  );
+  return res;
+}
+
+function writeFile(root, rel, text) {
+  const path = join(root, rel);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, text);
+}
+
+function writeFrameworkTree(root, version) {
+  writeFile(root, ".agents/skills/ratchet-update/SKILL.md", "name: ratchet-update\n");
+  writeFile(root, ".claude/skills/ratchet-update/SKILL.md", "name: ratchet-update\n");
+  writeFile(root, "plugin/skills/ratchet-update/SKILL.md", "name: ratchet-update\n");
+  writeFile(root, ".claude-plugin/plugin.json", JSON.stringify({ name: "ratchet" }, null, 2) + "\n");
+  writeFile(root, ".github/workflows/ratchet.yml", "name: ratchet\n");
+  writeFile(root, "scripts/ratchet-update.sh", readFileSync(join(here, "ratchet-update.sh"), "utf8"));
+  writeFile(root, "setup.sh", "#!/usr/bin/env sh\nexit 0\n");
+  writeFile(root, "plan/README.md", "# Plan format\n");
+  writeFile(root, "AGENTS.md", "# Agents\n");
+  writeFile(root, "CLAUDE.md", "# Claude\n");
+  writeFile(root, "GEMINI.md", "# Gemini\n");
+  writeFile(root, "DOCS.md", "# Docs\n");
+  if (version !== null) writeFile(root, ".ratchet-version", `${version}\n`);
+}
+
+function makeRemote(tag, version) {
+  const dir = mkdtempSync(join(tmpdir(), "ratchet-update-remote-"));
+  runGit(dir, ["init", "-b", "main"]);
+  runGit(dir, ["config", "user.email", "ratchet@example.invalid"]);
+  runGit(dir, ["config", "user.name", "Ratchet Test"]);
+  writeFrameworkTree(dir, version);
+  runGit(dir, ["add", "."]);
+  runGit(dir, ["commit", "-m", `release ${tag}`]);
+  runGit(dir, ["tag", tag]);
+  return dir;
+}
+
+function makeConsumer(initialVersion) {
+  const dir = mkdtempSync(join(tmpdir(), "ratchet-update-consumer-"));
+  runGit(dir, ["init", "-b", "main"]);
+  runGit(dir, ["config", "user.email", "ratchet@example.invalid"]);
+  runGit(dir, ["config", "user.name", "Ratchet Test"]);
+  writeFile(dir, "scripts/ratchet-update.sh", readFileSync(join(here, "ratchet-update.sh"), "utf8"));
+  chmodSync(join(dir, "scripts", "ratchet-update.sh"), 0o755);
+  writeFile(dir, ".ratchet-version", `${initialVersion}\n`);
+  runGit(dir, ["add", "."]);
+  runGit(dir, ["commit", "-m", "consumer"]);
+  return dir;
+}
+
+function runUpdate(consumer, remote, ref) {
+  return spawnSync("bash", ["scripts/ratchet-update.sh", ref], {
+    cwd: consumer,
+    env: { ...process.env, RATCHET_REMOTE: remote },
+    encoding: "utf8",
+  });
+}
+
+const tempRoots = [];
+function tempRemote(tag, version) {
+  const dir = makeRemote(tag, version);
+  tempRoots.push(dir);
+  return dir;
+}
+function tempConsumer(initialVersion) {
+  const dir = makeConsumer(initialVersion);
+  tempRoots.push(dir);
+  return dir;
+}
+
+// Criterion 5: After ./scripts/ratchet-update.sh <tag>, the consumer's
+// .ratchet-version equals the version that tag carries, under bare-vs-v
+// normalisation.
+{
+  const remote = tempRemote("v1.4.0", "1.4.0");
+  const consumer = tempConsumer("0.1.0");
+  const res = runUpdate(consumer, remote, "v1.4.0");
+  assert.equal(res.status, 0, `ratchet-update should succeed:\n${res.stdout}\n${res.stderr}`);
+  assert.equal(readFileSync(join(consumer, ".ratchet-version"), "utf8"), "1.4.0\n");
+}
+
+// Criterion 6: Updating to a tag whose tree has no .ratchet-version records
+// that tag's own version string, normalised, never a stale or empty value.
+{
+  const remote = tempRemote("v1.5.0", null);
+  const consumer = tempConsumer("0.1.0");
+  const res = runUpdate(consumer, remote, "v1.5.0");
+  assert.equal(
+    res.status,
+    0,
+    `ratchet-update should succeed without upstream .ratchet-version:\n${res.stdout}\n${res.stderr}`,
+  );
+  assert.equal(readFileSync(join(consumer, ".ratchet-version"), "utf8"), "1.5.0\n");
+}
+
+// Criterion 7: An unresolvable ref fails with a clear "cannot resolve ref"
+// message and leaves the existing .ratchet-version unchanged.
+{
+  const remote = tempRemote("v1.6.0", "1.6.0");
+  const consumer = tempConsumer("0.1.0");
+  const res = runUpdate(consumer, remote, "does-not-exist");
+  const output = `${res.stdout}\n${res.stderr}`;
+  assert.notEqual(res.status, 0, "ratchet-update must fail for an unresolvable ref");
+  assert.match(output, /Cannot resolve ref 'does-not-exist' upstream\./);
+  assert.ok(!/\n\s+at\s+/.test(output), "failure must not leak a stack trace");
+  assert.equal(readFileSync(join(consumer, ".ratchet-version"), "utf8"), "0.1.0\n");
+}
+
+for (const dir of tempRoots) rmSync(dir, { recursive: true, force: true });
 
 console.log("PASS ratchet-update.test.mjs (all assertions)");
