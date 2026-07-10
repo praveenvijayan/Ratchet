@@ -54,6 +54,12 @@ Rules:
 
 ## Gotchas & fragile areas
 - (e.g.) Payments module has no test harness; integration tests hit the sandbox API (#88).
+- Escalation acknowledgements persist in `.ratchet/herd-resolutions.jsonl` (one
+  JSON object per line: `{ issue, reason, ts }`). The dashboard's acknowledge
+  button only appends to this file — it never executes commands or mutates the
+  escalations log, git refs, issues, or PRs. `resolveEscalations` derives
+  resolved state from the state file, closed issues, AND the acknowledged set
+  (#180).
 - `scripts/*.test.mjs` per-criterion self-counts must derive from their own
   `Criterion N` markers and never read a closable issue's `plan/NNNN-*.md` at
   runtime — `archive-closed-plans` moves those files to `plan/done/` on close,
