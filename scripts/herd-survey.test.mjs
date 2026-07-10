@@ -649,4 +649,149 @@ await inTempDir(async () => {
   assert.ok(warnsB.some((m) => /usage field/.test(m)), "the missing-log case still warns on one line");
 });
 
-console.log("PASS herd-survey.test.mjs (7 criteria + issue #137: 4 criteria + issue #143: 5 criteria + issue #138: 5 criteria + issue #139: 3 criteria + issue #163: 3 criteria + issue #173: 5 criteria)");
+// --- Issue #169: stop the survey/monitor ping-pong that re-escalates stale
+// claims every poll. AC1 (the monitor never classifies a stale-claim sentinel)
+// lives in herd-monitor.test.mjs; the survey/interaction criteria are here. ---
+
+// #169 AC2) A stale claim ref produces exactly one escalation across any number
+// of subsequent polls while the ref, the sentinel, and the herd state are
+// otherwise unchanged: alternating survey and monitor polls over the same stale
+// ref — the exact ping-pong — append exactly one escalation block, not a wall.
+await inTempDir(async () => {
+  const gh = fakeGhWithRefs({ claimRefs: [175] }); // ref present, no worker, no PR
+  const survey = { gh, isAlive: () => false, now: NOW, statePath: "s.json", escalationsPath: "e.md", log: () => {} };
+  const monitor = {
+    config: mkConfig(), statePath: "s.json", escalationsPath: "e.md", eventsPath: "ev.jsonl", gh,
+    isAlive: () => false, spawn: () => { throw new Error("the monitor must not resume a stale sentinel"); },
+    now: () => NOW, log: () => {},
+  };
+  const s1 = await pollOnce(survey);
+  await monitorOnce(monitor);
+  const s2 = await pollOnce(survey);
+  await monitorOnce(monitor);
+  const s3 = await pollOnce(survey);
+  assert.equal(s1.staleEscalated, 1, "escalated once on the poll that first saw the stale ref");
+  assert.equal(s2.staleEscalated, 0, "not re-escalated after a monitor pass");
+  assert.equal(s3.staleEscalated, 0, "still not re-escalated on any later poll");
+  const esc = readFileSync("e.md", "utf8");
+  assert.equal((esc.match(/^## /gm) || []).length, 1, "exactly one escalation block across five interleaved polls");
+});
+
+// #169 AC3) When the stale ref disappears from origin, the sentinel entry is
+// removed from the state file on the next poll — a resolved claim leaves no
+// orphaned bookkeeping behind.
+await inTempDir(async () => {
+  const opts = { isAlive: () => false, now: NOW, statePath: "s.json", escalationsPath: "e.md", log: () => {} };
+  await pollOnce({ ...opts, gh: fakeGhWithRefs({ claimRefs: [175] }) });
+  assert.equal(readState("s.json")["175"]?.status, "stale-claim", "the first poll records the sentinel");
+  await pollOnce({ ...opts, gh: fakeGhWithRefs({ claimRefs: [] }) }); // the human deleted the ref
+  assert.equal("175" in readState("s.json"), false, "the sentinel entry is removed once the ref is gone");
+});
+
+// #169 AC4) A supervisor restart mid-loop does not re-escalate a stale ref whose
+// sentinel entry already exists in the state file: a fresh poll that reads the
+// persisted sentinel re-recognises it and escalates nothing.
+await inTempDir(async () => {
+  // State persisted before the restart: the ref was already escalated once.
+  writeFileSync("s.json", JSON.stringify({ 175: { adapter: null, pid: null, logFile: null, attempts: 0, status: "stale-claim", pr: null } }));
+  const gh = fakeGhWithRefs({ claimRefs: [175] }); // the ref is still there after the restart
+  const r = await pollOnce({ gh, isAlive: () => false, now: NOW, statePath: "s.json", escalationsPath: "e.md", log: () => {} });
+  assert.equal(r.staleEscalated, 0, "the persisted sentinel is not re-escalated after a restart");
+  assert.equal(existsSync("e.md"), false, "no new escalation block is written on restart");
+});
+
+// #169 AC5) Every criterion above has exactly one test named after it — AC1
+// (the monitor side) lives in herd-monitor.test.mjs, AC2–AC4 here; each appears
+// exactly once across the two files.
+{
+  const survey = readFileSync(new URL("./herd-survey.test.mjs", import.meta.url), "utf8");
+  const monitor = readFileSync(new URL("./herd-monitor.test.mjs", import.meta.url), "utf8");
+  const both = survey + monitor;
+  for (const ac of ["AC1", "AC2", "AC3", "AC4"]) {
+    const hits = (both.match(new RegExp(`#169 ${ac}\\)`, "g")) || []).length;
+    assert.equal(hits, 1, `#169 ${ac} has exactly one test named after it`);
+  }
+}
+
+// --- Issue #170: prune terminal herd state entries that carry no pid and no
+// open PR. reconcileState only flags dead pids / concluded PRs, so a terminal
+// entry (dispatch-failed, escalated, verify-escalated) with pid:null/pr:null is
+// never flagged and the #137 change-driven prune never touches it — it lingers
+// and dispatch skips its issue forever. One test per acceptance criterion. ---
+
+// #170 criterion 1: a terminal-status entry with no live pid and no open PR is
+// removed from the state file after its escalation has been written. The
+// escalation was written by dispatch when the entry entered dispatch-failed; the
+// prune does not re-write it (pre-seeded here, asserted still present and not
+// duplicated), it only removes the lingering entry.
+await inTempDir(async () => {
+  writeFileSync(
+    "s.json",
+    JSON.stringify({ 83: { adapter: "claude", pid: null, logFile: "x.log", attempts: 1, pr: null, status: "dispatch-failed" } }),
+  );
+  writeFileSync("e.md", "## earlier — issue #83\n- What happened: dispatch failed\n\n"); // escalation already written by dispatch
+  const gh = fakeGh({ ready: [], inProgress: [], openPrs: [] });
+  const r = await pollOnce({ gh, isAlive: () => false, now: NOW, statePath: "s.json", escalationsPath: "e.md", log: () => {} });
+  const after = JSON.parse(readFileSync("s.json", "utf8"));
+  assert.equal(after[83], undefined, "the terminal entry with no pid and no open PR is removed");
+  const esc = readFileSync("e.md", "utf8");
+  assert.equal((esc.match(/issue #83/g) || []).length, 1, "its escalation is present and not re-written on prune");
+  assert.equal(r.terminalPruned, 1, "the terminal removal is counted");
+});
+
+// #170 criterion 2: an issue whose terminal entry was pruned and which is still
+// state:ready is dispatched again on a later poll instead of being skipped.
+await inTempDir(async () => {
+  writeFileSync(
+    "s.json",
+    JSON.stringify({ 122: { adapter: "claude", pid: null, logFile: "y.log", attempts: 1, pr: null, status: "dispatch-failed" } }),
+  );
+  const gh = fakeGh({ ready: [], inProgress: [], openPrs: [] });
+  const ready = [{ number: 122, createdAt: "2026-01-01", labels: [{ name: "priority:high" }] }];
+  const disp = () =>
+    dispatchOne({
+      config: mkConfig(), ready, statePath: "s.json", escalationsPath: "e.md",
+      gh, isAlive: () => false, now: () => NOW, dryRun: true, log: () => {},
+    });
+
+  const before = await disp();
+  assert.equal(before.reason, "no-eligible-issue", "while the terminal entry sits in state, dispatch skips the re-queued issue");
+
+  await pollOnce({ gh, isAlive: () => false, now: NOW, statePath: "s.json", escalationsPath: "e.md", log: () => {} });
+
+  const after = await disp();
+  assert.equal(after.plan?.issue, 122, "after the terminal entry is pruned, the still-ready issue dispatches instead of being skipped");
+});
+
+// #170 criterion 3: an entry with a live worker pid or an open PR is never
+// pruned regardless of status — including terminal statuses.
+await inTempDir(async () => {
+  writeFileSync(
+    "s.json",
+    JSON.stringify({
+      160: { adapter: "claude", pid: null, logFile: "a.log", attempts: 1, pr: 8, status: "ready-for-review" },
+      166: { adapter: "codex", pid: 1234, logFile: "b.log", attempts: 1, pr: null, status: "escalated" },
+    }),
+  );
+  const gh = fakeGh({ ready: [], inProgress: [], openPrs: [{ number: 8, headRefName: "agent/issue-160" }] });
+  const r = await pollOnce({ gh, isAlive: (pid) => pid === 1234, now: NOW, statePath: "s.json", escalationsPath: "e.md", log: () => {} });
+  const after = JSON.parse(readFileSync("s.json", "utf8"));
+  assert.ok(after[160], "a terminal entry tracking an open PR is retained");
+  assert.ok(after[166], "a terminal entry with a live worker pid is retained");
+  assert.equal(r.terminalPruned, 0, "nothing is pruned when a terminal entry is still live or open");
+});
+
+// #170 criterion 4: the poll summary line reports how many terminal entries were
+// pruned this pass.
+await inTempDir(async () => {
+  const logs = [];
+  writeFileSync(
+    "s.json",
+    JSON.stringify({ 168: { adapter: "claude", pid: null, logFile: "z.log", attempts: 1, pr: null, status: "dispatch-failed" } }),
+  );
+  const gh = fakeGh({ ready: [], inProgress: [], openPrs: [] });
+  await pollOnce({ gh, isAlive: () => false, now: NOW, statePath: "s.json", escalationsPath: "e.md", log: (m) => logs.push(m) });
+  assert.ok(logs.some((m) => /1 terminal entry pruned/.test(m)), "the poll summary line reports the terminal-pruned count");
+});
+
+console.log("PASS herd-survey.test.mjs (7 criteria + issue #137: 4 criteria + issue #143: 5 criteria + issue #138: 5 criteria + issue #139: 3 criteria + issue #163: 3 criteria + issue #169: 4 criteria + issue #170: 4 criteria + issue #173: 5 criteria)");

@@ -26,6 +26,13 @@ export const EVENTS_FILE = ".ratchet/events.jsonl";
 // map; the deterministic form of "spread work across adapters" that avoids
 // Math.random, so a supervisor's dispatch order is reproducible offline.
 export const ROUTING_FILE = ".ratchet/herd-routing.json";
+// Status of the survey's stale-claim sentinel: a bookkeeping entry
+// (pid/adapter/pr null) that records a stale claim ref already escalated so it
+// is escalated exactly once. It is NOT a worker. Exported as the single source
+// of the string so the monitor (herd-monitor.mjs) recognises and skips it rather
+// than mis-classifying the pid-null entry as a dead worker — the two scripts
+// share one constant instead of each hard-coding "stale-claim" and drifting.
+export const STALE_CLAIM_STATUS = "stale-claim";
 export const HERD_EVENT_TYPES = Object.freeze([
   "dispatch",
   "resume",
@@ -35,6 +42,22 @@ export const HERD_EVENT_TYPES = Object.freeze([
   "worker-exit",
   "worker-kill",
   "escalation",
+]);
+
+// Statuses the pipeline has already resolved — a stage escalated or handed them
+// off, and no later pass acts on them again. "awaiting-verification" hands off
+// to PR verification (herd-verify.mjs); "ready-for-review"/"verify-escalated"
+// are that stage's terminal outcomes and must not be dragged back to
+// verification; "escalated" is a human's to clear; "dispatch-failed" was already
+// killed+escalated by dispatch. Lives here (not herd-monitor) because both the
+// monitor and pollOnce's terminal-entry prune key off it; herd-monitor re-exports
+// it so existing importers are undisturbed.
+export const TERMINAL_STATUS = new Set([
+  "awaiting-verification",
+  "ready-for-review",
+  "verify-escalated",
+  "escalated",
+  "dispatch-failed",
 ]);
 
 const pexec = promisify(execFile);
@@ -369,6 +392,29 @@ export async function pollOnce({
     }
   }
 
+  // Terminal entries reconcile never flags. A terminal status (dispatch-failed,
+  // escalated, verify-escalated) carries pid:null/pr:null, so reconcileState —
+  // which only flags a dead pid or a concluded PR — emits no change for it, and
+  // the change-driven prune above never touches it. It then lingers in the state
+  // file forever, and because dispatchOne skips any issue present in state, its
+  // issue can never be re-dispatched (issue-0065 fixed this for the
+  // pr-concluded/dead case; the no-pid/no-PR terminal case was missed). Its
+  // escalation was already written when it entered the terminal state (dispatch,
+  // the monitor, and verify each escalate at that point), so prune it here
+  // without re-escalating — re-escalating every poll would spam the channel.
+  // A terminal entry still backed by a live worker or an open PR
+  // (awaiting-verification / ready-for-review) is always retained.
+  let terminalPruned = 0;
+  for (const [issue, entry] of Object.entries(state)) {
+    if (!TERMINAL_STATUS.has(entry.status)) continue;
+    const workerGone = entry.pid == null || !isAlive(entry.pid);
+    const prConcluded = entry.pr == null || !openPrNumbers.has(Number(entry.pr));
+    if (workerGone && prConcluded) {
+      delete state[issue];
+      terminalPruned += 1;
+    }
+  }
+
   // Stale claim refs. A branch agent/issue-<N> left on origin by a dead worker
   // (it raced the kill, or simply died) keeps the issue claimed forever: every
   // future claim 422s and the worker refuses the issue, with no signal to the
@@ -389,10 +435,10 @@ export async function pollOnce({
     const openPrHeads = new Set(reality.openPrs.map((p) => p.headRefName));
     const stale = new Set(findStaleClaims(claimIssues, state, openPrHeads, isAlive));
     for (const [issue, entry] of Object.entries(state)) {
-      if (entry.status === "stale-claim" && !stale.has(Number(issue))) delete state[issue];
+      if (entry.status === STALE_CLAIM_STATUS && !stale.has(Number(issue))) delete state[issue];
     }
     for (const issue of stale) {
-      if (state[String(issue)]?.status === "stale-claim") continue; // already escalated once
+      if (state[String(issue)]?.status === STALE_CLAIM_STATUS) continue; // already escalated once
       const del = deleteRefCommand(issue);
       let open;
       try {
@@ -411,7 +457,7 @@ export async function pollOnce({
           logFile: null,
           action: `run \`${del}\` to delete the stale claim ref, then re-queue the issue if its work is unfinished`,
         });
-        state[String(issue)] = { adapter: null, pid: null, logFile: null, attempts: 0, status: "stale-claim", pr: null };
+        state[String(issue)] = { adapter: null, pid: null, logFile: null, attempts: 0, status: STALE_CLAIM_STATUS, pr: null };
       } else {
         appendEscalation(escalationsPath, {
           now: stamp,
@@ -446,6 +492,7 @@ export async function pollOnce({
     `herd: poll — ${reality.ready.length} ready, ${reality.inProgress.length} in-progress, ` +
       `${openPrNumbers.size} open PRs, ${liveWorkers} live workers, ` +
       `${pruned} concluded ${pruned === 1 ? "entry" : "entries"} pruned, ` +
+      `${terminalPruned} terminal ${terminalPruned === 1 ? "entry" : "entries"} pruned, ` +
       `${prunedLogs} log file(s) pruned.`,
   );
   if (staleEscalated) {
@@ -468,6 +515,7 @@ export async function pollOnce({
     openPrs: openPrNumbers.size,
     reconciled: changes.length,
     pruned,
+    terminalPruned,
     staleEscalated,
     liveWorkers,
     prunedLogs,

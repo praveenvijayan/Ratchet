@@ -19,21 +19,13 @@
 
 import { readFileSync } from "node:fs";
 import { substitute } from "./herd.mjs";
-import { STATE_FILE, ESCALATIONS_FILE, EVENTS_FILE, readState, writeState, appendEscalation, appendHerdEvent, isPidAlive } from "./herd-survey.mjs";
+import { STATE_FILE, ESCALATIONS_FILE, EVENTS_FILE, STALE_CLAIM_STATUS, TERMINAL_STATUS, readState, writeState, appendEscalation, appendHerdEvent, isPidAlive } from "./herd-survey.mjs";
 import { spawnWorker, recordExit } from "./herd-dispatch.mjs";
 
-// Statuses the monitor has already resolved — never acted on again.
-// "awaiting-verification" hands off to PR verification (herd-verify.mjs);
-// "ready-for-review"/"verify-escalated" are that stage's terminal outcomes and
-// must not be dragged back to verification; "escalated" is a human's to clear;
-// "dispatch-failed" was already killed+escalated by dispatch.
-export const TERMINAL_STATUS = new Set([
-  "awaiting-verification",
-  "ready-for-review",
-  "verify-escalated",
-  "escalated",
-  "dispatch-failed",
-]);
+// The set of already-resolved statuses now lives in herd-survey.mjs (pollOnce's
+// terminal-entry prune keys off the same set). Re-exported here so existing
+// importers of TERMINAL_STATUS from herd-monitor are undisturbed.
+export { TERMINAL_STATUS };
 
 // The last `maxLines` lines of a log file, quoted into an escalation so the
 // agent's own final words reach the human. A missing/unreadable file is
@@ -108,6 +100,11 @@ export async function monitorOnce(opts) {
   const transitions = [];
   for (const [issue, entry] of Object.entries(state)) {
     if (TERMINAL_STATUS.has(entry.status)) continue;
+    // The survey's stale-claim sentinel (pid/adapter null) is survey-owned
+    // bookkeeping, not a worker. Classifying it as a dead worker would fail to
+    // resume (adapter null), escalate, and flip its status — defeating the
+    // survey's status-equality dedup and re-escalating the same ref every poll.
+    if (entry.status === STALE_CLAIM_STATUS) continue;
     if (entry.pid != null && isAlive(entry.pid)) continue; // still working — leave it
 
     const decision = classifyExit(issue, entry, { prByHead, reworkCap: config.reworkCap });
