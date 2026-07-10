@@ -14,14 +14,15 @@
 //                                             node scripts/herd.mjs run
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, realpathSync, accessSync, constants as fsConstants } from "node:fs";
-import { dirname, join, delimiter as pathDelimiter } from "node:path";
+import { dirname, join, isAbsolute, delimiter as pathDelimiter } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runLoop, pollOnce, ghJson } from "./herd-survey.mjs";
+import { runLoop, pollOnce, ghJson, resolveRepoRoot, ratchetPaths, RepoRootError } from "./herd-survey.mjs";
 import { dispatchOne, surveyReady } from "./herd-dispatch.mjs";
 import { monitorOnce } from "./herd-monitor.mjs";
 import { verifyOnce } from "./herd-verify.mjs";
 
-// Config location, relative to the repo root (the supervisor's cwd).
+// Config location, relative to the repo root. Entrypoints anchor it there via
+// resolveRepoRoot so `init`/`run` touch the same file from any subdirectory.
 export const CONFIG_PATH = ".ratchet/herd.json";
 
 // How a route picks among its adapters. `failover` (the default) takes the first
@@ -453,11 +454,16 @@ export function resolveAdapter(config, labels = [], deps = {}) {
 // `main` returns a process exit code so it is unit-testable without spawning a
 // child. HerdConfigError is the only expected failure and is reported as a
 // single stderr line; anything else is a real bug and rethrown.
-export function main(argv) {
+export function main(argv, { root } = {}) {
   const cmd = argv[0];
   try {
+    // Anchor the config at the repo root, not the cwd, so `init`/`run` touch the
+    // same `.ratchet/herd.json` from any subdirectory — and fail loudly (via
+    // RepoRootError below) rather than write a stray config when run from
+    // outside any checkout. Tests inject `root` to sandbox this.
+    const configPath = join(root ?? resolveRepoRoot(), CONFIG_PATH);
     if (cmd === "init") {
-      const written = initConfig();
+      const written = initConfig(configPath);
       console.log(`Wrote default config to ${written} (adapters: claude, codex).`);
       return 0;
     }
@@ -466,7 +472,7 @@ export function main(argv) {
     // branch is the config-validation contract the missing-config and
     // invalid-config paths are exercised through.
     if (cmd === undefined || cmd === "run") {
-      const config = loadConfig();
+      const config = loadConfig(configPath);
       const names = Object.keys(config.adapters);
       console.log(
         `herd config OK: ${names.length} adapter(s) [${names.join(", ")}], ` +
@@ -477,7 +483,7 @@ export function main(argv) {
     console.error(`Unknown command "${cmd}". Usage: node scripts/herd.mjs [init|run]`);
     return 1;
   } catch (e) {
-    if (e instanceof HerdConfigError) {
+    if (e instanceof HerdConfigError || e instanceof RepoRootError) {
       console.error(e.message);
       return 1;
     }
@@ -496,16 +502,21 @@ if (isMain) {
     // `--dry-run` prints the plan without spawning (and implies a single pass);
     // `--max <n>` overrides maxWorkers. Never merges, approves, closes, or
     // labels anything — it observes, dispatches, and escalates.
-    let config;
+    let root, config;
     try {
-      config = loadConfig();
+      root = resolveRepoRoot();
+      config = loadConfig(join(root, CONFIG_PATH));
     } catch (e) {
-      if (e instanceof HerdConfigError) {
+      if (e instanceof HerdConfigError || e instanceof RepoRootError) {
         console.error(e.message);
         process.exit(1);
       }
       throw e;
     }
+    // Anchor every `.ratchet/*` path (and the log dir) at the repo root so the
+    // whole poll loop reads and writes the one true state regardless of cwd.
+    const paths = ratchetPaths(root);
+    config = { ...config, logDir: isAbsolute(config.logDir) ? config.logDir : join(root, config.logDir) };
     const maxIdx = argv.indexOf("--max");
     const maxWorkers = maxIdx >= 0 && Number.isInteger(Number(argv[maxIdx + 1]))
       ? Number(argv[maxIdx + 1])
@@ -532,7 +543,7 @@ if (isMain) {
       });
       await dispatchOne({ ...o, config, ready, dryRun, maxWorkers, claimTimeoutMs: config.claimTimeoutSeconds * 1000 });
     };
-    runLoop({ gh: ghJson, log: console.log, once: argv.includes("--once") || dryRun, pollSeconds: config.pollSeconds, step }).then(
+    runLoop({ gh: ghJson, log: console.log, ...paths, once: argv.includes("--once") || dryRun, pollSeconds: config.pollSeconds, step }).then(
       () => process.exit(0),
       (e) => {
         console.error(`herd: supervisor stopped on an unexpected error: ${e.message}`);
