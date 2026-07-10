@@ -1,6 +1,6 @@
 {
   "name": "ratchet",
-  "version": "3.6.0",
+  "version": "4.0.0",
   "description": "Ratchet \u2014 forward-only GitHub-native delivery loop: the full set of skills for the AGENTS.md operating manual, from planning through review and fleet supervision.",
   "author": {
     "name": "Praveen Vijayan",

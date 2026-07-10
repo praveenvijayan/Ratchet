@@ -1,6 +1,6 @@
 # Ratchet — Complete Documentation
 
-Version 3.6.0 · MIT · https://github.com/praveenvijayan/Ratchet
+Version 4.0.0 · MIT · https://github.com/praveenvijayan/Ratchet
 
 **New in 3.6.0** — a herd route may declare a selection policy. The default stays
 `failover` (first available adapter, unchanged), and `round-robin` cycles
