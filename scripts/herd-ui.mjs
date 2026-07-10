@@ -12,7 +12,7 @@
 // Zero dependencies: node:http, node:fs, node:child_process (git remote lookup).
 
 import { createServer as httpCreateServer } from "node:http";
-import { existsSync, readFileSync, openSync, readSync, fstatSync, closeSync } from "node:fs";
+import { existsSync, readFileSync, openSync, readSync, fstatSync, closeSync, appendFileSync } from "node:fs";
 import { execFileSync, execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -25,6 +25,12 @@ import { defaultAvatarFor } from "./herd-avatars.mjs";
 import { TERMINAL_STATUS } from "./herd-monitor.mjs";
 
 export const DEFAULT_PORT = 4780;
+
+// The append-only log of operator-acknowledged escalations. Each line is a
+// JSON object { issue, reason, ts }. The dashboard reads it to mark
+// escalations as resolved; the acknowledge button appends to it. Like the
+// escalations log, it is never rewritten — resolution is derived at read time.
+export const RESOLUTIONS_FILE = ".ratchet/herd-resolutions.jsonl";
 
 // The one-line hint shown when there is nothing to display, so an empty
 // dashboard reads as "not started yet" rather than "broken".
@@ -132,14 +138,17 @@ export function dedupEscalations(blocks) {
 }
 
 // Mark each escalation as resolved or unresolved based on the current state
-// file and the set of closed issue numbers. Resolution is derived state — the
-// append-only log is never rewritten.
+// file, the set of closed issue numbers, and the set of acknowledged
+// (issue, reason) keys. Resolution is derived state — the append-only log is
+// never rewritten.
 // - A stale-claim escalation is resolved when its ref no longer exists (the
 //   survey removes the sentinel from the state file when the ref is gone).
 // - A PR-concluded escalation is resolved when the issue has since closed.
+// - An operator-acknowledged escalation is resolved when its (issue, reason)
+//   key appears in the `acknowledged` set (the acknowledge button wrote it).
 // - Other escalation types default to unresolved (the dashboard cannot derive
 //   their resolution from the state file alone).
-export function resolveEscalations(blocks, { state, closedIssues = new Set() } = {}) {
+export function resolveEscalations(blocks, { state, closedIssues = new Set(), acknowledged = new Set() } = {}) {
   return blocks.map((b) => {
     const entry = state && state[String(b.issue)];
     let resolved = false;
@@ -148,6 +157,7 @@ export function resolveEscalations(blocks, { state, closedIssues = new Set() } =
     } else if (/is no longer open/.test(b.what)) {
       resolved = closedIssues.has(b.issue);
     }
+    if (!resolved && acknowledged.has(`${b.issue}\t${b.reason}`)) resolved = true;
     return { ...b, resolved };
   });
 }
@@ -171,6 +181,52 @@ export function limitEscalations(blocks, maxResolved = MAX_RESOLVED_SHOWN) {
     }
   }
   return out;
+}
+
+// Read the append-only resolutions log. Each line is a JSON object
+// { issue, reason, ts }. A missing or malformed file is []; a bad line is
+// skipped, never fatal — the dashboard degrades to whatever it can parse,
+// exactly like readEvents and parseEscalations.
+export function readResolutions(path = RESOLUTIONS_FILE) {
+  if (!existsSync(path)) return [];
+  let text;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const obj = JSON.parse(trimmed);
+      if (obj && obj.issue != null && obj.reason != null) out.push(obj);
+    } catch {
+      /* skip a torn or partial line */
+    }
+  }
+  return out;
+}
+
+// Append one resolution to the resolutions log. Throws on write failure so the
+// caller (the HTTP handler) can catch it and surface the error to the operator.
+// Never reads, rewrites, or truncates the file — it only appends, so concurrent
+// appends interleave safely (each write is a single appendFileSync call).
+export function appendResolution(path, { issue, reason, ts }) {
+  const line = JSON.stringify({ issue: Number(issue), reason: String(reason), ts: String(ts) }) + "\n";
+  appendFileSync(path, line);
+}
+
+// Extract the exact command from an escalation's "Suggested action" text. The
+// action is free-form prose that may contain a backtick-quoted command (e.g.
+// "run `gh api -X DELETE ...` to delete the stale claim ref"). Returns the
+// command string inside the backticks, or null when the action has no
+// backtick-quoted command.
+export function extractCommand(action) {
+  if (!action) return null;
+  const m = /`([^`]+)`/.exec(String(action));
+  return m ? m[1] : null;
 }
 
 // --- adapter failure aggregation (0095) --------------------------------------
@@ -630,6 +686,7 @@ export function readSnapshot({
   statePath = STATE_FILE,
   eventsPath = EVENTS_FILE,
   escalationsPath = ESCALATIONS_FILE,
+  resolutionsPath = RESOLUTIONS_FILE,
   config,
   now = Date.now(),
   repoSlug = null,
@@ -666,10 +723,16 @@ export function readSnapshot({
       if (issueState === "CLOSED") closedIssues.add(esc.issue);
     }
   }
+  // Build the acknowledged set from the resolutions log: each entry's
+  // (issue, reason) key marks that escalation as resolved.
+  const acknowledged = new Set();
+  for (const r of readResolutions(resolutionsPath)) {
+    acknowledged.add(`${r.issue}\t${r.reason}`);
+  }
   const escalations = limitEscalations(
     resolveEscalations(
       dedupEscalations(rawEscalations),
-      { state, closedIssues },
+      { state, closedIssues, acknowledged },
     ),
   );
   const hint = workers.length === 0 && escalations.length === 0 ? EMPTY_HINT : null;
@@ -777,6 +840,7 @@ export function createDashboardServer({
   statePath = STATE_FILE,
   eventsPath = EVENTS_FILE,
   escalationsPath = ESCALATIONS_FILE,
+  resolutionsPath = RESOLUTIONS_FILE,
   config = { ...DEFAULTS },
   repoSlug = null,
   now = Date.now,
@@ -787,10 +851,46 @@ export function createDashboardServer({
 } = {}) {
   const checksCache = createChecksCache({ fetchChecks: fetchChecks || defaultFetchChecks, refreshMs: checksRefreshMs });
   const titleCache = createTitleCache({ fetchTitle: fetchTitle || defaultFetchTitle });
-  const snap = () => readSnapshot({ statePath, eventsPath, escalationsPath, config, now: now(), repoSlug, checksCache, titleCache });
+  const snap = () => readSnapshot({ statePath, eventsPath, escalationsPath, resolutionsPath, config, now: now(), repoSlug, checksCache, titleCache });
 
   const server = httpCreateServer((req, res) => {
     const url = new URL(req.url, "http://localhost");
+
+    // POST /api/acknowledge — records an operator's acknowledgement of an
+    // escalation. The body is { issue, reason }. The handler appends a
+    // resolution entry to the resolutions log; it never executes any command,
+    // never mutates the escalations log, git refs, issues, or PRs. On a write
+    // failure it returns a 500 with the error message so the operator sees it;
+    // the escalation stays unresolved until the write succeeds.
+    if (req.method === "POST" && url.pathname === "/api/acknowledge") {
+      let body = "";
+      req.setEncoding("utf8");
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        let parsed;
+        try {
+          parsed = JSON.parse(body);
+        } catch {
+          sendJson(res, 400, { ok: false, error: "invalid JSON body" });
+          return;
+        }
+        const issue = Number(parsed && parsed.issue);
+        const reason = parsed && parsed.reason != null ? String(parsed.reason) : null;
+        if (!Number.isInteger(issue) || reason == null) {
+          sendJson(res, 400, { ok: false, error: "issue (number) and reason (string) required" });
+          return;
+        }
+        try {
+          appendResolution(resolutionsPath, { issue, reason, ts: new Date().toISOString() });
+        } catch (e) {
+          sendJson(res, 500, { ok: false, error: e.message || "failed to write resolution" });
+          return;
+        }
+        sendJson(res, 200, { ok: true });
+      });
+      return;
+    }
+
     if (req.method !== "GET") {
       res.writeHead(405, { "Content-Type": "text/plain" });
       res.end("method not allowed");
@@ -940,9 +1040,10 @@ export async function run(argv, { log = console.log, cwd = process.cwd() } = {})
   // from outside any checkout.
   const root = resolveRepoRoot(cwd);
   const { statePath, eventsPath, escalationsPath } = ratchetPaths(root);
+  const resolutionsPath = join(root, RESOLUTIONS_FILE);
   const config = loadConfigOrDefaults(join(root, CONFIG_PATH));
   const repoSlug = resolveRepoSlug(gitOriginUrl(cwd));
-  const server = createDashboardServer({ statePath, eventsPath, escalationsPath, config, repoSlug });
+  const server = createDashboardServer({ statePath, eventsPath, escalationsPath, resolutionsPath, config, repoSlug });
   const bound = await listenOrFail(server, port);
   log(`Herd dashboard on http://localhost:${bound}  (Ctrl-C to stop)`);
   return { server, port: bound };
@@ -1003,6 +1104,14 @@ export const PAGE_HTML = `<!doctype html>
   .esc .what { margin:4px 0; }
   .esc .meta { color:var(--muted); font-size:12px; }
   .esc .occurrences { display:inline-block; background:var(--card); border:1px solid var(--line); border-radius:10px; padding:0 7px; font-size:11px; font-weight:600; color:var(--muted); margin-left:6px; }
+  .esc .actions { display:flex; gap:6px; margin-top:6px; flex-wrap:wrap; }
+  .esc .act-btn { display:inline-flex; align-items:center; gap:4px; background:var(--card); border:1px solid var(--line); border-radius:4px; padding:3px 8px; cursor:pointer; font:inherit; font-size:12px; color:var(--fg); }
+  .esc .act-btn:hover { border-color:var(--accent); }
+  .esc .act-btn.ack { border-color:var(--line); }
+  .esc .act-btn.ack:hover { border-color:#2da44e; color:#2da44e; }
+  .esc .act-btn.copied { border-color:#2da44e; color:#2da44e; }
+  .esc .esc-error { color:var(--over); font-size:12px; margin-top:4px; font-weight:600; }
+  .esc.resolved .actions { display:none; }
   table { width:100%; border-collapse:collapse; background:var(--card); border:1px solid var(--line); border-radius:6px; overflow:hidden; }
   th, td { text-align:left; padding:8px 12px; border-bottom:1px solid var(--line); }
   th { font-size:12px; text-transform:uppercase; letter-spacing:.03em; color:var(--muted); }
@@ -1154,9 +1263,19 @@ export const PAGE_HTML = `<!doctype html>
     el.innerHTML = snapshot.escalations.map((e) => {
       const cls = e.resolved ? "esc resolved" : "esc";
       const count = e.occurrences > 1 ? ' <span class="occurrences">' + e.occurrences + "×</span>" : "";
+      // Extract a backtick-quoted command from the action text for the copy
+      // button. Only escalations whose action contains a command get one.
+      const cmd = e.action ? (/\`([^\`]+)\`/.exec(e.action) || [])[1] : null;
+      const copyBtn = cmd
+        ? '<button class="act-btn" data-cmd="' + esc(cmd) + '" onclick="copyCmd(this)">Copy command</button>'
+        : "";
+      // Only unresolved escalations get an acknowledge button.
+      const ackBtn = e.resolved ? "" : '<button class="act-btn ack" onclick="ackEsc(this)" data-issue="' + esc(e.issue) + '" data-reason="' + esc(e.reason || "") + '">Acknowledge</button>';
+      const actions = (copyBtn || ackBtn) ? '<div class="actions">' + copyBtn + ackBtn + '</div>' : "";
       return '<div class="' + cls + '"><div class="top">issue #' + esc(e.issue) + count + "</div>" +
         '<div class="what">' + esc(e.what) + "</div>" +
-        '<div class="meta">' + esc(e.ts) + (e.action ? " · " + esc(e.action) : "") + "</div></div>";
+        '<div class="meta">' + esc(e.ts) + (e.action ? " · " + esc(e.action) : "") + "</div>" +
+        actions + "</div>";
     }).join("");
   }
 
@@ -1192,6 +1311,51 @@ export const PAGE_HTML = `<!doctype html>
     badge.textContent = String(count);
     badge.classList.toggle("zero", count === 0);
   }
+
+  // Copy the exact command from an escalation's action to the clipboard. The
+  // command was extracted server-side from the backtick-quoted text and stored
+  // in the button's data-cmd attribute. No command is ever executed.
+  window.copyCmd = function (btn) {
+    const cmd = btn.dataset.cmd;
+    if (!cmd) return;
+    navigator.clipboard.writeText(cmd).then(() => {
+      btn.classList.add("copied");
+      btn.textContent = "Copied!";
+      setTimeout(() => { btn.classList.remove("copied"); btn.textContent = "Copy command"; }, 1500);
+    });
+  };
+
+  // Acknowledge an escalation: POST to the server, which appends a resolution
+  // entry to the resolutions log. On success the next snapshot push marks the
+  // block as resolved. On failure a visible error appears on the block and the
+  // escalation stays unresolved. The button never executes any command and
+  // never mutates the escalations log, git refs, issues, or PRs — it only
+  // records the operator's acknowledgement.
+  window.ackEsc = function (btn) {
+    const issue = Number(btn.dataset.issue);
+    const reason = btn.dataset.reason;
+    fetch("/api/acknowledge", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ issue, reason }),
+    }).then((r) => r.json()).then((data) => {
+      if (!data.ok) {
+        const block = btn.closest(".esc");
+        if (block) {
+          let err = block.querySelector(".esc-error");
+          if (!err) { err = document.createElement("div"); err.className = "esc-error"; block.appendChild(err); }
+          err.textContent = "Failed to acknowledge: " + (data.error || "unknown error");
+        }
+      }
+    }).catch((e) => {
+      const block = btn.closest(".esc");
+      if (block) {
+        let err = block.querySelector(".esc-error");
+        if (!err) { err = document.createElement("div"); err.className = "esc-error"; block.appendChild(err); }
+        err.textContent = "Failed to acknowledge: " + (e.message || "network error");
+      }
+    });
+  };
 
   function applyPanel() {
     $("errpanel").hidden = !panelOpen;
