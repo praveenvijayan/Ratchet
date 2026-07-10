@@ -76,6 +76,7 @@
     { "path": "memory", "class": "generated" },
     { "path": ".env.example", "class": "generated" },
     { "path": ".ratchet-version", "class": "generated" },
+    { "path": "scripts/bootstrap.test.mjs", "class": "excluded" },
     { "path": "scripts/archive-closed-plans-workflow.test.mjs", "class": "excluded" },
     { "path": "scripts/archive-closed-plans.test.mjs", "class": "excluded" },
     { "path": "scripts/criteria.test.mjs", "class": "excluded" },
