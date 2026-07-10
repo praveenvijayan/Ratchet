@@ -2,7 +2,7 @@
 title: Document the installer flow and add end-to-end installation tests
 priority: medium
 labels: [installer, docs]
-blocked_by: [0105-bootstrap-installer, 0107-manifest-aware-update, 0108-manifest-aware-uninstall]
+blocked_by: [0105-bootstrap-installer, 0107-manifest-aware-update, 0108-manifest-aware-uninstall, 0111-updater-modified-file-protection]
 ---
 
 README.md still instructs users to copy the full Ratchet repository into their
