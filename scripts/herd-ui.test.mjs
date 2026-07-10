@@ -20,6 +20,7 @@ import {
   readEvents,
   parseEscalations,
   latestClaimTs,
+  timelineEvents,
   prUrl,
   resolveRepoSlug,
   buildWorkers,
@@ -838,4 +839,189 @@ await inTempDir(async (dir) => {
   for (let n = 1; n <= criteriaCount; n++) assert.ok(unique.has(n), `#179 criterion ${n} has a test`);
 }
 
-console.log("PASS herd-ui.test.mjs (27 criteria)");
+// --- #182 Criterion 1: selecting an issue shows its events in chronological
+// order with timestamp, event type, and the adapter/attempt/PR fields each
+// event carries. -------------------------------------------------------------
+await inTempDir(async (dir) => {
+  const statePath = join(dir, "state.json");
+  const eventsPath = join(dir, "events.jsonl");
+  const escPath = join(dir, "none.md");
+  writeFileSync(statePath, JSON.stringify({ 5: { adapter: "codex", pid: 222, attempts: 2, status: "in-review", pr: 42, logFile: "l5.log" } }));
+  writeFileSync(eventsPath, [
+    JSON.stringify({ ts: "2026-07-09T12:05:00Z", event: "dispatch", issue: 5, adapter: "codex", pid: 222, attempts: 1 }),
+    JSON.stringify({ ts: "2026-07-09T12:00:00Z", event: "claim-detected", issue: 5, adapter: "codex", pid: 222 }),
+    JSON.stringify({ ts: "2026-07-09T12:10:00Z", event: "pr-opened", issue: 5, pr: 42 }),
+    JSON.stringify({ ts: "2026-07-09T11:00:00Z", event: "dispatch", issue: 7, adapter: "claude", pid: 111, attempts: 1 }),
+  ].join("\n") + "\n");
+  writeFileSync(escPath, "");
+
+  // Pure derivation: filter + chronological sort, only this issue's events
+  const events = readEvents(eventsPath);
+  const tl = timelineEvents(events, 5);
+  assert.equal(tl.length, 3, "only issue #5 events, not #7");
+  assert.deepEqual(tl.map((e) => e.ts), ["2026-07-09T12:00:00Z", "2026-07-09T12:05:00Z", "2026-07-09T12:10:00Z"], "events in chronological order by ts");
+  assert.equal(tl[0].event, "claim-detected", "first event is claim-detected (earliest ts)");
+  assert.equal(tl[2].event, "pr-opened", "last event is pr-opened");
+  assert.equal(tl[0].adapter, "codex", "event carries the adapter field");
+  assert.equal(tl[2].pr, 42, "event carries the PR field");
+
+  // Over HTTP: the timeline endpoint sends the events
+  await withServer({ statePath, eventsPath, escalationsPath: escPath }, async (base) => {
+    const frames = await sseCollect(
+      `${base}/api/timeline?issue=5`,
+      (frames) => frames.some((f) => f.event === "timeline"),
+    );
+    const timeline = frames.flatMap((f) => f.event === "timeline" ? f.data : []);
+    assert.equal(timeline.length, 3, "all events sent over HTTP");
+    assert.deepEqual(timeline.map((e) => e.ts), ["2026-07-09T12:00:00Z", "2026-07-09T12:05:00Z", "2026-07-09T12:10:00Z"], "chronological over HTTP");
+    assert.equal(timeline[0].event, "claim-detected", "event type present");
+    assert.equal(timeline[0].adapter, "codex", "adapter field present in the payload");
+    assert.equal(timeline[2].pr, 42, "PR field present in the payload");
+  });
+
+  // The page renders the timeline
+  await withServer({}, async (base) => {
+    const page = await fetchText(`${base}/`);
+    assert.match(page.body, /id="timeline"/, "the page has a timeline element");
+    assert.match(page.body, /function renderTimeline/, "the page has a renderTimeline function");
+    assert.match(page.body, /No activity recorded/, "the page has the empty-state message");
+    assert.match(page.body, /\/api\/timeline/, "the page subscribes to the timeline endpoint");
+  });
+});
+
+// --- #182 Criterion 2: new events for the selected issue append to the
+// timeline live without a page reload. ---------------------------------------
+await inTempDir(async (dir) => {
+  const statePath = join(dir, "state.json");
+  const eventsPath = join(dir, "events.jsonl");
+  const escPath = join(dir, "none.md");
+  writeFileSync(statePath, JSON.stringify({ 5: { adapter: "codex", pid: 222, attempts: 1, status: "dispatched", pr: null, logFile: "l5.log" } }));
+  writeFileSync(eventsPath, JSON.stringify({ ts: "2026-07-09T12:00:00Z", event: "dispatch", issue: 5, adapter: "codex", pid: 222, attempts: 1 }) + "\n");
+  writeFileSync(escPath, "");
+
+  await withServer({ statePath, eventsPath, escalationsPath: escPath }, async (base) => {
+    const streamDone = sseCollect(
+      `${base}/api/timeline?issue=5`,
+      (frames) => frames.filter((f) => f.event === "timeline").flatMap((f) => f.data).length >= 2,
+    );
+    // After the initial frame, append a new event
+    setTimeout(() => appendFileSync(eventsPath, JSON.stringify({ ts: "2026-07-09T12:10:00Z", event: "pr-opened", issue: 5, pr: 42 }) + "\n"), 120);
+    const frames = await streamDone;
+    const allEvents = frames.filter((f) => f.event === "timeline").flatMap((f) => f.data);
+    assert.equal(allEvents.length, 2, "the new event appended live without a reload");
+    assert.equal(allEvents[1].event, "pr-opened", "the appended event is the new one");
+    assert.equal(allEvents[1].pr, 42, "the appended event carries its PR field");
+  });
+});
+
+// --- #182 Criterion 3: an issue with no events shows a one-line "no activity
+// recorded" message, never an empty pane or an error. -----------------------
+await inTempDir(async (dir) => {
+  const statePath = join(dir, "state.json");
+  const eventsPath = join(dir, "events.jsonl");
+  const escPath = join(dir, "none.md");
+  // Issue 9 is in state but has no events in the stream
+  writeFileSync(statePath, JSON.stringify({ 9: { adapter: "claude", pid: 111, attempts: 1, status: "dispatched", pr: null, logFile: "l9.log" } }));
+  writeFileSync(eventsPath, JSON.stringify({ ts: "2026-07-09T12:00:00Z", event: "dispatch", issue: 5, adapter: "codex", pid: 222, attempts: 1 }) + "\n");
+  writeFileSync(escPath, "");
+
+  // Pure derivation: no events for issue 9
+  const tl = timelineEvents(readEvents(eventsPath), 9);
+  assert.equal(tl.length, 0, "no events for issue 9");
+
+  // Over HTTP: the endpoint sends an empty initial frame (no crash, no error)
+  await withServer({ statePath, eventsPath, escalationsPath: escPath }, async (base) => {
+    const { status, json } = await fetchJson(`${base}/api/snapshot`);
+    assert.equal(status, 200, "the dashboard still works");
+    assert.ok(json.workers.find((w) => w.issue === 9), "issue 9 is in the snapshot");
+
+    // Collect SSE frames for a short time — no timeline frames should arrive
+    // (no events for issue 9), but the connection stays open without erroring.
+    const noFrames = await new Promise((resolve) => {
+      const frames = [];
+      const req = httpGet(`${base}/api/timeline?issue=9`, (res) => {
+        let buf = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => {
+          buf += chunk;
+          let i;
+          while ((i = buf.indexOf("\n\n")) >= 0) {
+            const block = buf.slice(0, i);
+            buf = buf.slice(i + 2);
+            const ev = /^event:\s*(.*)$/m.exec(block);
+            const da = /^data:\s*(.*)$/m.exec(block);
+            if (da) frames.push({ event: ev ? ev[1] : "message", data: da[1] });
+          }
+        });
+      });
+      const timer = setTimeout(() => { req.destroy(); resolve(frames); }, 300);
+      req.on("error", () => { clearTimeout(timer); resolve(frames); });
+    });
+    assert.equal(noFrames.length, 0, "no frames sent — no events, no error, no crash");
+
+    // The page has the empty-state message
+    const page = await fetchText(`${base}/`);
+    assert.match(page.body, /No activity recorded/, "the page shows a one-line message for no events");
+  });
+});
+
+// --- #182 Criterion 4: a malformed event line in the stream is skipped with
+// the remaining timeline still rendering. ------------------------------------
+await inTempDir(async (dir) => {
+  const statePath = join(dir, "state.json");
+  const eventsPath = join(dir, "events.jsonl");
+  const escPath = join(dir, "none.md");
+  writeFileSync(statePath, JSON.stringify({ 5: { adapter: "codex", pid: 222, attempts: 1, status: "dispatched", pr: null, logFile: "l5.log" } }));
+  // Two valid events for issue 5, with a malformed line between them
+  writeFileSync(eventsPath, [
+    JSON.stringify({ ts: "2026-07-09T12:00:00Z", event: "dispatch", issue: 5, adapter: "codex", pid: 222, attempts: 1 }),
+    "THIS IS NOT JSON",
+    JSON.stringify({ ts: "2026-07-09T12:10:00Z", event: "pr-opened", issue: 5, pr: 42 }),
+    "",
+  ].join("\n"));
+  writeFileSync(escPath, "");
+
+  // readEvents already skips the malformed line
+  const events = readEvents(eventsPath);
+  assert.equal(events.length, 2, "malformed line skipped by readEvents");
+
+  // timelineEvents still returns the two valid events in order
+  const tl = timelineEvents(events, 5);
+  assert.equal(tl.length, 2, "timeline renders the remaining valid events");
+  assert.equal(tl[0].event, "dispatch", "first valid event present");
+  assert.equal(tl[1].event, "pr-opened", "second valid event present");
+
+  // Over HTTP: the timeline endpoint sends only the two valid events
+  await withServer({ statePath, eventsPath, escalationsPath: escPath }, async (base) => {
+    const frames = await sseCollect(
+      `${base}/api/timeline?issue=5`,
+      (frames) => frames.some((f) => f.event === "timeline"),
+    );
+    const allEvents = frames.filter((f) => f.event === "timeline").flatMap((f) => f.data);
+    assert.equal(allEvents.length, 2, "malformed line skipped over HTTP, remaining events render");
+    assert.deepEqual(allEvents.map((e) => e.event), ["dispatch", "pr-opened"], "valid events in chronological order");
+  });
+});
+
+// --- #182 Criterion 5: every criterion above has exactly one test named after
+// it. --------------------------------------------------------------------------
+{
+  const selfPath = fileURLToPath(import.meta.url);
+  const selfText = readFileSync(selfPath, "utf8");
+  const planDir = join(dirname(selfPath), "..", "plan");
+  const planPath = existsSync(join(planDir, "0092-herd-dashboard-activity-timeline.md"))
+    ? join(planDir, "0092-herd-dashboard-activity-timeline.md")
+    : join(planDir, "done", "0092-herd-dashboard-activity-timeline.md");
+  const planText = readFileSync(planPath, "utf8");
+
+  const criteriaSection = /##\s+Acceptance criteria\s*([\s\S]*?)(?:\n##\s|$)/.exec(planText)[1];
+  const criteriaCount = (criteriaSection.match(/^-\s*\[[ x]\]/gim) || []).length;
+
+  const markers = [...selfText.matchAll(/^\/\/ --- #182 Criterion (\d+):/gim)].map((m) => Number(m[1]));
+  const unique = new Set(markers);
+  assert.equal(markers.length, unique.size, "each #182 criterion is tested exactly once (no duplicate markers)");
+  assert.equal(markers.length, criteriaCount, `one test per #182 acceptance criterion (${criteriaCount})`);
+  for (let n = 1; n <= criteriaCount; n++) assert.ok(unique.has(n), `#182 criterion ${n} has a test`);
+}
+
+console.log("PASS herd-ui.test.mjs (32 criteria)");
