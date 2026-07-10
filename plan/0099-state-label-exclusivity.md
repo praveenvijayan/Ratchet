@@ -1,20 +1,19 @@
 ---
-title: State labels are mutually exclusive — claim flip removes state:ready, and the invariant is enforced
+title: GitHub-side enforcement — exactly one state:* label per issue
 priority: high
 labels: []
 blocked_by: []
 ---
 
-Issue #181 carries `state:ready` and `state:in-review` together. Cause: the
-claim instructions (AGENTS.md step 2 and the ratchet-run prompt) say to *add*
-`state:in-progress` but never to *remove* `state:ready`, so the orphaned ready
-label survives every later flip. Nothing anywhere enforces that an issue has at
-most one `state:*` label, so any slip becomes permanent. The damage is not
-cosmetic: the pick step selects by `state:ready`, so an issue under review
-looks pickable and can be dispatched a second time.
+Issue #181 carried `state:ready` and `state:in-review` together, and nothing
+enforces that an issue has at most one `state:*` label, so any agent slip
+becomes permanent. The damage is not cosmetic: the pick step selects by
+`state:ready`, so an issue under review looks pickable and can be dispatched a
+second time. Enforce the invariant GitHub-side, labeled-event driven — the same
+closed-loop pattern as unblock-dependents — so agent-side discipline is never
+load-bearing.
 
 ## Acceptance criteria
-- [ ] Every instruction that sets a `state:*` label (AGENTS.md, workflow prompts, skills) states the removal of the previous state label in the same step, symmetric with the existing exit-path wording
 - [ ] When any `state:*` label is added to an issue that already has a different one, the system removes the older state label so exactly one remains, without human action
 - [ ] The enforcement treats the newest label as the truth and never removes the only state label an issue has
 - [ ] Non-state labels (`priority:*`, `herd`, others) are never touched by the enforcement
@@ -22,10 +21,7 @@ looks pickable and can be dispatched a second time.
 - [ ] Every criterion above has exactly one test named after it
 
 ## Notes
-Observed sequence on #181: plan-sync set `state:ready`; the worker added
-`state:in-progress` without removing it (as instructed — the removal is simply
-missing from the claim wording, unlike AGENTS.md's exit paths which do say
-"remove state:in-progress"); the in-review flip then removed only in-progress.
-Enforcement belongs GitHub-side (labeled-event driven), same closed-loop
-pattern as unblock-dependents and 0098-review-verdict-label-workflow, so no
-agent-side discipline is load-bearing.
+Split B of the original issue-#207 scope (see its scope-split comment): the
+instruction-wording half is 0101-state-instructions-remove-previous-label. A
+built, gate-green implementation of this piece exists as `issue-207-built.patch`
+per that comment — reuse, don't rebuild.
