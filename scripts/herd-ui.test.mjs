@@ -9,7 +9,7 @@
 
 import assert from "node:assert/strict";
 import { get as httpGet } from "node:http";
-import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -331,7 +331,10 @@ await (async () => {
 {
   const selfPath = fileURLToPath(import.meta.url);
   const selfText = readFileSync(selfPath, "utf8");
-  const planPath = join(dirname(selfPath), "..", "plan", "0069-herd-web-dashboard.md");
+  const planDir = join(dirname(selfPath), "..", "plan");
+  const planPath = existsSync(join(planDir, "0069-herd-web-dashboard.md"))
+    ? join(planDir, "0069-herd-web-dashboard.md")
+    : join(planDir, "done", "0069-herd-web-dashboard.md");
   const planText = readFileSync(planPath, "utf8");
 
   const criteriaSection = /##\s+Acceptance criteria\s*([\s\S]*?)(?:\n##\s|$)/.exec(planText)[1];
@@ -344,4 +347,236 @@ await (async () => {
   for (let n = 1; n <= criteriaCount; n++) assert.ok(unique.has(n), `criterion ${n} has a test`);
 }
 
-console.log("PASS herd-ui.test.mjs (8 criteria)");
+// --- #166 Criterion 1: errors and escalations render inside a side panel
+// rather than stacked above the worker table. -------------------------------
+await (async () => {
+  await withServer({}, async (base) => {
+    const page = await fetchText(`${base}/`);
+    assert.match(page.body, /<aside[^>]*id="errpanel"/, "escalations live inside a side panel element");
+    assert.match(page.body, /id="errpanel"[\s\S]*id="escalations"/, "escalations div is inside the error panel");
+    assert.doesNotMatch(page.body, /<main>\s*<div class="escalations"/, "escalations no longer stacked directly in main");
+  });
+})();
+
+// --- #166 Criterion 2: a control toggles the panel open and closed; closing
+// it returns the worker list to full width and opening it shows the current
+// errors. ---------------------------------------------------------------------
+await (async () => {
+  await withServer({}, async (base) => {
+    const page = await fetchText(`${base}/`);
+    assert.match(page.body, /<button[^>]*id="errtoggle"/, "a toggle control opens and closes the panel");
+    assert.match(page.body, /id="errpanel"[\s\S]*<button[^>]*id="errclose"/, "a close button is inside the panel");
+    assert.match(page.body, /<aside[^>]*id="errpanel"[^>]*hidden/, "panel starts closed — worker list at full width");
+    assert.match(page.body, /\.fleet\s*\{[^}]*flex:1/, "fleet container expands to full width when panel is closed");
+  });
+})();
+
+// --- #166 Criterion 3: the control shows a count of open errors so the
+// operator sees there are errors to read while the panel is closed. -----------
+await inTempDir(async (dir) => {
+  const escPath = join(dir, "esc.md");
+  writeFileSync(escPath, [
+    "## 2026-07-09T11:00:00Z — issue #7",
+    "- What happened: worker pid 111 is not alive",
+    "- Log file: .ratchet/logs/issue-7.log",
+    "- Suggested action: review the log and re-queue",
+    "",
+    "## 2026-07-09T11:30:00Z — issue #9",
+    "- What happened: stale claim ref",
+    "- Log file: (none)",
+    "- Suggested action: delete the stale ref",
+    "",
+  ].join("\n"));
+
+  await withServer({ statePath: join(dir, "s.json"), eventsPath: join(dir, "e.jsonl"), escalationsPath: escPath }, async (base) => {
+    const page = await fetchText(`${base}/`);
+    assert.match(page.body, /id="errtoggle"[\s\S]*id="errcount"/, "the toggle control carries a count badge");
+    const { json } = await fetchJson(`${base}/api/snapshot`);
+    assert.equal(json.escalations.length, 2, "the snapshot carries the live error count");
+    assert.match(page.body, /snapshot\.escalations\.length/, "the badge count is driven by the live escalation count");
+  });
+});
+
+// --- #166 Criterion 4: new errors appearing while the panel is closed update
+// the count live and do not force the panel open. -----------------------------
+await inTempDir(async (dir) => {
+  const escPath = join(dir, "esc.md");
+  const statePath = join(dir, "s.json");
+  const eventsPath = join(dir, "e.jsonl");
+  writeFileSync(escPath, "");
+  writeFileSync(statePath, JSON.stringify({}));
+  writeFileSync(eventsPath, "");
+
+  await withServer({ statePath, eventsPath, escalationsPath: escPath, now: () => NOW }, async (base) => {
+    const page = await fetchText(`${base}/`);
+    const scriptMatch = /<script>([\s\S]*?)<\/script>/.exec(page.body);
+    assert.ok(scriptMatch, "page has a script block");
+    const script = scriptMatch[1];
+    const handlerMatch = /addEventListener\("snapshot"[\s\S]*?\}\);/.exec(script);
+    assert.ok(handlerMatch, "snapshot handler exists");
+    assert.doesNotMatch(handlerMatch[0], /panelOpen\s*=\s*true/, "the snapshot handler never forces the panel open");
+
+    const streamDone = sseCollect(
+      `${base}/api/stream`,
+      (frames) => frames.some((f) => f.event === "snapshot" && f.data.escalations.length > 0),
+    );
+    setTimeout(() => {
+      writeFileSync(escPath, [
+        "## 2026-07-09T12:00:00Z — issue #11",
+        "- What happened: worker died",
+        "- Log file: (none)",
+        "- Suggested action: restart",
+        "",
+      ].join("\n"));
+    }, 120);
+    const frames = await streamDone;
+    const last = frames[frames.length - 1];
+    assert.ok(last.data.escalations.length > 0, "the count updates live when new errors appear while the panel is closed");
+  });
+});
+
+// --- #166 Criterion 5: with zero errors the panel is empty and shows a
+// one-line "no errors" message instead of a blank panel. ----------------------
+await inTempDir(async (dir) => {
+  await withServer({ statePath: join(dir, "s.json"), eventsPath: join(dir, "e.jsonl"), escalationsPath: join(dir, "esc.md") }, async (base) => {
+    const page = await fetchText(`${base}/`);
+    assert.match(page.body, /No errors\./, "the panel shows a one-line no-errors message for zero errors");
+    const { json } = await fetchJson(`${base}/api/snapshot`);
+    assert.equal(json.escalations.length, 0, "zero escalations in the snapshot");
+  });
+});
+
+// --- #166 Criterion 6: every criterion above has exactly one test named after
+// it. --------------------------------------------------------------------------
+{
+  const selfPath = fileURLToPath(import.meta.url);
+  const selfText = readFileSync(selfPath, "utf8");
+  const planPath = join(dirname(selfPath), "..", "plan", "0078-herd-dashboard-error-panel.md");
+  const planText = readFileSync(planPath, "utf8");
+
+  const criteriaSection = /##\s+Acceptance criteria\s*([\s\S]*?)(?:\n##\s|$)/.exec(planText)[1];
+  const criteriaCount = (criteriaSection.match(/^-\s*\[[ x]\]/gim) || []).length;
+
+  const markers = [...selfText.matchAll(/^\/\/ --- #166 Criterion (\d+):/gim)].map((m) => Number(m[1]));
+  const unique = new Set(markers);
+  assert.equal(markers.length, unique.size, "each #166 criterion is tested exactly once (no duplicate markers)");
+  assert.equal(markers.length, criteriaCount, `one test per #166 acceptance criterion (${criteriaCount})`);
+  for (let n = 1; n <= criteriaCount; n++) assert.ok(unique.has(n), `#166 criterion ${n} has a test`);
+}
+
+// --- #171 Criterion 1: a row with a live worker pid in an active (non-terminal)
+// status shows its claim age against the claim timeout, with the overdue
+// highlight only when age exceeds the timeout. -------------------------------
+await inTempDir(async (dir) => {
+  const statePath = join(dir, "state.json");
+  const eventsPath = join(dir, "events.jsonl");
+  const start = new Date(NOW - 90_000).toISOString(); // 90s before the fixed clock
+  writeFileSync(statePath, JSON.stringify({
+    3: { adapter: "claude", pid: 111, attempts: 1, status: "dispatched", pr: null, logFile: "l3.log" },
+  }));
+  writeFileSync(eventsPath, JSON.stringify({ ts: start, event: "dispatch", issue: 3 }) + "\n");
+
+  const snap = readSnapshot({ statePath, eventsPath, escalationsPath: join(dir, "none.md"), config: CONFIG, now: NOW });
+  const w = snap.workers.find((w) => w.issue === 3);
+  assert.equal(w.pid, 111, "row carries the live worker pid");
+  assert.equal(w.status, "dispatched", "row is in an active non-terminal status");
+  assert.equal(w.claimActive, true, "claimActive is true for a live pid in a non-terminal status");
+  assert.equal(w.claimAgeSeconds, 90, "claim age is measured from the dispatch event");
+  assert.equal(w.claimTimeoutSeconds, 300, "the timeout denominator is present for the gauge");
+
+  // The page's ageText renders the timeout denominator and overdue class only for active claims
+  await withServer({}, async (base) => {
+    const page = await fetchText(`${base}/`);
+    const scriptMatch = /<script>([\s\S]*?)<\/script>/.exec(page.body);
+    assert.ok(scriptMatch, "page has a script block");
+    const script = scriptMatch[1];
+    assert.match(script, /w\.claimActive/, "ageText checks claimActive");
+    // The active-claim branch carries the timeout denominator and the overdue class
+    assert.match(script, /w\.claimActive\)\s*\{[\s\S]*?claimTimeoutSeconds[\s\S]*?"over"/, "the active branch shows the timeout denominator and overdue class");
+  });
+});
+
+// --- #171 Criterion 2: a row in a terminal or escalated status, or with no
+// live pid, shows a "last activity" age with no timeout denominator and no
+// overdue highlight. ---------------------------------------------------------
+await inTempDir(async (dir) => {
+  const statePath = join(dir, "state.json");
+  const eventsPath = join(dir, "events.jsonl");
+  const start = new Date(NOW - 926_000).toISOString(); // long ago — would be "overdue" under the old logic
+  writeFileSync(statePath, JSON.stringify({
+    4: { adapter: "claude", pid: null, attempts: 1, status: "escalated", pr: null, logFile: "l4.log" },
+    6: { adapter: "codex", pid: null, attempts: 2, status: "pr-concluded", pr: 99, logFile: "l6.log" },
+  }));
+  writeFileSync(eventsPath, [
+    JSON.stringify({ ts: start, event: "dispatch", issue: 4 }),
+    JSON.stringify({ ts: start, event: "dispatch", issue: 6 }),
+  ].join("\n") + "\n");
+
+  const snap = readSnapshot({ statePath, eventsPath, escalationsPath: join(dir, "none.md"), config: CONFIG, now: NOW });
+  const w4 = snap.workers.find((w) => w.issue === 4);
+  const w6 = snap.workers.find((w) => w.issue === 6);
+  assert.equal(w4.status, "escalated", "row 4 is in an escalated (terminal) status");
+  assert.equal(w4.claimActive, false, "an escalated row is not claimActive");
+  assert.equal(w6.status, "pr-concluded", "row 6 is in a concluded status with no live pid");
+  assert.equal(w6.claimActive, false, "a row with no live pid is not claimActive");
+  // Both still carry the age so the browser can show "last activity"
+  assert.equal(w4.claimAgeSeconds, 926, "the age is still computed for last-activity display");
+  assert.ok(w4.claimAgeSeconds > w4.claimTimeoutSeconds, "the age exceeds the timeout — but must NOT be highlighted");
+
+  // The page's ageText, for non-active rows, renders no timeout denominator and no overdue class
+  await withServer({}, async (base) => {
+    const page = await fetchText(`${base}/`);
+    const scriptMatch = /<script>([\s\S]*?)<\/script>/.exec(page.body);
+    const script = scriptMatch[1];
+    // The fallback return (after the claimActive branch) renders just the age, no denominator
+    assert.match(script, /return '<span class="gauge">' \+ t \+ "<\/span>"/, "the non-active branch renders age with no timeout denominator");
+  });
+});
+
+// --- #171 Criterion 3: a row with no dispatch or resume event at all shows a
+// placeholder, never a blank, NaN, or a negative age. ------------------------
+await inTempDir(async (dir) => {
+  const statePath = join(dir, "state.json");
+  const eventsPath = join(dir, "events.jsonl");
+  writeFileSync(statePath, JSON.stringify({
+    8: { adapter: "claude", pid: 111, attempts: 1, status: "dispatched", pr: null, logFile: "l8.log" },
+  }));
+  writeFileSync(eventsPath, ""); // no events at all
+
+  const snap = readSnapshot({ statePath, eventsPath, escalationsPath: join(dir, "none.md"), config: CONFIG, now: NOW });
+  const w = snap.workers.find((w) => w.issue === 8);
+  assert.equal(w.claimStartTs, null, "no dispatch/resume event -> claimStartTs is null");
+  assert.equal(w.claimAgeSeconds, null, "no event -> claimAgeSeconds is null, never NaN or negative");
+
+  // The page's ageText returns a placeholder when claimStartTs is null
+  await withServer({}, async (base) => {
+    const page = await fetchText(`${base}/`);
+    const scriptMatch = /<script>([\s\S]*?)<\/script>/.exec(page.body);
+    const script = scriptMatch[1];
+    assert.match(script, /if \(w\.claimStartTs == null\) return "—"/, "ageText returns a placeholder dash when there is no event");
+  });
+});
+
+// --- #171 Criterion 4: every criterion above has exactly one test named after
+// it. --------------------------------------------------------------------------
+{
+  const selfPath = fileURLToPath(import.meta.url);
+  const selfText = readFileSync(selfPath, "utf8");
+  const planDir = join(dirname(selfPath), "..", "plan");
+  const planPath = existsSync(join(planDir, "0081-herd-ui-claim-age-live-only.md"))
+    ? join(planDir, "0081-herd-ui-claim-age-live-only.md")
+    : join(planDir, "done", "0081-herd-ui-claim-age-live-only.md");
+  const planText = readFileSync(planPath, "utf8");
+
+  const criteriaSection = /##\s+Acceptance criteria\s*([\s\S]*?)(?:\n##\s|$)/.exec(planText)[1];
+  const criteriaCount = (criteriaSection.match(/^-\s*\[[ x]\]/gim) || []).length;
+
+  const markers = [...selfText.matchAll(/^\/\/ --- #171 Criterion (\d+):/gim)].map((m) => Number(m[1]));
+  const unique = new Set(markers);
+  assert.equal(markers.length, unique.size, "each #171 criterion is tested exactly once (no duplicate markers)");
+  assert.equal(markers.length, criteriaCount, `one test per #171 acceptance criterion (${criteriaCount})`);
+  for (let n = 1; n <= criteriaCount; n++) assert.ok(unique.has(n), `#171 criterion ${n} has a test`);
+}
+
+console.log("PASS herd-ui.test.mjs (18 criteria)");
+

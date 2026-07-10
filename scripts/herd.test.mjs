@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { main, loadConfig, normalizeConfig, substitute, resolveAdapter, adapterAvailability, executableOnPath, defaultConfig, headlessFlagWarnings, HEADLESS_PERMISSION_FLAGS, HerdConfigError, DEFAULTS } from "./herd.mjs";
+import { main, loadConfig, normalizeConfig, substitute, resolveAdapter, adapterAvailability, executableOnPath, defaultConfig, headlessFlagWarnings, HEADLESS_PERMISSION_FLAGS, HerdConfigError, DEFAULTS, extractUsage, USAGE_FIELDS } from "./herd.mjs";
 
 // Run `fn` with cwd set to a fresh temp dir, then clean up — lets CLI-level
 // tests exercise the cwd-relative default config path without side effects.
@@ -833,4 +833,81 @@ withStubOpencode((binDir) => {
   }
 }
 
-console.log("PASS herd.test.mjs (45 criteria)");
+// Criterion (#163 AC1): an adapter may declare an optional `usage` mapping
+// naming how to read costUsd, tokensIn, and tokensOut from that adapter's log
+// output; a declared mapping survives normalization and drives extraction.
+{
+  const cfg = normalizeConfig({
+    adapters: {
+      a: {
+        launch: ["cli", "{prompt}"],
+        usage: {
+          costUsd: "cost: \\$([0-9.]+)",
+          tokensIn: "in=(\\d+)",
+          tokensOut: "out=(\\d+)",
+        },
+      },
+    },
+    routing: { default: "a" },
+  });
+  assert.ok(cfg.adapters.a.usage, "a declared usage mapping is carried on the normalized adapter");
+  assert.deepEqual(Object.keys(cfg.adapters.a.usage).sort(), [...USAGE_FIELDS].sort(), "the mapping names all three usage fields");
+  const { values } = extractUsage(cfg.adapters.a.usage, "cost: $0.42\nin=1200 out=350\n");
+  assert.deepEqual(values, { costUsd: 0.42, tokensIn: 1200, tokensOut: 350 }, "the mapping reads each number from the adapter's own log format");
+}
+
+// Criterion (#163 AC4): a usage mapping whose fields are missing or the wrong
+// type exits nonzero at config-validation time with a one-line error naming the
+// adapter and the offending field.
+{
+  const base = (usage) => ({ adapters: { claude: { launch: ["cli", "{prompt}"], usage } }, routing: { default: "claude" } });
+  // Not an object at all.
+  assert.throws(
+    () => normalizeConfig(base("nope"), "cfg.json"),
+    (e) => e instanceof HerdConfigError && e.message.includes("cfg.json") && /adapter "claude"/.test(e.message) && /usage/.test(e.message) && !e.message.includes("\n"),
+    "a non-object usage is rejected, naming the file and adapter on one line",
+  );
+  // Each field, missing or wrong-typed, is named individually.
+  for (const field of USAGE_FIELDS) {
+    const full = { costUsd: "c=(\\d+)", tokensIn: "i=(\\d+)", tokensOut: "o=(\\d+)" };
+    for (const bad of [{ ...full, [field]: undefined }, { ...full, [field]: 42 }, { ...full, [field]: "" }]) {
+      assert.throws(
+        () => normalizeConfig(base(bad), "cfg.json"),
+        (e) => e instanceof HerdConfigError && new RegExp(`adapter "claude" usage\\.${field}`).test(e.message) && !e.message.includes("\n"),
+        `usage.${field} that is ${JSON.stringify(bad[field])} is rejected, naming the adapter and field`,
+      );
+    }
+  }
+}
+
+// Criterion (#163 AC6): the framework purity test still passes — no
+// adapter-specific log format or model name appears in herd.mjs; usage
+// extraction is driven entirely by the operator-supplied config regexes.
+{
+  const src = readFileSync(new URL("./herd.mjs", import.meta.url), "utf8");
+  for (const token of [
+    "opus", "sonnet", "haiku", "gpt-3", "gpt-4", "gpt-5", "davinci", "gemini", "llama", "mistral", // models
+    "tmux", "zellij", "wezterm", // multiplexers
+    "litellm", "openrouter", // proxies
+  ])
+    assert.ok(!new RegExp(token, "i").test(src), `herd.mjs stays framework-pure for usage capture: it must not reference "${token}"`);
+  // Extraction reads only what the config's regex captures, not a baked format.
+  const { values, unresolved } = extractUsage({ costUsd: "X=([0-9.]+)", tokensIn: "Y=(\\d+)", tokensOut: "Z=(\\d+)" }, "X=1.5 Y=10 Z=20");
+  assert.deepEqual(values, { costUsd: 1.5, tokensIn: 10, tokensOut: 20 }, "extraction is config-driven — an arbitrary format works with no code change");
+  assert.deepEqual(unresolved, [], "every field the config named was read from the log");
+}
+
+// Criterion (#163 AC7): each #163 criterion has exactly one test named after it,
+// counted across herd.test.mjs (config/extraction/purity) and
+// herd-survey.test.mjs (the worker-exit event behaviours).
+{
+  const here = readFileSync(new URL("./herd.test.mjs", import.meta.url), "utf8");
+  const survey = readFileSync(new URL("./herd-survey.test.mjs", import.meta.url), "utf8");
+  const both = here + "\n" + survey;
+  for (const ac of ["AC1", "AC2", "AC3", "AC4", "AC5", "AC6", "AC7"]) {
+    const hits = (both.match(new RegExp(`#163 ${ac}\\)`, "g")) || []).length;
+    assert.equal(hits, 1, `#163 ${ac} has exactly one test named after it`);
+  }
+}
+
+console.log("PASS herd.test.mjs (45 criteria + issue #163: 4 criteria)");

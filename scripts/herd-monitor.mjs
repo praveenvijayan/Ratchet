@@ -19,21 +19,13 @@
 
 import { readFileSync } from "node:fs";
 import { substitute } from "./herd.mjs";
-import { STATE_FILE, ESCALATIONS_FILE, EVENTS_FILE, readState, writeState, appendEscalation, appendHerdEvent, isPidAlive } from "./herd-survey.mjs";
+import { STATE_FILE, ESCALATIONS_FILE, EVENTS_FILE, TERMINAL_STATUS, readState, writeState, appendEscalation, appendHerdEvent, isPidAlive } from "./herd-survey.mjs";
 import { spawnWorker, recordExit } from "./herd-dispatch.mjs";
 
-// Statuses the monitor has already resolved — never acted on again.
-// "awaiting-verification" hands off to PR verification (herd-verify.mjs);
-// "ready-for-review"/"verify-escalated" are that stage's terminal outcomes and
-// must not be dragged back to verification; "escalated" is a human's to clear;
-// "dispatch-failed" was already killed+escalated by dispatch.
-export const TERMINAL_STATUS = new Set([
-  "awaiting-verification",
-  "ready-for-review",
-  "verify-escalated",
-  "escalated",
-  "dispatch-failed",
-]);
+// The set of already-resolved statuses now lives in herd-survey.mjs (pollOnce's
+// terminal-entry prune keys off the same set). Re-exported here so existing
+// importers of TERMINAL_STATUS from herd-monitor are undisturbed.
+export { TERMINAL_STATUS };
 
 // The last `maxLines` lines of a log file, quoted into an escalation so the
 // agent's own final words reach the human. A missing/unreadable file is
@@ -168,7 +160,7 @@ export async function monitorOnce(opts) {
       } else {
         let pid = null;
         try {
-          pid = spawnFn(resume.argv, resume.env, resume.logFile, (code, signal) => recordExit(statePath, issue, code, signal, { eventsPath, now, warn: log }));
+          pid = spawnFn(resume.argv, resume.env, resume.logFile, (code, signal) => recordExit(statePath, issue, code, signal, { config, eventsPath, now, warn: log }));
         } catch (e) {
           escalate(`resume spawn failed: ${e.message}`, "check the adapter command in .ratchet/herd.json; the resume CLI may be missing or unexecutable");
           line = `herd: issue #${issue} -> escalated (resume spawn failed: ${e.message})`;
