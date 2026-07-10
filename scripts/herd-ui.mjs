@@ -13,7 +13,8 @@
 
 import { createServer as httpCreateServer } from "node:http";
 import { existsSync, readFileSync, openSync, readSync, fstatSync, closeSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFileSync, execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { realpathSync } from "node:fs";
 
@@ -153,6 +154,7 @@ export function buildWorkers({ state, events, config, now = Date.now(), repoSlug
       claimTimeoutSeconds: config.claimTimeoutSeconds,
       pr: e.pr ?? null,
       prUrl: prUrl(repoSlug, e.pr ?? null),
+      issueUrl: repoSlug ? `https://github.com/${repoSlug}/issues/${issue}` : null,
       logFile: e.logFile ?? null,
     });
   }
@@ -160,8 +162,61 @@ export function buildWorkers({ state, events, config, now = Date.now(), repoSlug
   return rows;
 }
 
+// --- issue titles -------------------------------------------------------------
+
+const pexec = promisify(execFile);
+
+// Fetch a single issue's title from GitHub via `gh`. Returns the title string,
+// or null on any failure (gh missing, network error, 404). Never throws — a
+// title that cannot be fetched degrades to a placeholder, not a broken row.
+export async function defaultFetchTitle(issue, repoSlug) {
+  const args = repoSlug
+    ? ["issue", "view", String(issue), "--repo", repoSlug, "--json", "title", "--jq", ".title"]
+    : ["issue", "view", String(issue), "--json", "title", "--jq", ".title"];
+  try {
+    const { stdout } = await pexec("gh", args);
+    const title = stdout.trim();
+    return title || null;
+  } catch {
+    return null;
+  }
+}
+
+// A per-server title cache so `gh` is called at most once per issue — never on
+// every poll. `ensure` starts an async fetch if the issue is new (idempotent —
+// a pending or resolved entry is never re-fetched); `get` returns the title
+// string, null (fetch failed), or undefined (not yet resolved). The snapshot
+// picks up the title on the next poll after the fetch resolves, and the
+// change-key pushes it to the browser via SSE.
+export function createTitleCache({ fetchTitle = defaultFetchTitle, log = () => {} } = {}) {
+  const cache = new Map(); // issue number -> { title: string | null | undefined, state: "pending" | "resolved" }
+
+  return {
+    ensure(issue, repoSlug) {
+      const n = Number(issue);
+      if (cache.has(n)) return;
+      cache.set(n, { title: undefined, state: "pending" });
+      Promise.resolve()
+        .then(() => fetchTitle(n, repoSlug))
+        .then((title) => {
+          cache.set(n, { title: title ?? null, state: "resolved" });
+        })
+        .catch(() => {
+          cache.set(n, { title: null, state: "resolved" });
+        });
+    },
+    get(issue) {
+      const entry = cache.get(Number(issue));
+      return entry ? entry.title : undefined;
+    },
+  };
+}
+
 // The full dashboard payload. Never throws: every source is read tolerantly, so
 // missing state/events/escalations yield an empty snapshot carrying `hint`.
+// When a titleCache is provided, each worker row carries an issueTitle (the
+// cached title, or null while pending/failed) and the title fetch is triggered
+// at most once per issue.
 export function readSnapshot({
   statePath = STATE_FILE,
   eventsPath = EVENTS_FILE,
@@ -169,11 +224,18 @@ export function readSnapshot({
   config,
   now = Date.now(),
   repoSlug = null,
+  titleCache = null,
 } = {}) {
   const state = readState(statePath);
   const events = readEvents(eventsPath);
   const escalations = parseEscalations(escalationsPath);
   const workers = buildWorkers({ state, events, config, now, repoSlug });
+  if (titleCache) {
+    for (const w of workers) {
+      titleCache.ensure(w.issue, repoSlug);
+      w.issueTitle = titleCache.get(w.issue) ?? null;
+    }
+  }
   const hint = workers.length === 0 && escalations.length === 0 ? EMPTY_HINT : null;
   return { workers, escalations, hint };
 }
@@ -253,8 +315,10 @@ export function createDashboardServer({
   repoSlug = null,
   now = Date.now,
   pollMs = 1000,
+  fetchTitle = null,
 } = {}) {
-  const snap = () => readSnapshot({ statePath, eventsPath, escalationsPath, config, now: now(), repoSlug });
+  const titleCache = createTitleCache({ fetchTitle: fetchTitle || defaultFetchTitle });
+  const snap = () => readSnapshot({ statePath, eventsPath, escalationsPath, config, now: now(), repoSlug, titleCache });
 
   const server = httpCreateServer((req, res) => {
     const url = new URL(req.url, "http://localhost");
@@ -436,6 +500,8 @@ const PAGE_HTML = `<!doctype html>
   .logpane h2 { font-size:14px; margin:0 0 6px; }
   pre.log { background:var(--card); border:1px solid var(--line); border-radius:6px; padding:12px; max-height:360px; overflow:auto; white-space:pre-wrap; word-break:break-word; margin:0; font:12px/1.5 ui-monospace, monospace; }
   .empty { color:var(--muted); }
+  .issue-title { color:var(--muted); font-size:13px; }
+  .issue-title.empty { font-style:italic; }
 </style>
 </head>
 <body>
@@ -482,6 +548,16 @@ const PAGE_HTML = `<!doctype html>
     return '<span class="gauge ' + cls + '">' + w.attempts + " / " + w.reworkCap + "</span>";
   }
 
+  function issueCell(w) {
+    const num = "#" + esc(w.issue);
+    const link = w.issueUrl ? '<a href="' + esc(w.issueUrl) + '" target="_blank" rel="noopener">' + num + "</a>" : num;
+    if (w.issueTitle) {
+      const title = esc(w.issueTitle);
+      return link + ' <span class="issue-title">' + title + "</span>";
+    }
+    return link + ' <span class="issue-title empty">—</span>';
+  }
+
   function renderEscalations() {
     const el = $("escalations");
     if (!snapshot.escalations.length) { el.innerHTML = '<div class="empty">No errors.</div>'; return; }
@@ -513,7 +589,7 @@ const PAGE_HTML = `<!doctype html>
       const pr = w.prUrl ? '<a href="' + esc(w.prUrl) + '" target="_blank" rel="noopener">#' + esc(w.pr) + "</a>"
         : (w.pr != null ? "#" + esc(w.pr) : '<span class="empty">—</span>');
       return '<tr class="worker' + (w.issue === selected ? " sel" : "") + '" data-issue="' + w.issue + '">' +
-        "<td>#" + esc(w.issue) + "</td>" +
+        "<td>" + issueCell(w) + "</td>" +
         '<td class="status">' + esc(w.status) + "</td>" +
         "<td>" + esc(w.adapter || "—") + "</td>" +
         "<td>" + attemptsText(w) + "</td>" +
