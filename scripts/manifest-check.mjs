@@ -75,6 +75,16 @@ export function collectReferents(root) {
   return [...refs].filter((r) => existsSync(join(root, r)) && statSync(join(root, r)).isFile()).sort();
 }
 
+// Every scripts/*.test.mjs file on disk — tests must never ship to host installs.
+export function collectTestFiles(root) {
+  const scriptsDir = join(root, "scripts");
+  if (!existsSync(scriptsDir)) return [];
+  return readdirSync(scriptsDir)
+    .filter((n) => n.endsWith(".test.mjs") && statSync(join(scriptsDir, n)).isFile())
+    .map((n) => `scripts/${n}`)
+    .sort();
+}
+
 function globMatches(root, pattern) {
   const dir = dirname(pattern);
   const abs = join(root, dir);
@@ -89,7 +99,7 @@ export function checkReport(root = repoRoot()) {
   try {
     manifest = loadManifest(root);
   } catch (e) {
-    if (e.userFacing) return { ok: false, fatal: e.message, structural: [], missingFromManifest: [], missingOnDisk: [] };
+    if (e.userFacing) return { ok: false, fatal: e.message, structural: [], missingFromManifest: [], missingOnDisk: [], excludedReferents: [], shippableTests: [] };
     throw e;
   }
   const entries = manifest.files;
@@ -103,14 +113,30 @@ export function checkReport(root = repoRoot()) {
     }
   }
   const missingFromManifest = collectReferents(root).filter((ref) => !entries.some((e) => entryCovers(e, ref)));
+  // A script a shipped workflow invokes or a shipped script imports, but the
+  // manifest classifies as `excluded` — would silently break a shipped workflow.
+  // Scoped to scripts (.mjs/.js/.sh): markdown and workflow YAMLs are config,
+  // not scripts, and may be intentionally excluded (e.g. DOCS.md, README.md).
+  const isScript = (p) => /\.(?:mjs|js|sh)$/.test(p);
+  const excludedReferents = collectReferents(root).filter((ref) => {
+    if (!isScript(ref)) return false;
+    const entry = entries.find((e) => entryCovers(e, ref));
+    return entry && entry.class === "excluded";
+  });
+  // A test file classified as `framework` or `generated` — would leak Ratchet's
+  // test suite into host installs.
+  const shippableTests = collectTestFiles(root).filter((f) => {
+    const entry = entries.find((e) => entryCovers(e, f));
+    return entry && (entry.class === "framework" || entry.class === "generated");
+  });
   const missingOnDisk = [];
   for (const e of entries) {
     if (e.glob) {
       if (globMatches(root, e.path).length === 0) missingOnDisk.push(`${e.path} (glob matches no files)`);
     } else if (!existsSync(join(root, e.path))) missingOnDisk.push(e.path);
   }
-  const ok = !structural.length && !missingFromManifest.length && !missingOnDisk.length;
-  return { ok, fatal: null, structural, missingFromManifest, missingOnDisk };
+  const ok = !structural.length && !missingFromManifest.length && !missingOnDisk.length && !excludedReferents.length && !shippableTests.length;
+  return { ok, fatal: null, structural, missingFromManifest, missingOnDisk, excludedReferents, shippableTests };
 }
 
 // Render the report as human-readable lines + an exit code.
@@ -130,6 +156,16 @@ export function reportLines(report) {
     lines.push("Listed in the manifest but MISSING on disk:",
       ...report.missingOnDisk.map((p) => `  ✗ ${p}`),
       "  → remove the stale entry or restore the file.", "");
+  }
+  if (report.excludedReferents.length) {
+    lines.push("Referenced by a shipped workflow or imported by a shipped script but classified `excluded`:",
+      ...report.excludedReferents.map((p) => `  ✗ ${p}`),
+      "  → reclassify as `framework` with its owning profile — excluding a runtime script breaks shipped workflows.", "");
+  }
+  if (report.shippableTests.length) {
+    lines.push("Test files classified as shippable (`framework`/`generated`):",
+      ...report.shippableTests.map((p) => `  ✗ ${p}`),
+      "  → reclassify as `excluded` — tests must never leak into host installs.", "");
   }
   return { code: 1, lines };
 }

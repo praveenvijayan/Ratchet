@@ -51,6 +51,11 @@ Rules:
   in-review → changes-requested transition; herd's supervisor and chat agents
   rely on it rather than duplicating the check. One-directional — the flip back
   to in-review after rework stays with the agent (#197).
+- `ratchet-manifest.json` classifies every `scripts/` file individually (no
+  globs): runtime scripts are `framework`+profile, tests and dev helpers are
+  `excluded`. `scripts/manifest-check.mjs` gates both directions: a runtime
+  script classified `excluded` fails (breaks shipped workflows), and a test
+  file classified `framework`/`generated` fails (leaks tests to hosts) (#237).
 
 ## Gotchas & fragile areas
 - (e.g.) Payments module has no test harness; integration tests hit the sandbox API (#88).

@@ -21,7 +21,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseGates } from "./gates-table.mjs";
-import { checkReport, reportLines, collectReferents, loadManifest } from "./manifest-check.mjs";
+import { checkReport, reportLines, collectReferents, collectTestFiles, loadManifest } from "./manifest-check.mjs";
 
 const CHECK = fileURLToPath(new URL("./manifest-check.mjs", import.meta.url));
 const SELF = fileURLToPath(import.meta.url);
@@ -125,5 +125,130 @@ const realManifest = loadManifest(repoRoot);
   }
 }
 
+// --- Criterion 7: the manifest classifies every file under scripts/ individually
+// --- (each workflow-invoked or imported runtime script is framework with its
+// --- owning profile; every *.test.mjs and framework-only dev helper is excluded)
+{
+  const { readdirSync, statSync } = await import("node:fs");
+  // No glob entry may cover scripts/ — every file must have its own entry.
+  const globScripts = realManifest.files.filter((e) => e.glob && e.path.startsWith("scripts/"));
+  assert.equal(globScripts.length, 0, "no glob entry may cover scripts/ — every file must be classified individually");
+
+  // Every file on disk under scripts/ has an individual manifest entry.
+  const scriptFiles = readdirSync(join(repoRoot, "scripts"))
+    .filter((n) => statSync(join(repoRoot, "scripts", n)).isFile())
+    .map((n) => `scripts/${n}`)
+    .sort();
+  for (const f of scriptFiles) {
+    const individual = realManifest.files.find((e) => !e.glob && (e.path === f || f.startsWith(e.path + "/")));
+    assert.ok(individual, `scripts/ file ${f} must have an individual manifest entry`);
+  }
+
+  // Runtime scripts (referents) are framework with a declared profile.
+  for (const ref of collectReferents(repoRoot)) {
+    if (!ref.startsWith("scripts/")) continue;
+    const entry = realManifest.files.find((e) => e.path === ref);
+    assert.ok(entry, `runtime script ${ref} must be in the manifest`);
+    assert.equal(entry.class, "framework", `runtime script ${ref} must be framework, got ${entry.class}`);
+    assert.ok(entry.profile, `runtime script ${ref} must name a profile`);
+  }
+
+  // Test files are excluded.
+  for (const f of collectTestFiles(repoRoot)) {
+    const entry = realManifest.files.find((e) => e.path === f);
+    assert.ok(entry, `test file ${f} must be in the manifest`);
+    assert.equal(entry.class, "excluded", `test file ${f} must be excluded, got ${entry.class}`);
+  }
+}
+
+// --- Criterion 8: a test fails when any script invoked by a shipped workflow or
+// --- imported by a shipped script is classified `excluded`, printing the missing
+// --- script names — the classification can never break a shipped workflow
+{
+  // A runtime script referenced by a workflow, but classified `excluded`.
+  const dir = makeRepo({
+    manifest: {
+      profiles: { core: "base" },
+      files: [
+        { path: "scripts/used.mjs", class: "excluded" },
+        { path: "scripts/main.mjs", class: "framework", profile: "core" },
+      ],
+    },
+    workflows: { "run.yml": "steps:\n  - run: node scripts/used.mjs\n" },
+    scripts: { "used.mjs": "// runtime\n", "main.mjs": "import { x } from './used.mjs'\n" },
+  });
+  const report = checkReport(dir);
+  assert.deepEqual(report.excludedReferents, ["scripts/used.mjs"],
+    "a referenced script classified `excluded` must appear in excludedReferents");
+  const red = runCheck(dir);
+  assert.notEqual(red.status, 0, "classifying a runtime script as excluded must fail the check");
+  assert.ok(red.out.includes("scripts/used.mjs"), "must print the offending script name");
+  assert.ok(/classified.*excluded/i.test(red.out), "must state the problem in words");
+  noStack(red.out);
+
+  // A clean manifest (same script classified framework) passes.
+  const cleanDir = makeRepo({
+    manifest: {
+      profiles: { core: "base" },
+      files: [
+        { path: "scripts/used.mjs", class: "framework", profile: "core" },
+        { path: "scripts/main.mjs", class: "framework", profile: "core" },
+      ],
+    },
+    workflows: { "run.yml": "steps:\n  - run: node scripts/used.mjs\n" },
+    scripts: { "used.mjs": "// runtime\n", "main.mjs": "import { x } from './used.mjs'\n" },
+  });
+  assert.deepEqual(checkReport(cleanDir).excludedReferents, [], "a properly classified runtime script does not trip the check");
+}
+
+// --- Criterion 9: a test fails when any scripts/*.test.mjs file is classified as
+// --- shippable, so tests can never leak back into host installs
+{
+  // A test file classified `framework` — would ship to host installs.
+  const dir = makeRepo({
+    manifest: {
+      profiles: { core: "base" },
+      files: [
+        { path: "scripts/main.mjs", class: "framework", profile: "core" },
+        { path: "scripts/leaked.test.mjs", class: "framework", profile: "core" },
+      ],
+    },
+    scripts: { "main.mjs": "// runtime\n", "leaked.test.mjs": "// test\n" },
+  });
+  const report = checkReport(dir);
+  assert.deepEqual(report.shippableTests, ["scripts/leaked.test.mjs"],
+    "a test file classified `framework` must appear in shippableTests");
+  const red = runCheck(dir);
+  assert.notEqual(red.status, 0, "classifying a test file as shippable must fail the check");
+  assert.ok(red.out.includes("scripts/leaked.test.mjs"), "must print the offending test file name");
+  assert.ok(/shippable/i.test(red.out), "must state the problem in words");
+  noStack(red.out);
+
+  // A test file classified `excluded` passes.
+  const cleanDir = makeRepo({
+    manifest: {
+      profiles: { core: "base" },
+      files: [
+        { path: "scripts/main.mjs", class: "framework", profile: "core" },
+        { path: "scripts/safe.test.mjs", class: "excluded" },
+      ],
+    },
+    scripts: { "main.mjs": "// runtime\n", "safe.test.mjs": "// test\n" },
+  });
+  assert.deepEqual(checkReport(cleanDir).shippableTests, [], "a test file classified `excluded` does not trip the check");
+
+  // The real repo passes: no test file is shippable.
+  assert.deepEqual(checkReport(repoRoot).shippableTests, [], "the real repo has no shippable test files");
+}
+
+// --- Criterion 10: exactly one test block named after each criterion of #237 --
+{
+  const src = readFileSync(SELF, "utf8");
+  for (let n = 7; n <= 10; n++) {
+    const hits = src.match(new RegExp(`--- Criterion ${n}:`, "g")) || [];
+    assert.equal(hits.length, 1, `expected exactly one "Criterion ${n}" test block, found ${hits.length}`);
+  }
+}
+
 for (const dir of trees) rmSync(dir, { recursive: true, force: true });
-console.log("PASS manifest-check.test.mjs (6 criteria + error paths)");
+console.log("PASS manifest-check.test.mjs (6 #236 criteria + 4 #237 criteria + error paths)");
