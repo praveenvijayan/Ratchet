@@ -251,6 +251,8 @@ scripts/
   unblock-dependents.test.mjs   Regression test for unblock logic
   verify-issue-body.mjs         Trust-boundary check for ratchet-run
   verify-issue-body.test.mjs    Regression test for issue-body verification
+  version-consistency.mjs       Version single source of truth + gate: fail a tree whose four version strings disagree
+  version-consistency.test.mjs  Regression test for the version-consistency gate
 .github/workflows/
   archive-closed-plans.yml      Archive closed-issue plans via an automatic PR
   plan-sync.yml                 Compile plan/*.md → issues on push
