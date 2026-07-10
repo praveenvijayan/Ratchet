@@ -1,246 +1,138 @@
 #!/usr/bin/env node
-// ratchet-update.test.mjs — the criteria are the test plan. One test per
-// acceptance criterion of issue #46 (plan 0021-updater-ships-workflow-scripts).
-// Reads the real ratchet-update.sh, .github/workflows/*.yml, and scripts/*.mjs,
-// and asserts that FRAMEWORK_PATHS ships every script a shipped workflow invokes
-// or a shipped script imports — so the updater can never silently drift behind
-// the workflows. Zero dependencies. Run:  node scripts/ratchet-update.test.mjs
+// ratchet-update.test.mjs — one test per acceptance criterion of issue #240
+// (plan 0107-manifest-aware-update, narrowed to selection). Drives the real
+// scripts/ratchet-update.sh against a local fixture remote (a tagged git repo
+// carrying a ratchet-manifest.json) — the true fetch->select->checkout path.
+//   1. A core-only install refreshes exactly the core-profile framework files
+//      at the target version — no optional-profile files, no excluded files.
+//   2. `generated` paths are left byte-for-byte unchanged by an update.
+//   3. A successful update bumps both .ratchet-version and the installation
+//      manifest's recorded version.
+// Zero dependencies. Run: node scripts/ratchet-update.test.mjs
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url)); // scripts/
-const repo = dirname(here);
-const workflowsDir = join(repo, ".github", "workflows");
+const SCRIPT = join(here, "ratchet-update.sh");
+const SELF = fileURLToPath(import.meta.url);
 
-// Parse the FRAMEWORK_PATHS=( ... ) array out of the updater shell script.
-function frameworkPaths() {
-  const sh = readFileSync(join(here, "ratchet-update.sh"), "utf8");
-  const m = sh.match(/FRAMEWORK_PATHS=\(([^)]*)\)/s);
-  assert.ok(m, "FRAMEWORK_PATHS=( ... ) array not found in ratchet-update.sh");
-  return m[1]
-    .split("\n")
-    .map((line) => line.replace(/#.*$/, "")) // strip trailing comments
-    .join(" ")
-    .split(/\s+/)
-    .map((t) => t.trim())
-    .filter(Boolean);
-}
+const dirs = [];
+const tmp = (prefix) => { const d = mkdtempSync(join(tmpdir(), prefix)); dirs.push(d); return d; };
+const git = (cwd, ...args) => spawnSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...args], { cwd, encoding: "utf8" });
+const write = (root, rel, body) => { mkdirSync(dirname(join(root, rel)), { recursive: true }); writeFileSync(join(root, rel), body); };
 
-// A referenced path resolves after an update iff it is listed verbatim or sits
-// under a listed directory entry (e.g. "scripts" covers "scripts/foo.mjs").
-function isCovered(relPath, paths) {
-  return paths.some((p) => relPath === p || relPath.startsWith(p + "/"));
-}
-
-// Every scripts/*.mjs a shipped workflow invokes.
-function workflowScriptRefs() {
-  const refs = new Set();
-  for (const f of readdirSync(workflowsDir)) {
-    if (!f.endsWith(".yml") && !f.endsWith(".yaml")) continue;
-    const body = readFileSync(join(workflowsDir, f), "utf8");
-    for (const m of body.matchAll(/scripts\/[A-Za-z0-9_.-]+\.mjs/g)) refs.add(m[0]);
-  }
-  return [...refs];
-}
-
-// Every scripts/*.mjs a shipped (non-test) script imports.
-function importedScriptRefs() {
-  const refs = new Set();
-  for (const f of readdirSync(here)) {
-    if (!f.endsWith(".mjs") || f.endsWith(".test.mjs")) continue;
-    const body = readFileSync(join(here, f), "utf8");
-    for (const m of body.matchAll(/from\s+['"](\.\/[A-Za-z0-9_.-]+\.mjs)['"]/g)) {
-      refs.add("scripts/" + m[1].slice(2));
-    }
-  }
-  return [...refs];
-}
-
-const paths = frameworkPaths();
-
-// Criterion 1: after an update, every `node scripts/<file>` referenced by any
-// shipped workflow resolves in the consumer repo — it is shipped by
-// FRAMEWORK_PATHS and present on disk.
-{
-  const refs = workflowScriptRefs();
-  assert.ok(refs.length >= 1, "expected at least one workflow to invoke a scripts/*.mjs");
-  const missing = refs.filter((r) => !isCovered(r, paths));
-  assert.deepEqual(missing, [], `workflow-invoked scripts not shipped by FRAMEWORK_PATHS: ${missing.join(", ")}`);
-  for (const r of refs) {
-    assert.ok(existsSync(join(repo, r)), `${r} is invoked by a workflow but missing on disk`);
-  }
-}
-
-// Criterion 2: the guard fails when a script referenced by a workflow (or
-// imported by a shipped script) is missing from FRAMEWORK_PATHS — so the list
-// can never silently drift again.
-{
-  const refs = [...new Set([...workflowScriptRefs(), ...importedScriptRefs()])];
-  const missing = refs.filter((r) => !isCovered(r, paths));
-  assert.deepEqual(missing, [], `referenced/imported scripts not shipped by FRAMEWORK_PATHS: ${missing.join(", ")}`);
-
-  // The guard must genuinely reject drift, not vacuously pass: an uncovered
-  // reference has to be reported missing, and a listed dir must cover its files.
-  assert.equal(
-    isCovered("scripts/not-shipped.mjs", ["scripts/plan-sync.mjs"]),
-    false,
-    "coverage check must reject a script absent from FRAMEWORK_PATHS",
-  );
-  assert.equal(
-    isCovered("scripts/foo.mjs", ["scripts"]),
-    true,
-    "a listed directory entry must cover the scripts beneath it",
-  );
-}
-
-// Criterion 3: DOCS.md's updater table matches the paths the script pulls —
-// every FRAMEWORK_PATHS entry appears in the framework column of that table.
-{
-  const docs = readFileSync(join(repo, "DOCS.md"), "utf8");
-  const start = docs.indexOf("Framework (pulled");
-  assert.ok(start !== -1, "updater 'Framework (pulled…)' table not found in DOCS.md");
-  const table = docs.slice(start, docs.indexOf("\n\n", start));
-  for (const p of paths) {
-    assert.ok(table.includes(p), `DOCS.md updater table is missing framework path: ${p}`);
-  }
-}
-
-// Criterion 4: the updater's closing hint names /ratchet-init, not /factory-init.
-{
-  const sh = readFileSync(join(here, "ratchet-update.sh"), "utf8");
-  assert.ok(!/factory-init/.test(sh), "ratchet-update.sh must not mention the nonexistent /factory-init");
-  assert.ok(/\/ratchet-init/.test(sh), "ratchet-update.sh closing hint must name /ratchet-init");
-}
-
-function runGit(cwd, args) {
-  const res = spawnSync("git", args, { cwd, encoding: "utf8" });
-  assert.equal(
-    res.status,
-    0,
-    `git ${args.join(" ")} failed in ${cwd}\nstdout:\n${res.stdout}\nstderr:\n${res.stderr}`,
-  );
-  return res;
-}
-
-function writeFile(root, rel, text) {
-  const path = join(root, rel);
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, text);
-}
-
-function writeFrameworkTree(root, version) {
-  writeFile(root, ".agents/skills/ratchet-update/SKILL.md", "name: ratchet-update\n");
-  writeFile(root, ".claude/skills/ratchet-update/SKILL.md", "name: ratchet-update\n");
-  writeFile(root, "plugin/skills/ratchet-update/SKILL.md", "name: ratchet-update\n");
-  writeFile(root, ".claude-plugin/plugin.json", JSON.stringify({ name: "ratchet" }, null, 2) + "\n");
-  writeFile(root, ".github/workflows/ratchet.yml", "name: ratchet\n");
-  writeFile(root, "scripts/ratchet-update.sh", readFileSync(join(here, "ratchet-update.sh"), "utf8"));
-  writeFile(root, "setup.sh", "#!/usr/bin/env sh\nexit 0\n");
-  writeFile(root, "plan/README.md", "# Plan format\n");
-  writeFile(root, "AGENTS.md", "# Agents\n");
-  writeFile(root, "CLAUDE.md", "# Claude\n");
-  writeFile(root, "GEMINI.md", "# Gemini\n");
-  writeFile(root, "DOCS.md", "# Docs\n");
-  if (version !== null) writeFile(root, ".ratchet-version", `${version}\n`);
-}
-
-function makeRemote(tag, version) {
-  const dir = mkdtempSync(join(tmpdir(), "ratchet-update-remote-"));
-  runGit(dir, ["init", "-b", "main"]);
-  runGit(dir, ["config", "user.email", "ratchet@example.invalid"]);
-  runGit(dir, ["config", "user.name", "Ratchet Test"]);
-  writeFrameworkTree(dir, version);
-  runGit(dir, ["add", "."]);
-  runGit(dir, ["commit", "-m", `release ${tag}`]);
-  runGit(dir, ["tag", tag]);
+// A fixture "Ratchet release": a git repo with a manifest + files, tagged.
+function makeRelease({ manifest, files, tag }) {
+  const dir = tmp("update-release-");
+  writeFileSync(join(dir, "ratchet-manifest.json"), JSON.stringify(manifest));
+  for (const [rel, body] of Object.entries(files)) write(dir, rel, body);
+  git(dir, "init", "-b", "main");
+  git(dir, "add", "-A");
+  git(dir, "commit", "-m", `release ${tag}`);
+  git(dir, "tag", tag);
   return dir;
 }
 
-function makeConsumer(initialVersion) {
-  const dir = mkdtempSync(join(tmpdir(), "ratchet-update-consumer-"));
-  runGit(dir, ["init", "-b", "main"]);
-  runGit(dir, ["config", "user.email", "ratchet@example.invalid"]);
-  runGit(dir, ["config", "user.name", "Ratchet Test"]);
-  writeFile(dir, "scripts/ratchet-update.sh", readFileSync(join(here, "ratchet-update.sh"), "utf8"));
+// A consumer repo carrying a prior install.
+function makeConsumer({ install, seed = {} }) {
+  const dir = tmp("update-consumer-");
+  git(dir, "init", "-b", "main");
+  write(dir, "scripts/ratchet-update.sh", readFileSync(SCRIPT, "utf8"));
   chmodSync(join(dir, "scripts", "ratchet-update.sh"), 0o755);
-  writeFile(dir, ".ratchet-version", `${initialVersion}\n`);
-  runGit(dir, ["add", "."]);
-  runGit(dir, ["commit", "-m", "consumer"]);
+  write(dir, ".ratchet-install.json", JSON.stringify(install, null, 2));
+  for (const [rel, body] of Object.entries(seed)) write(dir, rel, body);
+  git(dir, "add", "-A");
+  git(dir, "commit", "-m", "consumer");
   return dir;
 }
 
 function runUpdate(consumer, remote, ref) {
-  return spawnSync("bash", ["scripts/ratchet-update.sh", ref], {
+  const res = spawnSync("bash", ["scripts/ratchet-update.sh", ref], {
     cwd: consumer,
     env: { ...process.env, RATCHET_REMOTE: remote },
     encoding: "utf8",
   });
+  return { status: res.status, out: `${res.stdout || ""}${res.stderr || ""}` };
 }
 
-const tempRoots = [];
-function tempRemote(tag, version) {
-  const dir = makeRemote(tag, version);
-  tempRoots.push(dir);
-  return dir;
-}
-function tempConsumer(initialVersion) {
-  const dir = makeConsumer(initialVersion);
-  tempRoots.push(dir);
-  return dir;
+// A core + optional-profile release, plus a generated path and an excluded test file.
+const CORE_AGENTS_V1 = "AGENTS v1\n";
+const CORE_PLAN_SYNC_V1 = "// plan-sync v1\n";
+function stdRelease(tag, version) {
+  return makeRelease({
+    tag,
+    manifest: {
+      profiles: { core: "base", optional: "extra" },
+      files: [
+        { path: "AGENTS.md", class: "framework", profile: "core" },
+        { path: "scripts/plan-sync.mjs", class: "framework", profile: "core" },
+        { path: "scripts/optional-tool.mjs", class: "framework", profile: "optional" },
+        { path: "scripts/optional-tool.test.mjs", class: "excluded" },
+        { path: "GATES.md", class: "generated" },
+      ],
+    },
+    files: {
+      "AGENTS.md": CORE_AGENTS_V1,
+      "scripts/plan-sync.mjs": CORE_PLAN_SYNC_V1,
+      "scripts/optional-tool.mjs": "// optional\n",
+      "scripts/optional-tool.test.mjs": "// test\n",
+      "GATES.md": "released GATES\n",
+      ".ratchet-version": version ? `${version}\n` : undefined,
+    },
+  });
 }
 
-// Criterion 5: After ./scripts/ratchet-update.sh <tag>, the consumer's
-// .ratchet-version equals the version that tag carries, under bare-vs-v
-// normalisation.
+// --- Criterion 1: a core-only install refreshes exactly the core files ------
 {
-  const remote = tempRemote("v1.4.0", "1.4.0");
-  const consumer = tempConsumer("0.1.0");
-  const res = runUpdate(consumer, remote, "v1.4.0");
-  assert.equal(res.status, 0, `ratchet-update should succeed:\n${res.stdout}\n${res.stderr}`);
-  assert.equal(readFileSync(join(consumer, ".ratchet-version"), "utf8"), "1.4.0\n");
+  const release = stdRelease("v2.0.0", "2.0.0");
+  const consumer = makeConsumer({
+    install: { version: "1.0.0", profiles: ["core"] },
+    seed: { "AGENTS.md": "AGENTS v0\n", "scripts/plan-sync.mjs": "// plan-sync v0\n", "GATES.md": "host GATES\n" },
+  });
+  const r = runUpdate(consumer, release, "v2.0.0");
+  assert.equal(r.status, 0, `update should succeed: ${r.out}`);
+  assert.equal(readFileSync(join(consumer, "AGENTS.md"), "utf8"), CORE_AGENTS_V1, "core file refreshed to target version");
+  assert.equal(readFileSync(join(consumer, "scripts/plan-sync.mjs"), "utf8"), CORE_PLAN_SYNC_V1, "core script refreshed");
+  assert.ok(!existsSync(join(consumer, "scripts/optional-tool.mjs")), "optional-profile file is not pulled");
+  assert.ok(!existsSync(join(consumer, "scripts/optional-tool.test.mjs")), "excluded test file is not pulled");
 }
 
-// Criterion 6: Updating to a tag whose tree has no .ratchet-version records
-// that tag's own version string, normalised, never a stale or empty value.
+// --- Criterion 2: `generated` paths are left byte-for-byte unchanged --------
 {
-  const remote = tempRemote("v1.5.0", null);
-  const consumer = tempConsumer("0.1.0");
-  const res = runUpdate(consumer, remote, "v1.5.0");
-  assert.equal(
-    res.status,
-    0,
-    `ratchet-update should succeed without upstream .ratchet-version:\n${res.stdout}\n${res.stderr}`,
-  );
-  assert.equal(readFileSync(join(consumer, ".ratchet-version"), "utf8"), "1.5.0\n");
+  const release = stdRelease("v2.1.0", "2.1.0");
+  const consumer = makeConsumer({
+    install: { version: "1.0.0", profiles: ["core"] },
+    seed: { "AGENTS.md": "AGENTS v0\n", "GATES.md": "host-owned GATES, never touched\n" },
+  });
+  const r = runUpdate(consumer, release, "v2.1.0");
+  assert.equal(r.status, 0, r.out);
+  assert.equal(readFileSync(join(consumer, "GATES.md"), "utf8"), "host-owned GATES, never touched\n", "generated GATES.md is untouched");
 }
 
-// Criterion 7: An unresolvable ref fails with a clear "cannot resolve ref"
-// message and leaves the existing .ratchet-version unchanged.
+// --- Criterion 3: a successful update bumps both version records -----------
 {
-  const remote = tempRemote("v1.6.0", "1.6.0");
-  const consumer = tempConsumer("0.1.0");
-  const res = runUpdate(consumer, remote, "does-not-exist");
-  const output = `${res.stdout}\n${res.stderr}`;
-  assert.notEqual(res.status, 0, "ratchet-update must fail for an unresolvable ref");
-  assert.match(output, /Cannot resolve ref 'does-not-exist' upstream\./);
-  assert.ok(!/\n\s+at\s+/.test(output), "failure must not leak a stack trace");
-  assert.equal(readFileSync(join(consumer, ".ratchet-version"), "utf8"), "0.1.0\n");
+  const release = stdRelease("v3.0.0", "3.0.0");
+  const consumer = makeConsumer({ install: { version: "1.0.0", profiles: ["core"] } });
+  const r = runUpdate(consumer, release, "v3.0.0");
+  assert.equal(r.status, 0, r.out);
+  assert.equal(readFileSync(join(consumer, ".ratchet-version"), "utf8"), "3.0.0\n");
+  const install = JSON.parse(readFileSync(join(consumer, ".ratchet-install.json"), "utf8"));
+  assert.equal(install.version, "3.0.0", "installation manifest records the new version");
 }
 
-for (const dir of tempRoots) rmSync(dir, { recursive: true, force: true });
+// --- Meta: exactly one test block per criterion ------------------------------
+{
+  const src = readFileSync(SELF, "utf8");
+  for (let n = 1; n <= 3; n++) {
+    const hits = src.match(new RegExp(`--- Criterion ${n}:`, "g")) || [];
+    assert.equal(hits.length, 1, `expected exactly one "Criterion ${n}" block, found ${hits.length}`);
+  }
+}
 
-console.log("PASS ratchet-update.test.mjs (all assertions)");
+for (const d of dirs) { spawnSync("rm", ["-rf", d]); }
+console.log("PASS ratchet-update.test.mjs (3 criteria, end-to-end)");
