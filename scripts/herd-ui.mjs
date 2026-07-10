@@ -19,7 +19,7 @@ import { fileURLToPath } from "node:url";
 import { realpathSync } from "node:fs";
 
 import { join } from "node:path";
-import { readState, STATE_FILE, EVENTS_FILE, ESCALATIONS_FILE, resolveRepoRoot, ratchetPaths } from "./herd-survey.mjs";
+import { readState, STATE_FILE, EVENTS_FILE, ESCALATIONS_FILE, STALE_CLAIM_STATUS, resolveRepoRoot, ratchetPaths } from "./herd-survey.mjs";
 import { DEFAULTS, CONFIG_PATH, loadConfig, HerdConfigError } from "./herd.mjs";
 import { defaultAvatarFor } from "./herd-avatars.mjs";
 import { TERMINAL_STATUS } from "./herd-monitor.mjs";
@@ -90,6 +90,87 @@ export function parseEscalations(mdOrPath = ESCALATIONS_FILE, { isPath = true } 
     });
   }
   return blocks.reverse(); // newest escalations first, above the worker list
+}
+
+// Normalize the free-form `what` text of an escalation into a stable reason
+// string, so repeated escalations with the same root cause (but different pids,
+// PR numbers, issue numbers, or log tails) map to one dedup key. The first line
+// is the reason; variable parts are placeholdered; multi-line log tails and
+// delete commands are dropped (they vary per occurrence).
+export function escalationReason(what) {
+  if (!what) return "";
+  let s = String(what).split("\n")[0].trim();
+  s = s.replace(/agent\/issue-\d+/g, "agent/issue-N");
+  s = s.replace(/\bpid \d+\b/g, "pid N");
+  s = s.replace(/PR #\d+/g, "PR #N");
+  s = s.replace(/issue #\d+/gi, "issue #N");
+  s = s.replace(/\(\d+ attempts\)/g, "(N attempts)");
+  s = s.replace(/adapter "[^"]*"/g, 'adapter "…"');
+  s = s.replace(/resume spawn failed:.*/, "resume spawn failed");
+  s = s.replace(/Delete it[^:]*:.*$/, "").trim();
+  s = s.replace(/tried \d+ adapter\(s\):.*$/, "tried N adapter(s)");
+  s = s.replace(/\.?\s*Log tail:?\s*$/, "").trim();
+  return s;
+}
+
+// Group escalations by (issue, reason), counting occurrences. The input is
+// newest-first (from parseEscalations); the first block seen for a key is the
+// newest, so its ts/what/action/logFile are kept as the group's display data.
+// Returns a new array with an added `reason` and `occurrences` count per block.
+export function dedupEscalations(blocks) {
+  const map = new Map();
+  for (const b of blocks) {
+    const reason = escalationReason(b.what);
+    const key = `${b.issue}\t${reason}`;
+    if (!map.has(key)) {
+      map.set(key, { ...b, reason, occurrences: 1 });
+    } else {
+      map.get(key).occurrences += 1;
+    }
+  }
+  return [...map.values()];
+}
+
+// Mark each escalation as resolved or unresolved based on the current state
+// file and the set of closed issue numbers. Resolution is derived state — the
+// append-only log is never rewritten.
+// - A stale-claim escalation is resolved when its ref no longer exists (the
+//   survey removes the sentinel from the state file when the ref is gone).
+// - A PR-concluded escalation is resolved when the issue has since closed.
+// - Other escalation types default to unresolved (the dashboard cannot derive
+//   their resolution from the state file alone).
+export function resolveEscalations(blocks, { state, closedIssues = new Set() } = {}) {
+  return blocks.map((b) => {
+    const entry = state && state[String(b.issue)];
+    let resolved = false;
+    if (/stale claim ref/.test(b.what)) {
+      resolved = !entry || entry.status !== STALE_CLAIM_STATUS;
+    } else if (/is no longer open/.test(b.what)) {
+      resolved = closedIssues.has(b.issue);
+    }
+    return { ...b, resolved };
+  });
+}
+
+// The dashboard shows all unresolved escalations plus at most this many of the
+// most recent resolved ones, so a long history of handled problems never buries
+// live alerts.
+export const MAX_RESOLVED_SHOWN = 5;
+
+// Keep all unresolved escalations plus at most `maxResolved` of the most recent
+// resolved ones. Input is newest-first; output preserves that order.
+export function limitEscalations(blocks, maxResolved = MAX_RESOLVED_SHOWN) {
+  const out = [];
+  let resolvedCount = 0;
+  for (const b of blocks) {
+    if (!b.resolved) {
+      out.push(b);
+    } else if (resolvedCount < maxResolved) {
+      out.push(b);
+      resolvedCount++;
+    }
+  }
+  return out;
 }
 
 // --- derivations (pure) ------------------------------------------------------
@@ -242,48 +323,62 @@ export function groupWorkers(workers) {
 
 const pexec = promisify(execFile);
 
-// Fetch a single issue's title from GitHub via `gh`. Returns the title string,
-// or null on any failure (gh missing, network error, 404). Never throws — a
-// title that cannot be fetched degrades to a placeholder, not a broken row.
+// Fetch a single issue's title and state from GitHub via `gh`. Returns an
+// object { title, state } where state is "OPEN" or "CLOSED"; both are null on
+// any failure (gh missing, network error, 404). Never throws — a title that
+// cannot be fetched degrades to a placeholder, not a broken row. The state
+// field feeds escalation resolution (a PR-concluded escalation whose issue has
+// since closed is resolved, not an open alert).
 export async function defaultFetchTitle(issue, repoSlug) {
+  const jq = "{title:.title,state:.state}";
   const args = repoSlug
-    ? ["issue", "view", String(issue), "--repo", repoSlug, "--json", "title", "--jq", ".title"]
-    : ["issue", "view", String(issue), "--json", "title", "--jq", ".title"];
+    ? ["issue", "view", String(issue), "--repo", repoSlug, "--json", "title,state", "--jq", jq]
+    : ["issue", "view", String(issue), "--json", "title,state", "--jq", jq];
   try {
     const { stdout } = await pexec("gh", args);
-    const title = stdout.trim();
-    return title || null;
+    const parsed = JSON.parse(stdout);
+    return { title: parsed.title || null, state: parsed.state || null };
   } catch {
-    return null;
+    return { title: null, state: null };
   }
 }
 
 // A per-server title cache so `gh` is called at most once per issue — never on
 // every poll. `ensure` starts an async fetch if the issue is new (idempotent —
 // a pending or resolved entry is never re-fetched); `get` returns the title
-// string, null (fetch failed), or undefined (not yet resolved). The snapshot
-// picks up the title on the next poll after the fetch resolves, and the
-// change-key pushes it to the browser via SSE.
+// string, null (fetch failed), or undefined (not yet resolved). `getState`
+// returns the issue state ("OPEN"/"CLOSED") the same way. The snapshot picks
+// up the title on the next poll after the fetch resolves, and the change-key
+// pushes it to the browser via SSE. Supports both string returns (title only,
+// backwards compat with older fetchTitle mocks) and { title, state } objects.
 export function createTitleCache({ fetchTitle = defaultFetchTitle, log = () => {} } = {}) {
-  const cache = new Map(); // issue number -> { title: string | null | undefined, state: "pending" | "resolved" }
+  const cache = new Map(); // issue number -> { title, issueState, done }
 
   return {
     ensure(issue, repoSlug) {
       const n = Number(issue);
       if (cache.has(n)) return;
-      cache.set(n, { title: undefined, state: "pending" });
+      cache.set(n, { title: undefined, issueState: undefined, done: false });
       Promise.resolve()
         .then(() => fetchTitle(n, repoSlug))
-        .then((title) => {
-          cache.set(n, { title: title ?? null, state: "resolved" });
+        .then((result) => {
+          if (typeof result === "string" || result == null) {
+            cache.set(n, { title: result ?? null, issueState: null, done: true });
+          } else {
+            cache.set(n, { title: result.title ?? null, issueState: result.state ?? null, done: true });
+          }
         })
         .catch(() => {
-          cache.set(n, { title: null, state: "resolved" });
+          cache.set(n, { title: null, issueState: null, done: true });
         });
     },
     get(issue) {
       const entry = cache.get(Number(issue));
       return entry ? entry.title : undefined;
+    },
+    getState(issue) {
+      const entry = cache.get(Number(issue));
+      return entry ? entry.issueState : undefined;
     },
   };
 }
@@ -292,7 +387,10 @@ export function createTitleCache({ fetchTitle = defaultFetchTitle, log = () => {
 // missing state/events/escalations yield an empty snapshot carrying `hint`.
 // When a titleCache is provided, each worker row carries an issueTitle (the
 // cached title, or null while pending/failed) and the title fetch is triggered
-// at most once per issue.
+// at most once per issue. Escalations are deduplicated (same issue + same
+// reason → one block with an occurrence count), resolved (stale-claim with no
+// sentinel, PR-concluded with a closed issue → visually de-emphasised), and
+// capped (all unresolved plus at most MAX_RESOLVED_SHOWN recent resolved ones).
 export function readSnapshot({
   statePath = STATE_FILE,
   eventsPath = EVENTS_FILE,
@@ -304,14 +402,30 @@ export function readSnapshot({
 } = {}) {
   const state = readState(statePath);
   const events = readEvents(eventsPath);
-  const escalations = parseEscalations(escalationsPath);
+  const rawEscalations = parseEscalations(escalationsPath);
   const workers = buildWorkers({ state, events, config, now, repoSlug });
+  const closedIssues = new Set();
   if (titleCache) {
     for (const w of workers) {
       titleCache.ensure(w.issue, repoSlug);
       w.issueTitle = titleCache.get(w.issue) ?? null;
+      const issueState = titleCache.getState(w.issue);
+      if (issueState === "CLOSED") closedIssues.add(w.issue);
+    }
+    // Also ensure titles/states for issues that appear only in escalations,
+    // so their resolution can be derived from the issue's open/closed state.
+    for (const esc of rawEscalations) {
+      titleCache.ensure(esc.issue, repoSlug);
+      const issueState = titleCache.getState(esc.issue);
+      if (issueState === "CLOSED") closedIssues.add(esc.issue);
     }
   }
+  const escalations = limitEscalations(
+    resolveEscalations(
+      dedupEscalations(rawEscalations),
+      { state, closedIssues },
+    ),
+  );
   const hint = workers.length === 0 && escalations.length === 0 ? EMPTY_HINT : null;
   return { workers, escalations, hint };
 }
@@ -564,9 +678,12 @@ export const PAGE_HTML = `<!doctype html>
   .errpanel-head .errclose:hover { background:color-mix(in srgb, var(--fg) 10%, transparent); }
   .escalations { padding:10px 14px; }
   .esc { border:1px solid var(--over); border-left-width:4px; border-radius:6px; padding:10px 14px; margin-bottom:8px; }
+  .esc.resolved { border-color:var(--line); opacity:0.6; }
+  .esc.resolved .top { font-weight:normal; }
   .esc .top { font-weight:600; }
   .esc .what { margin:4px 0; }
   .esc .meta { color:var(--muted); font-size:12px; }
+  .esc .occurrences { display:inline-block; background:var(--card); border:1px solid var(--line); border-radius:10px; padding:0 7px; font-size:11px; font-weight:600; color:var(--muted); margin-left:6px; }
   table { width:100%; border-collapse:collapse; background:var(--card); border:1px solid var(--line); border-radius:6px; overflow:hidden; }
   th, td { text-align:left; padding:8px 12px; border-bottom:1px solid var(--line); }
   th { font-size:12px; text-transform:uppercase; letter-spacing:.03em; color:var(--muted); }
@@ -676,15 +793,17 @@ export const PAGE_HTML = `<!doctype html>
   function renderEscalations() {
     const el = $("escalations");
     if (!snapshot.escalations.length) { el.innerHTML = '<div class="empty">No errors.</div>'; return; }
-    el.innerHTML = snapshot.escalations.map((e) =>
-      '<div class="esc"><div class="top">issue #' + esc(e.issue) + "</div>" +
-      '<div class="what">' + esc(e.what) + "</div>" +
-      '<div class="meta">' + esc(e.ts) + (e.action ? " · " + esc(e.action) : "") + "</div></div>"
-    ).join("");
+    el.innerHTML = snapshot.escalations.map((e) => {
+      const cls = e.resolved ? "esc resolved" : "esc";
+      const count = e.occurrences > 1 ? ' <span class="occurrences">' + e.occurrences + "×</span>" : "";
+      return '<div class="' + cls + '"><div class="top">issue #' + esc(e.issue) + count + "</div>" +
+        '<div class="what">' + esc(e.what) + "</div>" +
+        '<div class="meta">' + esc(e.ts) + (e.action ? " · " + esc(e.action) : "") + "</div></div>";
+    }).join("");
   }
 
   function renderErrToggle() {
-    const count = snapshot.escalations.length;
+    const count = snapshot.escalations.filter((e) => !e.resolved).length;
     const badge = $("errcount");
     badge.textContent = String(count);
     badge.classList.toggle("zero", count === 0);
