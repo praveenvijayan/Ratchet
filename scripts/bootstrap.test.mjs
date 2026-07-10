@@ -62,7 +62,7 @@ function run(host, args, remote) {
 }
 const noStack = (out) => assert.ok(!/\bat\s+\S+:\d+/.test(out), "no stack trace in output");
 
-// Standard release used by most tests: core + watcher framework, plus excluded.
+// Standard release used by most tests: core + watcher framework, plus excluded and generated.
 const STD = {
   manifest: {
     profiles: { core: "base", watcher: "watch" },
@@ -70,6 +70,13 @@ const STD = {
       { path: "AGENTS.md", class: "framework", profile: "core" },
       { path: "scripts/plan-sync.mjs", class: "framework", profile: "core" },
       { path: "scripts/ratchet-watch.sh", class: "framework", profile: "watcher" },
+      { path: "plan/README.md", class: "framework", profile: "core" },
+      { path: "GATES.md", class: "generated" },
+      { path: "memory", class: "generated" },
+      { path: ".env.example", class: "generated" },
+      { path: ".ratchet-version", class: "generated" },
+      { path: ".claude/skills", class: "generated" },
+      { path: "plugin/skills", class: "generated" },
       { path: "DOCS.md", class: "excluded" },
       { path: "scripts/foo.test.mjs", class: "excluded" },
       { path: "plan", class: "excluded" },
@@ -79,6 +86,7 @@ const STD = {
     "AGENTS.md": "MANUAL\n",
     "scripts/plan-sync.mjs": "// plan-sync\n",
     "scripts/ratchet-watch.sh": "# watch\n",
+    "plan/README.md": "# plan/README.md\n",
     "DOCS.md": "docs\n",
     "scripts/foo.test.mjs": "// test\n",
     "plan/idea.md": "idea\n",
@@ -96,7 +104,7 @@ const STD = {
   assert.ok(existsSync(join(host, "scripts/plan-sync.mjs")), "installs a core framework script");
   assert.equal(readFileSync(join(host, ".ratchet-version"), "utf8").trim(), "9.9.9", "normalizes the pinned version");
   const inst = JSON.parse(readFileSync(join(host, ".ratchet-install.json"), "utf8"));
-  assert.deepEqual(inst.installed.sort(), ["AGENTS.md", "scripts/plan-sync.mjs"], "records exactly what it installed");
+  assert.deepEqual(inst.installed.sort(), ["AGENTS.md", "plan/README.md", "scripts/plan-sync.mjs"], "records exactly what it installed");
   assert.ok(inst.profiles.includes("core"), "records the profile");
   assert.ok(r.out.includes("/ratchet-init"), "prints /ratchet-init in the next steps");
   assert.ok(!existsSync(join(host, "scripts/ratchet-watch.sh")), "an unselected profile's files are not installed");
@@ -107,7 +115,7 @@ const STD = {
   const host = makeHost();
   const r = run(host, ["--version", "v9.9.9"], makeRelease(STD));
   assert.equal(r.status, 0, r.out);
-  for (const p of ["DOCS.md", "scripts/foo.test.mjs", "plan/idea.md", "plan"]) {
+  for (const p of ["DOCS.md", "scripts/foo.test.mjs", "plan/idea.md"]) {
     assert.ok(!existsSync(join(host, p)), `excluded path must be absent: ${p}`);
   }
 }
@@ -198,14 +206,87 @@ const STD = {
   assert.ok(inst.installed.includes("scripts/ratchet-watch.sh"), "selecting a profile adds its files atop core");
 }
 
+// --- Criterion 10: scaffolded files have template content, none of Ratchet's own ---
+{
+  const release = makeRelease(STD);
+  const host = makeHost();
+  const r = run(host, ["--version", "v9.9.9"], release);
+  assert.equal(r.status, 0, r.out);
+
+  // GATES.md has TODO placeholders, not Ratchet's actual gate commands
+  const gates = readFileSync(join(host, "GATES.md"), "utf8");
+  assert.ok(gates.includes("TODO: format command"), "GATES.md has TODO format placeholder");
+  assert.ok(gates.includes("TODO: test command"), "GATES.md has TODO test placeholder");
+  assert.ok(!gates.includes("node scripts/plan-sync.test.mjs"), "GATES.md has no Ratchet-specific test gate");
+  assert.ok(!gates.includes("node scripts/bootstrap.test.mjs"), "GATES.md has no Ratchet-specific test gate");
+
+  // memory/ files exist with clean scaffolds
+  assert.ok(existsSync(join(host, "memory/USER.md")), "memory/USER.md scaffolded");
+  assert.ok(existsSync(join(host, "memory/MEMORY.md")), "memory/MEMORY.md scaffolded");
+  assert.ok(existsSync(join(host, "memory/ARCHITECTURE.md")), "memory/ARCHITECTURE.md scaffolded");
+  const mem = readFileSync(join(host, "memory/MEMORY.md"), "utf8");
+  assert.ok(!mem.includes("Architecture & decisions"), "MEMORY.md has no Ratchet project memory content");
+
+  // .env.example scaffolded
+  assert.ok(existsSync(join(host, ".env.example")), ".env.example scaffolded");
+  const env = readFileSync(join(host, ".env.example"), "utf8");
+  assert.ok(env.includes("GITHUB_PAT="), ".env.example has PAT template");
+}
+
+// --- Criterion 11: plan/ contains only plan/README.md, no Ratchet plan files ---
+{
+  const release = makeRelease(STD);
+  const host = makeHost();
+  const r = run(host, ["--version", "v9.9.9"], release);
+  assert.equal(r.status, 0, r.out);
+
+  assert.ok(existsSync(join(host, "plan/README.md")), "plan/README.md exists (framework)");
+  assert.ok(!existsSync(join(host, "plan/idea.md")), "Ratchet plan file is absent");
+  assert.ok(!existsSync(join(host, "plan/done")), "plan/done/ is absent");
+  assert.ok(!existsSync(join(host, "plan/examples")), "plan/examples/ is absent");
+}
+
+// --- Criterion 12: existing generated file is left unchanged and reported as skipped ---
+{
+  const release = makeRelease(STD);
+  const host = makeHost();
+  const hostGates = "<!-- HOST OWNED GATES -->\n\n# My Gates\n\n| Order | Gate | Command | Pass condition |\n|-------|------|---------|----------------|\n| 1 | format | cargo fmt --check | -- |\n";
+  write(host, "GATES.md", hostGates);
+  const r = run(host, ["--version", "v9.9.9"], release);
+  assert.equal(r.status, 0, r.out);
+  assert.ok(/skipped.*already exists.*GATES\.md/i.test(r.out), "reports GATES.md as skipped (already exists)");
+  assert.equal(readFileSync(join(host, "GATES.md"), "utf8"), hostGates, "existing GATES.md is byte-for-byte unchanged");
+
+  const inst = JSON.parse(readFileSync(join(host, ".ratchet-install.json"), "utf8"));
+  assert.ok(!inst.generated.includes("GATES.md"), "GATES.md is not in generated list when skipped");
+}
+
+// --- Criterion 13: install manifest records scaffolded files as generated ---
+{
+  const release = makeRelease(STD);
+  const host = makeHost();
+  const r = run(host, ["--version", "v9.9.9"], release);
+  assert.equal(r.status, 0, r.out);
+
+  const inst = JSON.parse(readFileSync(join(host, ".ratchet-install.json"), "utf8"));
+  assert.ok(Array.isArray(inst.generated), "manifest has a generated array");
+  assert.ok(inst.generated.includes("GATES.md"), "GATES.md is in generated");
+  assert.ok(inst.generated.includes("memory"), "memory is in generated");
+  assert.ok(inst.generated.includes(".env.example"), ".env.example is in generated");
+  assert.ok(Array.isArray(inst.installed), "manifest has an installed array");
+  assert.ok(!inst.installed.includes("GATES.md"), "GATES.md is not in installed (framework)");
+  assert.ok(!inst.installed.includes("memory"), "memory is not in installed (framework)");
+  assert.ok(!inst.installed.includes(".env.example"), ".env.example is not in installed (framework)");
+}
+
 // --- Meta: exactly one test block per functional criterion ------------------
 {
   const src = readFileSync(SELF, "utf8");
-  for (let n = 1; n <= 9; n++) {
+  for (let n = 1; n <= 13; n++) {
     const hits = src.match(new RegExp(`--- Criterion ${n}:`, "g")) || [];
     assert.equal(hits.length, 1, `expected exactly one "Criterion ${n}" block, found ${hits.length}`);
   }
 }
 
 for (const d of dirs) rmSync(d, { recursive: true, force: true });
-console.log("PASS bootstrap.test.mjs (9 criteria, end-to-end)");
+console.log("PASS bootstrap.test.mjs (13 criteria, end-to-end)");
