@@ -17,11 +17,15 @@ import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import {
   listSkills,
   skillsMissingOpenaiPolicy,
   mirrorMismatches,
   parityProblems,
+  mentionedSkills,
+  readPluginDescriptions,
+  descriptionProblems,
 } from "./skill-parity.mjs";
 
 // fileURLToPath (not url.pathname) so a repo path containing spaces resolves to
@@ -166,4 +170,113 @@ const consistent = (body = "# skill\n") => ({
   assert.ok(/carry their Codex policy/i.test(out), "the guard reports the skills it verified");
 }
 
-console.log("PASS skill-parity.test.mjs (3 criteria, guard verified against repo and fixtures)");
+// --- #261 Criterion 1: plugin.json no longer names a stale subset of skills
+{
+  const skills = listSkills(canonicalRepo);
+  assert.ok(skills.length >= 3, "sanity: the real repo ships more than a handful of skills");
+  const locations = readPluginDescriptions();
+  const pluginEntry = locations.find((l) => l.file.endsWith("plugin.json"));
+  const mentioned = mentionedSkills(pluginEntry.description, skills);
+  assert.ok(
+    mentioned.length === 0 || mentioned.length === skills.length,
+    `plugin.json must name no skills or every skill, not a stale subset; mentions: ${mentioned}`,
+  );
+  assert.deepEqual(descriptionProblems(skills, locations), [], "the real repo's descriptions must be clean");
+}
+
+// --- #261 Criterion 2: marketplace.json entry is consistent with plugin.json
+{
+  const skills = listSkills(canonicalRepo);
+  const locations = readPluginDescriptions();
+  const distinct = new Set(locations.map((l) => l.description));
+  assert.equal(distinct.size, 1, "plugin.json and marketplace.json descriptions must be identical");
+
+  const green = spawnSync("node", [GUARD], { encoding: "utf8", cwd: repoRoot });
+  assert.equal(green.status, 0, `the real repo tree must pass the guard, got: ${green.out || green.stderr}`);
+}
+
+// --- #261 Criterion 3: a stale-subset description fails the gate, naming the
+// offending file and the skill(s) it leaves out; a full enumeration or a
+// generic description both pass; disagreeing descriptions fail too.
+{
+  const fixtures = [];
+  const makeFixture = ({ skills, pluginDescription, marketplaceDescription }) => {
+    const dir = mkdtempSync(join(tmpdir(), "skill-parity-desc-"));
+    fixtures.push(dir);
+    for (const skill of skills) mkdirSync(join(dir, "agents-skills", skill, "agents"), { recursive: true });
+    for (const skill of skills) writeFileSync(join(dir, "agents-skills", skill, "agents", "openai.yaml"), "policy\n");
+    for (const skill of skills) writeFileSync(join(dir, "agents-skills", skill, "SKILL.md"), `# ${skill}\n`);
+    mkdirSync(join(dir, "plugin", ".claude-plugin"), { recursive: true });
+    writeFileSync(
+      join(dir, "plugin", ".claude-plugin", "plugin.json"),
+      JSON.stringify({ name: "ratchet", description: pluginDescription }, null, 2) + "\n",
+    );
+    mkdirSync(join(dir, ".claude-plugin"), { recursive: true });
+    writeFileSync(
+      join(dir, ".claude-plugin", "marketplace.json"),
+      JSON.stringify(
+        { name: "ratchet", plugins: [{ name: "ratchet", source: "./plugin", description: marketplaceDescription }] },
+        null,
+        2,
+      ) + "\n",
+    );
+    return dir;
+  };
+  const runGuardIn = (dir) =>
+    spawnSync("node", [GUARD], {
+      encoding: "utf8",
+      cwd: dir,
+      env: { ...process.env, CANONICAL_DIR: join(dir, "agents-skills"), CLAUDE_SKILLS_DIR: join(dir, "agents-skills"), PLUGIN_SKILLS_DIR: join(dir, "agents-skills") },
+    });
+
+  const staleDir = makeFixture({
+    skills: ["ratchet-plan", "ratchet-sync", "ratchet-init", "ratchet-map"],
+    pluginDescription: "Ratchet: ratchet-plan, ratchet-sync, and ratchet-init skills.",
+    marketplaceDescription: "Ratchet: ratchet-plan, ratchet-sync, and ratchet-init skills.",
+  });
+  const staleLocations = readPluginDescriptions({
+    pluginJsonPath: join(staleDir, "plugin", ".claude-plugin", "plugin.json"),
+    marketplaceJsonPath: join(staleDir, ".claude-plugin", "marketplace.json"),
+  });
+  const staleProblems = descriptionProblems(["ratchet-plan", "ratchet-sync", "ratchet-init", "ratchet-map"], staleLocations);
+  assert.equal(staleProblems.length, 2, "both files name the same stale 3-of-4 subset, one problem per file");
+  assert.ok(staleProblems.every((p) => p.includes("ratchet-map")), "names the skill left out");
+
+  const staleRed = runGuardIn(staleDir);
+  assert.notEqual(staleRed.status, 0, "a stale-subset description must fail the guard");
+  assert.ok((staleRed.stdout + staleRed.stderr).includes("ratchet-map"), "the guard names the missing skill");
+
+  const fullDir = makeFixture({
+    skills: ["ratchet-plan", "ratchet-sync", "ratchet-init"],
+    pluginDescription: "Ratchet: ratchet-plan, ratchet-sync, and ratchet-init skills.",
+    marketplaceDescription: "Ratchet: ratchet-plan, ratchet-sync, and ratchet-init skills.",
+  });
+  assert.equal(runGuardIn(fullDir).status, 0, "naming every skill is a valid, non-stale enumeration");
+
+  const genericDir = makeFixture({
+    skills: ["ratchet-plan", "ratchet-sync", "ratchet-init"],
+    pluginDescription: "Ratchet: the full skill set for the delivery loop.",
+    marketplaceDescription: "Ratchet: the full skill set for the delivery loop.",
+  });
+  assert.equal(runGuardIn(genericDir).status, 0, "a generic description mentioning no skill names must pass");
+
+  const mismatchDir = makeFixture({
+    skills: ["ratchet-plan"],
+    pluginDescription: "Ratchet: the full skill set.",
+    marketplaceDescription: "Ratchet: a different description.",
+  });
+  assert.notEqual(runGuardIn(mismatchDir).status, 0, "disagreeing descriptions must fail the guard");
+
+  for (const dir of fixtures) rmSync(dir, { recursive: true, force: true });
+}
+
+// --- #261 Criterion 4: each criterion above has exactly one test (meta) ---
+{
+  const self = readFileSync(fileURLToPath(import.meta.url), "utf8");
+  for (let n = 1; n <= 4; n++) {
+    const hits = (self.match(new RegExp(`--- #261 Criterion ${n}:`, "g")) || []).length;
+    assert.equal(hits, 1, `expected exactly one "#261 Criterion ${n}" test block, found ${hits}`);
+  }
+}
+
+console.log("PASS skill-parity.test.mjs (3 skill-parity criteria + 4 #261 plugin-description criteria)");
