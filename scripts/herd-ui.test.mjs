@@ -20,6 +20,9 @@ import {
   readEvents,
   parseEscalations,
   latestClaimTs,
+  isUsageBearing,
+  latestUsage,
+  fleetUsage,
   prUrl,
   resolveRepoSlug,
   buildWorkers,
@@ -845,6 +848,172 @@ await inTempDir(async (dir) => {
   for (let n = 1; n <= criteriaCount; n++) assert.ok(unique.has(n), `#179 criterion ${n} has a test`);
 }
 
+// --- #164 Criterion 1: each worker row shows its costUsd, tokensIn, and
+// tokensOut from the latest usage-bearing event for that issue. ----------------
+{
+  // Pure derivation: the newest usage-bearing event wins over an older one, and
+  // a non-usage event (dispatch) never shadows the usage reading.
+  assert.equal(isUsageBearing({ event: "dispatch", issue: 1 }), false, "an event with no usage field is not usage-bearing");
+  assert.equal(isUsageBearing({ event: "worker-exit", issue: 1, costUsd: 0.5 }), true, "an event carrying a usage field is usage-bearing");
+  const events = [
+    { ts: "2026-07-09T12:00:00.000Z", event: "dispatch", issue: 7 },
+    { ts: "2026-07-09T12:01:00.000Z", event: "worker-exit", issue: 7, costUsd: 0.1, tokensIn: 100, tokensOut: 50 },
+    { ts: "2026-07-09T12:05:00.000Z", event: "worker-exit", issue: 7, costUsd: 0.42, tokensIn: 900, tokensOut: 300 },
+    { ts: "2026-07-09T12:03:00.000Z", event: "worker-exit", issue: 8, costUsd: 9.9, tokensIn: 1, tokensOut: 2 },
+  ];
+  assert.deepEqual(latestUsage(events, 7), { costUsd: 0.42, tokensIn: 900, tokensOut: 300 }, "the most recent usage-bearing event's numbers win");
+  assert.equal(latestUsage(events, 999), null, "an issue with no usage-bearing event yields null");
+}
+await inTempDir(async (dir) => {
+  const statePath = join(dir, "s.json");
+  const eventsPath = join(dir, "e.jsonl");
+  const escalationsPath = join(dir, "esc.md");
+  writeFileSync(statePath, JSON.stringify({ 7: { adapter: "claude", pid: 1, attempts: 0, status: "working", pr: null } }));
+  writeFileSync(eventsPath,
+    JSON.stringify({ ts: "2026-07-09T12:01:00.000Z", event: "worker-exit", issue: 7, costUsd: 0.1, tokensIn: 100, tokensOut: 50 }) + "\n" +
+    JSON.stringify({ ts: "2026-07-09T12:05:00.000Z", event: "worker-exit", issue: 7, costUsd: 0.42, tokensIn: 900, tokensOut: 300 }) + "\n");
+  writeFileSync(escalationsPath, "");
+  const snap = readSnapshot({ statePath, eventsPath, escalationsPath, config: CONFIG, now: NOW });
+  const row = snap.workers.find((w) => w.issue === 7);
+  assert.equal(row.costUsd, 0.42, "the row carries the latest event's cost");
+  assert.equal(row.tokensIn, 900, "the row carries the latest event's tokensIn");
+  assert.equal(row.tokensOut, 300, "the row carries the latest event's tokensOut");
+  await withServer({ statePath, eventsPath, escalationsPath }, async (base) => {
+    const page = (await fetchText(`${base}/`)).body;
+    assert.match(page, /<th>Cost<\/th><th>Tokens in<\/th><th>Tokens out<\/th>/, "the table header carries the three usage columns");
+    assert.match(page, /usdCell\(w\.costUsd\)/, "the row renders the cost cell from the row's costUsd");
+    assert.match(page, /tokCell\(w\.tokensIn\)/, "the row renders the tokens-in cell from the row's tokensIn");
+    assert.match(page, /tokCell\(w\.tokensOut\)/, "the row renders the tokens-out cell from the row's tokensOut");
+  });
+});
+
+// --- #164 Criterion 2: a header line shows the fleet totals — summed cost and
+// summed tokens across all workers with usage data. ----------------------------
+{
+  const totals = fleetUsage([
+    { costUsd: 0.5, tokensIn: 100, tokensOut: 40 },
+    { costUsd: 1.25, tokensIn: 900, tokensOut: 60 },
+    { costUsd: null, tokensIn: null, tokensOut: null }, // a worker with no usage adds nothing
+  ]);
+  assert.deepEqual(totals, { costUsd: 1.75, tokensIn: 1000, tokensOut: 100 }, "totals sum only finite values across workers");
+  assert.deepEqual(fleetUsage([{ costUsd: null, tokensIn: null, tokensOut: null }]), { costUsd: null, tokensIn: null, tokensOut: null }, "no usage anywhere leaves every total null (renders as —, not 0)");
+}
+await inTempDir(async (dir) => {
+  const statePath = join(dir, "s.json");
+  const eventsPath = join(dir, "e.jsonl");
+  const escalationsPath = join(dir, "esc.md");
+  writeFileSync(statePath, JSON.stringify({
+    7: { adapter: "claude", pid: null, attempts: 0, status: "dead", pr: null },
+    8: { adapter: "codex", pid: null, attempts: 0, status: "dead", pr: null },
+  }));
+  writeFileSync(eventsPath,
+    JSON.stringify({ ts: "2026-07-09T12:05:00.000Z", event: "worker-exit", issue: 7, costUsd: 0.5, tokensIn: 100, tokensOut: 40 }) + "\n" +
+    JSON.stringify({ ts: "2026-07-09T12:06:00.000Z", event: "worker-exit", issue: 8, costUsd: 1.25, tokensIn: 900, tokensOut: 60 }) + "\n");
+  writeFileSync(escalationsPath, "");
+  const snap = readSnapshot({ statePath, eventsPath, escalationsPath, config: CONFIG, now: NOW });
+  assert.deepEqual(snap.totals, { costUsd: 1.75, tokensIn: 1000, tokensOut: 100 }, "the snapshot carries the fleet totals for the header");
+  await withServer({ statePath, eventsPath, escalationsPath }, async (base) => {
+    const page = (await fetchText(`${base}/`)).body;
+    assert.match(page, /id="fleettotals"/, "the header carries a fleet-totals element");
+    assert.match(page, /"Fleet: " \+ usdText\(t\.costUsd\) \+ " · " \+ tokText\(t\.tokensIn\) \+ " in · " \+ tokText\(t\.tokensOut\) \+ " out"/, "the header line sums cost and tokens from snapshot.totals");
+  });
+});
+
+// --- #164 Criterion 3: a worker whose events carry no usage renders a —
+// placeholder in each usage cell, never a blank, NaN, or undefined. ------------
+{
+  // A declared-but-unreadable usage (keys present, valued null) is usage-bearing
+  // but every field normalises to null, so each cell still shows a placeholder.
+  const unreadable = latestUsage([{ ts: "2026-07-09T12:05:00.000Z", event: "worker-exit", issue: 3, costUsd: null, tokensIn: null, tokensOut: null }], 3);
+  assert.deepEqual(unreadable, { costUsd: null, tokensIn: null, tokensOut: null }, "an unreadable-usage event yields all-null, never NaN/undefined");
+}
+await inTempDir(async (dir) => {
+  const statePath = join(dir, "s.json");
+  const eventsPath = join(dir, "e.jsonl");
+  const escalationsPath = join(dir, "esc.md");
+  // Issue 5 has no usage event at all; issue 6 has an unreadable (null) usage.
+  writeFileSync(statePath, JSON.stringify({
+    5: { adapter: "plain", pid: null, attempts: 0, status: "dead", pr: null },
+    6: { adapter: "claude", pid: null, attempts: 0, status: "dead", pr: null },
+  }));
+  writeFileSync(eventsPath,
+    JSON.stringify({ ts: "2026-07-09T12:04:00.000Z", event: "worker-exit", issue: 6, costUsd: null, tokensIn: null, tokensOut: null }) + "\n");
+  writeFileSync(escalationsPath, "");
+  const snap = readSnapshot({ statePath, eventsPath, escalationsPath, config: CONFIG, now: NOW });
+  for (const issue of [5, 6]) {
+    const row = snap.workers.find((w) => w.issue === issue);
+    for (const f of ["costUsd", "tokensIn", "tokensOut"]) {
+      assert.equal(row[f], null, `issue #${issue} ${f} is null (rendered as a placeholder), never NaN/undefined`);
+      assert.ok(!Number.isNaN(row[f]), `issue #${issue} ${f} is not NaN`);
+    }
+  }
+  assert.deepEqual(snap.totals, { costUsd: null, tokensIn: null, tokensOut: null }, "no finite usage anywhere leaves totals null, so the header hides");
+  await withServer({ statePath, eventsPath, escalationsPath }, async (base) => {
+    const page = (await fetchText(`${base}/`)).body;
+    // The cell formatters fall back to the muted em-dash span for a null value.
+    assert.match(page, /usdCell = \(n\) => isNum\(n\) \? usdText\(n\) : '<span class="empty">—<\/span>'/, "a null cost cell renders the — placeholder span, never blank");
+    assert.match(page, /tokCell = \(n\) => isNum\(n\) \? tokText\(n\) : '<span class="empty">—<\/span>'/, "a null token cell renders the — placeholder span, never blank");
+    assert.match(page, /const isNum = \(n\) => typeof n === "number" && isFinite\(n\)/, "cells guard on a finite number, so NaN/undefined never reach the DOM");
+  });
+});
+
+// --- #164 Criterion 4: usage figures update live from new events without a
+// manual page reload, consistent with the rest of the dashboard. ---------------
+await inTempDir(async (dir) => {
+  const statePath = join(dir, "s.json");
+  const eventsPath = join(dir, "e.jsonl");
+  const escalationsPath = join(dir, "esc.md");
+  writeFileSync(statePath, JSON.stringify({ 7: { adapter: "claude", pid: 1, attempts: 0, status: "working", pr: null } }));
+  writeFileSync(eventsPath, "");
+  writeFileSync(escalationsPath, "");
+
+  // A new usage event changes the clock-independent stream key, so the live
+  // stream re-pushes — the mechanism by which the page updates without a reload.
+  const before = readSnapshot({ statePath, eventsPath, escalationsPath, config: CONFIG, now: NOW });
+  assert.equal(before.workers[0].costUsd, null, "the row starts with no usage");
+  appendFileSync(eventsPath, JSON.stringify({ ts: "2026-07-09T12:07:00.000Z", event: "worker-exit", issue: 7, costUsd: 0.9, tokensIn: 500, tokensOut: 200 }) + "\n");
+  const after = readSnapshot({ statePath, eventsPath, escalationsPath, config: CONFIG, now: NOW });
+  assert.equal(after.workers[0].costUsd, 0.9, "the row picks up the new usage on the next snapshot");
+  assert.notEqual(snapshotKey(before), snapshotKey(after), "a new usage event alters the stream key, so the live stream re-pushes it");
+
+  // Over SSE: append a usage event after the first frame, confirm a later frame
+  // carries the usage without a reload.
+  writeFileSync(eventsPath, "");
+  await withServer({ statePath, eventsPath, escalationsPath }, async (base) => {
+    let appended = false;
+    const frames = await sseCollect(`${base}/api/stream`, (fr) => {
+      if (fr.length === 1 && !appended) {
+        appended = true;
+        appendFileSync(eventsPath, JSON.stringify({ ts: "2026-07-09T12:08:00.000Z", event: "worker-exit", issue: 7, costUsd: 0.9, tokensIn: 500, tokensOut: 200 }) + "\n");
+        return false;
+      }
+      return fr.length >= 2;
+    });
+    assert.equal(frames[0].data.workers[0].costUsd, null, "the first pushed frame has no usage");
+    const last = frames[frames.length - 1].data;
+    assert.equal(last.workers[0].costUsd, 0.9, "a later pushed frame carries the usage — no page reload");
+    assert.deepEqual(last.totals, { costUsd: 0.9, tokensIn: 500, tokensOut: 200 }, "the pushed frame's fleet totals reflect the new usage");
+  });
+});
+
+// --- #164 Criterion 5: every criterion above has exactly one test named after
+// it. --------------------------------------------------------------------------
+{
+  const selfPath = fileURLToPath(import.meta.url);
+  const selfText = readFileSync(selfPath, "utf8");
+  const planPath = join(dirname(selfPath), "..", "plan", "0076-herd-dashboard-usage-metrics.md");
+  const planText = readFileSync(planPath, "utf8");
+
+  const criteriaSection = /##\s+Acceptance criteria\s*([\s\S]*?)(?:\n##\s|$)/.exec(planText)[1];
+  const criteriaCount = (criteriaSection.match(/^-\s*\[[ x]\]/gim) || []).length;
+
+  const markers = [...selfText.matchAll(/^\/\/ --- #164 Criterion (\d+):/gim)].map((m) => Number(m[1]));
+  const unique = new Set(markers);
+  assert.equal(markers.length, unique.size, "each #164 criterion is tested exactly once (no duplicate markers)");
+  assert.equal(markers.length, criteriaCount, `one test per #164 acceptance criterion (${criteriaCount})`);
+  for (let n = 1; n <= criteriaCount; n++) assert.ok(unique.has(n), `#164 criterion ${n} has a test`);
+}
+
 // --- #176 Criterion 1: the supervisor appends a heartbeat event to the event
 // stream once per poll pass. ---------------------------------------------------
 await inTempDir(async (dir) => {
@@ -981,7 +1150,6 @@ await inTempDir(async (dir) => {
   for (let n = 1; n <= criteriaCount; n++) assert.ok(unique.has(n), `#176 criterion ${n} has a test`);
 }
 
-
 // --- #181 Criterion 1: a row with an open PR shows its combined checks status:
 // passing, failing, or pending. ----------------------------------------------
 await inTempDir(async (dir) => {
@@ -1116,4 +1284,4 @@ await inTempDir(async (dir) => {
 }
 
 
-console.log("PASS herd-ui.test.mjs (36 criteria)");
+console.log("PASS herd-ui.test.mjs (41 criteria)");
