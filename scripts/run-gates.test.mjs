@@ -16,6 +16,8 @@
 // Plus #89: a run with zero real gates exits non-zero (red) so it is
 // distinguishable in the PR checks list (AC1); a run with at least one real
 // gate keeps the normal green success presentation (AC2).
+// Plus #88: unrelated extra tables in GATES.md do not abort gate parsing (AC1);
+// malformed rows inside the gates table still fail loudly naming the row (AC2).
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -37,6 +39,19 @@ async function runGates(rows) {
   const summaryFile = join(dir, `summary-${n}.md`);
   n++;
   await writeFile(gatesFile, gatesTable(rows));
+  const res = spawnSync("node", [RUNNER], {
+    encoding: "utf8",
+    env: { ...process.env, GATES_FILE: gatesFile, GITHUB_STEP_SUMMARY: summaryFile },
+  });
+  const summary = await readFile(summaryFile, "utf8").catch(() => "");
+  return { status: res.status, out: (res.stdout || "") + (res.stderr || ""), summary };
+}
+
+async function runGatesText(text) {
+  const gatesFile = join(dir, `GATES-${n}.md`);
+  const summaryFile = join(dir, `summary-${n}.md`);
+  n++;
+  await writeFile(gatesFile, text);
   const res = spawnSync("node", [RUNNER], {
     encoding: "utf8",
     env: { ...process.env, GATES_FILE: gatesFile, GITHUB_STEP_SUMMARY: summaryFile },
@@ -202,6 +217,39 @@ const fail = "`node -e \"process.exit(3)\"`";
   assert.ok(/column/i.test(out), "the failure must explain the row's column count is ambiguous");
 }
 
+// --- #88 AC1: an unrelated table elsewhere in GATES.md is documentation, not
+// part of the gate table, so it must not abort parsing or block real gates ----
+{
+  const { status, out } = await runGatesText(`${gatesTable([
+    { order: 1, gate: "test", command: echo("GATES_TABLE_RAN") },
+  ])}
+## Troubleshooting
+
+| Symptom | Fix |
+|---------|-----|
+| foo | bar | baz |
+`);
+  assert.equal(status, 0, "an additional unrelated table must not abort the gate run");
+  assert.ok(out.includes("GATES_TABLE_RAN"), "the real gates table must still run normally");
+}
+
+// --- #88 AC2: malformed rows inside the gates table still fail loudly and
+// name the bad row, rather than being mistaken for unrelated documentation ----
+{
+  const { status, out } = await runGatesText([
+    "# Gates",
+    "",
+    "| Order | Gate | Command | Pass condition |",
+    "|-------|------|---------|----------------|",
+    "| 1 | test | node -e \"console.log(6*7)\" | tee log | — |",
+    "",
+  ].join("\n"));
+  assert.notEqual(status, 0, "a malformed row inside the gates table must fail the run");
+  assert.ok(/line 5/i.test(out), "the failure must name the malformed row's line");
+  assert.ok(out.includes("tee log"), "the failure must include the malformed row text");
+  assert.ok(!out.includes("42"), "the truncated command prefix must never be executed");
+}
+
 // --- #84 AC1: gates are judged by the base-branch GATES.md, not the PR's copy.
 // The PR softens its own gate to a no-op that would pass; the base still carries
 // the real failing gate, so the run fails and the PR's command never runs — a PR
@@ -250,4 +298,4 @@ const fail = "`node -e \"process.exit(3)\"`";
   assert.ok(/after (it )?merge/i.test(section), "DOCS.md must state a config change takes effect only after merge");
 }
 
-console.log("PASS run-gates.test.mjs (12 criteria, 39 assertions)");
+console.log("PASS run-gates.test.mjs (14 criteria, 45 assertions)");
