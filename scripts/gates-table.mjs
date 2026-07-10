@@ -56,30 +56,57 @@ function splitRow(line) {
   return { cells };
 }
 
-// Parse the GATES.md table into ordered rows. Only markdown table rows are
-// considered; surrounding prose and HTML comments are ignored because they do
-// not start with `|`. A row that starts with `|` but cannot be split
-// unambiguously, or whose column count disagrees with the table's, throws a
-// GateParseError rather than silently returning a truncated command.
+function cellsFromLine(line, source, lineNumber) {
+  const split = splitRow(line);
+  if (split.error) {
+    throw new GateParseError(`${source} line ${lineNumber}: ${split.error}. Row: ${line}`);
+  }
+  // A required leading `|` yields an empty first segment; a trailing `|` an
+  // empty last one. Drop exactly those edge delimiters, keeping real cells.
+  let cells = split.cells.slice(1);
+  if (line.endsWith("|")) cells = cells.slice(0, -1);
+  return cells.map((c) => c.trim());
+}
+
+function isGatesHeader(cells) {
+  return (
+    cells.length >= 3 &&
+    cells[0].toLowerCase() === "order" &&
+    cells[1].toLowerCase() === "gate" &&
+    cells[2].toLowerCase() === "command"
+  );
+}
+
+// Parse the GATES.md table into ordered rows. The gate table is identified by
+// its `Order | Gate | Command` header; other markdown tables in GATES.md are
+// documentation and must not change gate parsing. Once inside the gate table, a
+// row that cannot be split unambiguously, or whose column count disagrees with
+// the header, throws a GateParseError rather than silently returning a
+// truncated command.
 export function parseGates(text, source = "GATES.md") {
   const rows = [];
   let expectedCols = null;
+  let inGatesTable = false;
   const lines = text.split("\n");
   for (let ln = 0; ln < lines.length; ln++) {
     const line = lines[ln].trim();
-    if (!line.startsWith("|")) continue;
-    const split = splitRow(line);
-    if (split.error) {
-      throw new GateParseError(`${source} line ${ln + 1}: ${split.error}. Row: ${line}`);
+    if (!line.startsWith("|")) {
+      if (inGatesTable) break;
+      continue;
     }
-    // A required leading `|` yields an empty first segment; a trailing `|` an
-    // empty last one. Drop exactly those edge delimiters, keeping real cells.
-    let cells = split.cells.slice(1);
-    if (line.endsWith("|")) cells = cells.slice(0, -1);
-    cells = cells.map((c) => c.trim());
-    // Every row of a markdown table has the same column count; the first row
-    // (the header) sets it. A row that splits into a different number of cells
-    // is malformed — refuse to guess which cell is the command.
+
+    const cells = cellsFromLine(line, source, ln + 1);
+    if (!inGatesTable) {
+      if (isGatesHeader(cells)) {
+        inGatesTable = true;
+        expectedCols = cells.length;
+      }
+      continue;
+    }
+
+    // Every row of the gates table has the same column count as its header. A
+    // row that splits into a different number of cells is malformed — refuse to
+    // guess which cell is the command.
     if (expectedCols === null) expectedCols = cells.length;
     else if (cells.length !== expectedCols) {
       throw new GateParseError(
@@ -88,7 +115,7 @@ export function parseGates(text, source = "GATES.md") {
     }
     if (cells.length < 3) continue;
     if (cells.every((c) => /^:?-+:?$/.test(c))) continue; // separator row
-    if (cells[0].toLowerCase() === "order" || cells[1].toLowerCase() === "gate") continue; // header row
+    if (isGatesHeader(cells)) continue;
     const command = cells[2].replace(/^`+|`+$/g, "").trim(); // strip the code-span backticks
     if (!command) continue;
     rows.push({ order: cells[0], gate: cells[1], command });
