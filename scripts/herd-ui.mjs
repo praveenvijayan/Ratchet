@@ -671,6 +671,90 @@ export function createTitleCache({ fetchTitle = defaultFetchTitle, log = () => {
   };
 }
 
+// --- ready queue --------------------------------------------------------------
+
+// Count of open state:ready issues via `gh`. Returns { count } on success, or
+// { error } on any failure (gh missing, network error, bad repo) — never throws,
+// so the summary strip can show a placeholder naming the failure instead of a
+// misleading zero.
+export async function defaultFetchReadyCount(repoSlug) {
+  const base = ["issue", "list", "--state", "open", "--label", "state:ready", "--json", "number", "--jq", "length"];
+  const args = repoSlug ? ["issue", "list", "--repo", repoSlug, "--state", "open", "--label", "state:ready", "--json", "number", "--jq", "length"] : base;
+  try {
+    const { stdout } = await pexec("gh", args);
+    const count = Number(String(stdout).trim());
+    if (!Number.isFinite(count)) return { error: "ready-queue query returned a non-numeric count" };
+    return { count };
+  } catch (e) {
+    return { error: `ready-queue query failed: ${e.message || e}` };
+  }
+}
+
+// A per-server cache for the ready-queue count so `gh` runs at most once per
+// refreshMs, not every poll. `ensure` starts an async refresh when the value is
+// missing or older than refreshMs (idempotent — a pending fetch is never
+// duplicated); `get` returns { count } | { error } | undefined (first fetch not
+// yet resolved). The snapshot picks the value up on the next poll and the SSE
+// change-key pushes it to the browser.
+export function createReadyQueueCache({ fetchReadyCount = defaultFetchReadyCount, refreshMs = 15_000 } = {}) {
+  let entry; // { count?, error?, fetchedAt, pending }
+
+  function doFetch(repoSlug) {
+    if (entry) entry.pending = true;
+    else entry = { pending: true, fetchedAt: null };
+    Promise.resolve()
+      .then(() => fetchReadyCount(repoSlug))
+      .then((result) => {
+        entry = { ...result, fetchedAt: Date.now(), pending: false };
+      })
+      .catch((e) => {
+        entry = { error: `ready-queue query failed: ${e.message || e}`, fetchedAt: Date.now(), pending: false };
+      });
+  }
+
+  return {
+    ensure(repoSlug) {
+      const now = Date.now();
+      if (!entry) doFetch(repoSlug);
+      else if (!entry.pending && entry.fetchedAt != null && now - entry.fetchedAt > refreshMs) doFetch(repoSlug);
+    },
+    get() {
+      if (!entry || entry.fetchedAt == null) return undefined;
+      return entry.error ? { error: entry.error } : { count: entry.count };
+    },
+  };
+}
+
+// --- summary strip (0087) -----------------------------------------------------
+
+// The one-glance fleet-health strip: four counts answering "is the herd fine?".
+// Each field is either { value: n } or { error: msg } (rendered as a placeholder
+// with the failure in a tooltip) or { pending: true } — never a bare 0 for an
+// unavailable source, which would read as "all clear". The ready-queue count is
+// the one external query (it can fail); the other three derive from the state,
+// event, and escalation streams the snapshot already read. `readyQueue` is the
+// cache's current reading: { count }, { error }, or undefined while pending.
+export function buildSummary({ workers = [], escalations = [], readyQueue } = {}) {
+  const live = workers.filter((w) => w.pid != null && w.group === "live").length;
+  const prs = new Set();
+  for (const w of workers) {
+    if (w.group === "awaiting-review" && w.pr != null) prs.add(w.pr);
+  }
+  const unresolved = escalations.filter((e) => !e.resolved).length;
+
+  let ready;
+  if (readyQueue === undefined) ready = { pending: true };
+  else if (readyQueue.error) ready = { error: readyQueue.error };
+  else ready = { value: readyQueue.count };
+
+  return {
+    ready,
+    liveWorkers: { value: live },
+    awaitingReview: { value: prs.size },
+    unresolvedEscalations: { value: unresolved },
+  };
+}
+
 // The full dashboard payload. Never throws: every source is read tolerantly, so
 // missing state/events/escalations yield an empty snapshot carrying `hint`.
 // When a checksCache is provided, each worker row with an open PR carries its
@@ -692,6 +776,7 @@ export function readSnapshot({
   repoSlug = null,
   checksCache = null,
   titleCache = null,
+  readyQueueCache = null,
 } = {}) {
   const state = readState(statePath);
   const events = readEvents(eventsPath);
@@ -753,7 +838,13 @@ export function readSnapshot({
   const adapters = adapterDispatchStats(events);
   const broken = brokenAdapters(adapters);
 
-  return { workers, escalations, hint, totals, heartbeat, adapters, brokenAdapters: broken };
+  // One-glance summary strip (0087). The ready-queue count is fetched via `gh`
+  // through an injected cache; the other three counts derive from the streams
+  // already read. A pending/failed ready query surfaces as a placeholder.
+  if (readyQueueCache) readyQueueCache.ensure(repoSlug);
+  const summary = buildSummary({ workers, escalations, readyQueue: readyQueueCache ? readyQueueCache.get() : undefined });
+
+  return { workers, escalations, hint, totals, heartbeat, adapters, brokenAdapters: broken, summary };
 }
 
 // A change key that ignores the ever-advancing clock, so the live stream pushes
@@ -774,6 +865,7 @@ export function snapshotKey(snapshot) {
     heartbeat,
     adapters: snapshot.adapters ?? [],
     brokenAdapters: snapshot.brokenAdapters ?? [],
+    summary: snapshot.summary ?? null,
   });
 }
 
@@ -848,10 +940,12 @@ export function createDashboardServer({
   fetchChecks = null,
   checksRefreshMs = 30_000,
   fetchTitle = null,
+  fetchReadyCount = null,
 } = {}) {
   const checksCache = createChecksCache({ fetchChecks: fetchChecks || defaultFetchChecks, refreshMs: checksRefreshMs });
   const titleCache = createTitleCache({ fetchTitle: fetchTitle || defaultFetchTitle });
-  const snap = () => readSnapshot({ statePath, eventsPath, escalationsPath, resolutionsPath, config, now: now(), repoSlug, checksCache, titleCache });
+  const readyQueueCache = createReadyQueueCache({ fetchReadyCount: fetchReadyCount || defaultFetchReadyCount });
+  const snap = () => readSnapshot({ statePath, eventsPath, escalationsPath, resolutionsPath, config, now: now(), repoSlug, checksCache, titleCache, readyQueueCache });
 
   const server = httpCreateServer((req, res) => {
     const url = new URL(req.url, "http://localhost");
@@ -1096,6 +1190,14 @@ export const PAGE_HTML = `<!doctype html>
   .adapter-breakdown th, .adapter-breakdown td { text-align:right; padding:3px 6px; }
   .adapter-breakdown th:first-child, .adapter-breakdown td:first-child { text-align:left; }
   .adapter-breakdown tr.broken td { color:var(--over); font-variant-numeric:tabular-nums; }
+  .summarystrip { display:flex; flex-wrap:wrap; gap:10px; margin:12px 0; }
+  .summarystrip.empty { display:none; }
+  .sumcell { display:flex; flex-direction:column; align-items:flex-start; min-width:96px; padding:8px 12px; border:1px solid var(--line); border-radius:8px; background:var(--card); }
+  .sumcell .sumnum { font-size:22px; font-weight:600; font-variant-numeric:tabular-nums; }
+  .sumcell .sumlabel { font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
+  .sumcell.unavailable { border-color:var(--over); cursor:help; }
+  .sumcell.unavailable .sumnum { color:var(--over); }
+  .sumcell.pending .sumnum { color:var(--muted); }
   .escalations { padding:10px 14px; }
   .esc { border:1px solid var(--over); border-left-width:4px; border-radius:6px; padding:10px 14px; margin-bottom:8px; }
   .esc.resolved { border-color:var(--line); opacity:0.6; }
@@ -1161,6 +1263,7 @@ export const PAGE_HTML = `<!doctype html>
   <span id="fleettotals" class="fleettotals empty"></span>
 </header>
 <main>
+  <div class="summarystrip" id="summarystrip" aria-label="Fleet summary"></div>
   <div id="hbbanner" class="hbbanner" role="status" hidden></div>
   <div class="layout" id="layout">
     <div class="fleet" id="fleet">
@@ -1189,7 +1292,7 @@ export const PAGE_HTML = `<!doctype html>
 <script>
   const $ = (id) => document.getElementById(id);
   let selected = null, logSource = null, timelineSource = null, logBuffer = "", timelineBuffer = [], panelOpen = false, gotSnapshot = false;
-  let snapshot = { workers: [], escalations: [], hint: null, heartbeat: null, adapters: [], brokenAdapters: [] };
+  let snapshot = { workers: [], escalations: [], hint: null, heartbeat: null, adapters: [], brokenAdapters: [], summary: null };
 
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
 
@@ -1540,7 +1643,33 @@ export const PAGE_HTML = `<!doctype html>
     el.textContent = "Fleet: " + usdText(t.costUsd) + " · " + tokText(t.tokensIn) + " in · " + tokText(t.tokensOut) + " out";
   }
 
-  function render() { renderErrToggle(); renderAdapterHealth(); renderEscalations(); renderWorkers(); renderTotals(); renderHeartbeat(); }
+  // One-glance summary strip (0087). Each cell is a labelled count. A field
+  // carrying { error } renders a "—" placeholder with the failure in a tooltip
+  // (never a 0 that reads as "all clear"); a { pending } field shows "…".
+  function summaryCell(label, field) {
+    let text;
+    let cls = "sumcell";
+    let title = "";
+    if (field && field.error) { text = "—"; cls += " unavailable"; title = field.error; }
+    else if (!field || field.pending) { text = "…"; cls += " pending"; }
+    else { text = String(field.value); }
+    const attr = title ? ' title="' + esc(title) + '"' : "";
+    return '<span class="' + cls + '"' + attr + '><span class="sumnum">' + esc(text) + '</span><span class="sumlabel">' + esc(label) + "</span></span>";
+  }
+  function renderSummaryStrip() {
+    const el = $("summarystrip");
+    if (!el) return;
+    const s = snapshot.summary;
+    if (!s) { el.innerHTML = ""; el.classList.add("empty"); return; }
+    el.classList.remove("empty");
+    el.innerHTML =
+      summaryCell("ready", s.ready) +
+      summaryCell("live workers", s.liveWorkers) +
+      summaryCell("awaiting review", s.awaitingReview) +
+      summaryCell("escalations", s.unresolvedEscalations);
+  }
+
+  function render() { renderSummaryStrip(); renderErrToggle(); renderAdapterHealth(); renderEscalations(); renderWorkers(); renderTotals(); renderHeartbeat(); }
 
   $("errtoggle").addEventListener("click", () => { panelOpen = !panelOpen; applyPanel(); });
   $("errclose").addEventListener("click", () => { panelOpen = false; applyPanel(); });
