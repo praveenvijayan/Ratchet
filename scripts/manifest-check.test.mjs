@@ -13,6 +13,10 @@
 //   4. A manifest entry at a path that no longer exists fails, naming the path.
 //   5. The check is wired into GATES.md as a gate, and the real repo passes it.
 //   6. This suite holds exactly one test named after each criterion above.
+// Plus #237 criteria 7-10 (excluded-runtime + shippable-test gates) and #248
+// criteria 1-4 (manifest lists every scripts/*.test.mjs individually excluded
+// with no gaps, manifest-check.mjs reports consistent, this suite passes, and
+// one test block per #248 criterion).
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -250,5 +254,54 @@ const realManifest = loadManifest(repoRoot);
   }
 }
 
+// --- #248 Criterion 1: ratchet-manifest.json lists every scripts/*.test.mjs file
+// --- on disk as an individual `excluded` entry, with no gaps (no missing, no
+// --- extra, no glob covering scripts/).
+{
+  const onDisk = collectTestFiles(repoRoot);
+  const excludedIndividual = realManifest.files
+    .filter((e) => e.class === "excluded" && !e.glob && /^scripts\/[^/]+\.test\.mjs$/.test(e.path))
+    .map((e) => e.path)
+    .sort();
+  assert.deepEqual(excludedIndividual, onDisk,
+    `every scripts/*.test.mjs on disk must have an individual excluded manifest entry, no gaps; disk has ${onDisk.length}, manifest has ${excludedIndividual.length}`);
+  const globScripts = realManifest.files.filter((e) => e.glob && e.path.startsWith("scripts/"));
+  assert.equal(globScripts.length, 0, "no glob entry may cover scripts/ — each test file is classified individually");
+}
+
+// --- #248 Criterion 2: node scripts/manifest-check.mjs reports the manifest is
+// --- consistent with the repo (CLI subprocess, exit 0 + human message).
+{
+  const res = spawnSync(process.execPath, [CHECK], { encoding: "utf8" });
+  assert.equal(res.status, 0, `manifest-check.mjs must exit 0 on the real repo (stderr: ${(res.stderr || "").slice(0, 200)})`);
+  assert.match(res.stdout || "", /consistent with the repo/, "manifest-check.mjs must report the manifest is consistent");
+}
+
+// --- #248 Criterion 3: node scripts/manifest-check.test.mjs passes (the suite
+// --- runs to completion and exits 0). To avoid infinite self-recursion, the
+// --- child run sets MANIFEST_CHECK_CHILD=1 which makes this block skip the
+// --- self-spawn; the outer run asserts the child exits 0 with a PASS line.
+{
+  if (process.env.MANIFEST_CHECK_CHILD) {
+    assert.ok(true, "child run skips the self-spawn (recursion guard)");
+  } else {
+    const res = spawnSync(process.execPath, [SELF], {
+      env: { ...process.env, MANIFEST_CHECK_CHILD: "1" },
+      encoding: "utf8",
+    });
+    assert.equal(res.status, 0, `manifest-check.test.mjs must exit 0 (stderr: ${(res.stderr || "").slice(0, 200)})`);
+    assert.match(res.stdout || "", /PASS manifest-check\.test\.mjs/, "child run must print the PASS line");
+  }
+}
+
+// --- #248 Criterion 4: exactly one test block named after each #248 criterion.
+{
+  const src = readFileSync(SELF, "utf8");
+  for (let n = 1; n <= 4; n++) {
+    const hits = src.match(new RegExp(`--- #248 Criterion ${n}:`, "g")) || [];
+    assert.equal(hits.length, 1, `expected exactly one "#248 Criterion ${n}" test block, found ${hits.length}`);
+  }
+}
+
 for (const dir of trees) rmSync(dir, { recursive: true, force: true });
-console.log("PASS manifest-check.test.mjs (6 #236 criteria + 4 #237 criteria + error paths)");
+console.log("PASS manifest-check.test.mjs (6 #236 criteria + 4 #237 criteria + 4 #248 criteria + error paths)");
