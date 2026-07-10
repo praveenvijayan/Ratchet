@@ -210,6 +210,7 @@ scripts/
   herd-avatar.test.mjs          Regression test for dashboard adapter avatars
   herd-ui-log-search.test.mjs   Regression test for log drill-down search/filter
   herd-ui-escalation.test.mjs   Regression test for escalation dedup/resolution
+  herd-ui-acknowledge.test.mjs  Regression test for escalation copy/acknowledge
   plan-sync-concurrency.test.mjs Workflow concurrency regression test
   plan-sync.mjs                 Deterministic plan→issue compiler
   plan-sync.test.mjs            Regression test for the compiler
