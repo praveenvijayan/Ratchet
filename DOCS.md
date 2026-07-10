@@ -208,6 +208,7 @@ scripts/
   herd-ui.test.mjs              Regression test for the herd web dashboard
   herd-avatars.mjs              Bundled default mascot avatars for the dashboard
   herd-avatar.test.mjs          Regression test for dashboard adapter avatars
+  herd-ui-log-search.test.mjs   Regression test for log drill-down search/filter
   plan-sync-concurrency.test.mjs Workflow concurrency regression test
   plan-sync.mjs                 Deterministic plan→issue compiler
   plan-sync.test.mjs            Regression test for the compiler
