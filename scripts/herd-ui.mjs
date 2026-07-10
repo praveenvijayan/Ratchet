@@ -107,6 +107,15 @@ export function latestClaimTs(events, issue) {
   return ts;
 }
 
+// Filter events for one issue and sort them chronologically by ts. A missing
+// ts sorts first (never crashes on a partial event). Used by the /api/timeline
+// endpoint and directly testable.
+export function timelineEvents(events, issue) {
+  return (events || [])
+    .filter((e) => Number(e.issue) === Number(issue))
+    .sort((a, b) => String(a.ts || "").localeCompare(String(b.ts || "")));
+}
+
 // The usage fields a worker-exit event may carry (0075). Kept in sync with
 // herd.mjs's USAGE_FIELDS by shape, not import, so the dashboard stays a
 // read-only consumer of whatever the supervisor already wrote to the stream.
@@ -687,6 +696,33 @@ export function createDashboardServer({
       return;
     }
 
+    // Live timeline for one issue: sends the issue's events from the event
+    // stream in chronological order, then pushes only new events as they
+    // arrive — never a full re-send. Malformed lines in the file are skipped
+    // by readEvents, so the timeline degrades to whatever it can parse.
+    if (url.pathname === "/api/timeline") {
+      const issue = Number(url.searchParams.get("issue"));
+      if (!Number.isInteger(issue)) {
+        sendJson(res, 400, { error: "issue query parameter required" });
+        return;
+      }
+      res.writeHead(200, SSE_HEADERS);
+      let sentCount = 0;
+      const tick = () => {
+        const events = timelineEvents(readEvents(eventsPath), issue);
+        if (events.length < sentCount) sentCount = 0; // truncated/rotated
+        if (events.length > sentCount) {
+          const delta = events.slice(sentCount);
+          res.write(`event: timeline\ndata: ${JSON.stringify(delta)}\n\n`);
+          sentCount = events.length;
+        }
+      };
+      tick();
+      const timer = setInterval(tick, pollMs);
+      req.on("close", () => clearInterval(timer));
+      return;
+    }
+
     res.writeHead(404, { "Content-Type": "text/plain" });
     res.end("not found");
   });
@@ -822,6 +858,12 @@ export const PAGE_HTML = `<!doctype html>
   .checks-time { font-size:11px; color:var(--muted); margin-left:2px; }
   .issue-title { color:var(--muted); font-size:13px; }
   .issue-title.empty { font-style:italic; }
+  .timeline { margin-bottom:14px; max-height:200px; overflow:auto; border:1px solid var(--line); border-radius:6px; background:var(--card); padding:8px 12px; }
+  .timeline-entry { padding:2px 0; font-size:13px; border-bottom:1px solid color-mix(in srgb, var(--line) 50%, transparent); }
+  .timeline-entry:last-child { border-bottom:none; }
+  .timeline-ts { color:var(--muted); font-family:ui-monospace, monospace; font-size:12px; margin-right:6px; }
+  .timeline-event { font-weight:600; }
+  .timeline-fields { color:var(--muted); font-size:12px; }
   .lognomatch { color:var(--muted); padding:12px; }
 </style>
 </head>
@@ -850,6 +892,7 @@ export const PAGE_HTML = `<!doctype html>
   </div>
   <div class="logpane" id="logpane" hidden>
     <h2 id="logtitle"></h2>
+    <div id="timeline" class="timeline"></div>
     <input type="search" id="logsearch" class="logsearch" placeholder="Filter log lines…" autocomplete="off">
     <div id="lognomatch" class="lognomatch" hidden>No matches.</div>
     <pre class="log" id="log"></pre>
@@ -857,7 +900,7 @@ export const PAGE_HTML = `<!doctype html>
 </main>
 <script>
   const $ = (id) => document.getElementById(id);
-  let selected = null, logSource = null, logBuffer = "", panelOpen = false, gotSnapshot = false;
+  let selected = null, logSource = null, timelineSource = null, logBuffer = "", timelineBuffer = [], panelOpen = false, gotSnapshot = false;
   let snapshot = { workers: [], escalations: [], hint: null, heartbeat: null };
 
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
@@ -1007,16 +1050,44 @@ export const PAGE_HTML = `<!doctype html>
     if (selected === issue) return;
     selected = issue;
     if (logSource) { logSource.close(); logSource = null; }
+    if (timelineSource) { timelineSource.close(); timelineSource = null; }
     const pane = $("logpane");
     pane.hidden = false;
     $("logtitle").textContent = "Log — issue #" + issue;
     $("logsearch").value = "";
     logBuffer = "";
+    timelineBuffer = [];
+    renderTimeline();
     renderLog();
     renderWorkers();
     logSource = new EventSource("/api/log?issue=" + issue);
     logSource.addEventListener("log", (ev) => { logBuffer += JSON.parse(ev.data); renderLog(); });
     logSource.addEventListener("note", (ev) => { logBuffer = JSON.parse(ev.data); renderLog(); });
+    timelineSource = new EventSource("/api/timeline?issue=" + issue);
+    timelineSource.addEventListener("timeline", (ev) => { timelineBuffer = timelineBuffer.concat(JSON.parse(ev.data)); renderTimeline(); });
+  }
+
+  // Render the per-issue activity timeline from timelineBuffer — each event
+  // shows its timestamp, event type, and any adapter/attempt/PR/pid fields it
+  // carries. An empty buffer shows a one-line "no activity recorded" message,
+  // never a blank pane. Malformed lines never reach here (readEvents skips
+  // them server-side), so the timeline always renders cleanly.
+  function renderTimeline() {
+    const el = $("timeline");
+    if (!timelineBuffer.length) {
+      el.innerHTML = '<div class="empty">No activity recorded.</div>';
+      return;
+    }
+    el.innerHTML = timelineBuffer.map((e) => {
+      const ts = e.ts ? new Date(Date.parse(e.ts)).toLocaleTimeString() : "—";
+      const fields = [];
+      if (e.adapter) fields.push("adapter " + esc(e.adapter));
+      if (e.pid != null) fields.push("pid " + esc(e.pid));
+      if (e.attempts != null) fields.push("attempt " + esc(e.attempts));
+      if (e.pr != null) fields.push("PR #" + esc(e.pr));
+      const fieldStr = fields.length ? ' <span class="timeline-fields">' + fields.join(" · ") + "</span>" : "";
+      return '<div class="timeline-entry"><span class="timeline-ts">' + esc(ts) + '</span><span class="timeline-event">' + esc(e.event || "?") + "</span>" + fieldStr + "</div>";
+    }).join("");
   }
 
   function durText(secs) {
