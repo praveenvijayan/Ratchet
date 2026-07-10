@@ -32,3 +32,13 @@ any workflow. `ratchet-watch.mjs` is the chat-mode webhook helper (signals a
 human to run /ratchet-next) and is not wired into the herd. `sweep-stale-claims`
 already reclaims abandoned `state:changes-requested` work, so the label flip
 composes with the existing recovery path.
+
+One rework engine, two triggers: the rework behaviour itself (same branch, same
+PR, reply to comments, label back to `state:in-review`) is AGENTS.md step 6 and
+stays agent-side — the dispatched rework worker executes it exactly as a chat
+agent does when a human runs /ratchet-next. The supervisor adds only detection
+and dispatch (the role the human plays in chat mode), never a second rework
+implementation. The chat flow is unchanged by this issue. The supervisor's
+label flip at detection time is deliberate minimal redundancy with the worker's
+own step-6 flip: idempotent, and it keeps the label truthful when the rework
+dispatch itself fails.
