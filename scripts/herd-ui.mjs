@@ -170,6 +170,42 @@ export function fleetUsage(workers) {
   return { costUsd, tokensIn, tokensOut };
 }
 
+// The timestamp of the newest heartbeat event, or null when the stream carries
+// none — the supervisor has never been seen. Heartbeats are fleet-wide and
+// carry no issue, so this scans only by event type.
+export function latestHeartbeatTs(events) {
+  let ts = null;
+  for (const e of events) {
+    if (e.event !== "heartbeat") continue;
+    if (ts === null || String(e.ts) > ts) ts = String(e.ts);
+  }
+  return ts;
+}
+
+// How long the dashboard tolerates silence before it alarms, derived from the
+// poll interval: a heartbeat lands every `pollSeconds`, so missing more than a
+// couple of polls means the supervisor has stopped. The factor gives one whole
+// missed poll of slack past that before the banner fires, so a single slow poll
+// never cries wolf.
+export const HEARTBEAT_SILENCE_FACTOR = 2.5;
+export function heartbeatThresholdSeconds(pollSeconds) {
+  const base = Number.isFinite(pollSeconds) && pollSeconds > 0 ? pollSeconds : DEFAULTS.pollSeconds;
+  return Math.max(1, Math.round(base * HEARTBEAT_SILENCE_FACTOR));
+}
+
+// Classify supervisor liveness from the last heartbeat: "unseen" when there is
+// none at all, "silent" when the newest is older than the threshold, "live"
+// otherwise. Pure and clock-injectable so the server, the API, and the browser
+// tick all reach the same verdict from the same inputs.
+export function heartbeatStatus({ lastHeartbeatTs, thresholdSeconds, now = Date.now() }) {
+  const parsed = lastHeartbeatTs ? Date.parse(lastHeartbeatTs) : NaN;
+  // No heartbeat, or one whose timestamp will not parse, is "never seen" — never
+  // silently reported as live with a nonsense age.
+  if (!Number.isFinite(parsed)) return { state: "unseen", ageSeconds: null };
+  const ageSeconds = Math.max(0, Math.floor((now - parsed) / 1000));
+  return { state: ageSeconds > thresholdSeconds ? "silent" : "live", ageSeconds };
+}
+
 // Build a clickable PR URL from an "owner/repo" slug, or null when the slug is
 // unknown (git remote absent) so the link simply does not render.
 export function prUrl(repoSlug, prNumber) {
@@ -308,9 +344,87 @@ export function groupWorkers(workers) {
   return out;
 }
 
-// --- issue titles -------------------------------------------------------------
+// --- PR checks ----------------------------------------------------------------
 
 const pexec = promisify(execFile);
+
+// Aggregate per-check states into a single combined status. The `gh pr checks
+// --json name,state` states are: SUCCESS, FAILURE, PENDING, SKIPPED, NEUTRAL,
+// etc. Any failure makes the row "failing"; all-clear makes it "passing"; any
+// pending (no failures) makes it "pending". An empty list means no checks
+// have run yet — "pending". Anything unrecognised is "unknown".
+export function aggregateChecks(checks) {
+  if (!Array.isArray(checks) || checks.length === 0) return { status: "pending" };
+  const states = checks.map((c) => String(c.state || "").toUpperCase());
+  if (states.some((s) => s === "FAILURE" || s === "ERROR" || s === "CANCELLED" || s === "TIMED_OUT"))
+    return { status: "failing" };
+  if (states.some((s) => s === "PENDING" || s === "QUEUED" || s === "IN_PROGRESS" || s === "WAITING"))
+    return { status: "pending" };
+  if (states.every((s) => s === "SUCCESS" || s === "NEUTRAL" || s === "SKIPPED" || s === ""))
+    return { status: "passing" };
+  return { status: "unknown" };
+}
+
+// Fetch a PR's combined checks status via `gh pr checks`. Returns
+// { status, fetchedAt } on success, or { status: "unknown", fetchedAt } on any
+// failure (gh missing, network error, 404). Never throws — a failed query
+// surfaces as "unknown", never a broken row.
+export async function defaultFetchChecks(pr, repoSlug) {
+  const args = repoSlug
+    ? ["pr", "checks", String(pr), "--repo", repoSlug, "--json", "name,state"]
+    : ["pr", "checks", String(pr), "--json", "name,state"];
+  try {
+    const { stdout } = await pexec("gh", args);
+    return aggregateChecks(JSON.parse(stdout));
+  } catch {
+    return { status: "unknown" };
+  }
+}
+
+// A per-server checks cache so `gh` is called at most once per refreshMs per PR
+// — not on every poll. `ensure` starts an async fetch if the PR is new or its
+// cached result is older than refreshMs (idempotent — a pending fetch is never
+// duplicated); `get` returns { status, fetchedAt } or undefined (not yet
+// resolved). The snapshot picks up the status on the next poll after the fetch
+// resolves, and the change-key pushes it to the browser via SSE.
+export function createChecksCache({ fetchChecks = defaultFetchChecks, refreshMs = 30_000 } = {}) {
+  const cache = new Map(); // pr number -> { status, fetchedAt, pending }
+
+  function doFetch(n, repoSlug) {
+    const existing = cache.get(n);
+    if (existing) existing.pending = true;
+    else cache.set(n, { status: "pending", fetchedAt: null, pending: true });
+    Promise.resolve()
+      .then(() => fetchChecks(n, repoSlug))
+      .then((result) => {
+        cache.set(n, { status: result.status || "unknown", fetchedAt: Date.now(), pending: false });
+      })
+      .catch(() => {
+        cache.set(n, { status: "unknown", fetchedAt: Date.now(), pending: false });
+      });
+  }
+
+  return {
+    ensure(pr, repoSlug) {
+      const n = Number(pr);
+      if (!n) return;
+      const entry = cache.get(n);
+      const now = Date.now();
+      if (!entry) {
+        doFetch(n, repoSlug);
+      } else if (!entry.pending && entry.fetchedAt != null && now - entry.fetchedAt > refreshMs) {
+        doFetch(n, repoSlug);
+      }
+    },
+    get(pr) {
+      const entry = cache.get(Number(pr));
+      if (!entry) return undefined;
+      return { status: entry.status, fetchedAt: entry.fetchedAt };
+    },
+  };
+}
+
+// --- issue titles -------------------------------------------------------------
 
 // Fetch a single issue's title from GitHub via `gh`. Returns the title string,
 // or null on any failure (gh missing, network error, 404). Never throws — a
@@ -360,9 +474,11 @@ export function createTitleCache({ fetchTitle = defaultFetchTitle, log = () => {
 
 // The full dashboard payload. Never throws: every source is read tolerantly, so
 // missing state/events/escalations yield an empty snapshot carrying `hint`.
-// When a titleCache is provided, each worker row carries an issueTitle (the
-// cached title, or null while pending/failed) and the title fetch is triggered
-// at most once per issue.
+// When a checksCache is provided, each worker row with an open PR carries its
+// combined checks status (passing/failing/pending/unknown) and the last-fetched
+// timestamp; the fetch is triggered at most once per refreshMs per PR. When a
+// titleCache is provided, each worker row carries an issueTitle (the cached
+// title, or null while pending/failed), fetched at most once per issue.
 export function readSnapshot({
   statePath = STATE_FILE,
   eventsPath = EVENTS_FILE,
@@ -370,12 +486,23 @@ export function readSnapshot({
   config,
   now = Date.now(),
   repoSlug = null,
+  checksCache = null,
   titleCache = null,
 } = {}) {
   const state = readState(statePath);
   const events = readEvents(eventsPath);
   const escalations = parseEscalations(escalationsPath);
   const workers = buildWorkers({ state, events, config, now, repoSlug });
+  if (checksCache) {
+    for (const w of workers) {
+      if (w.pr != null) {
+        checksCache.ensure(w.pr, repoSlug);
+        const cached = checksCache.get(w.pr);
+        w.checksStatus = cached ? cached.status : null;
+        w.checksFetchedAt = cached && cached.fetchedAt != null ? cached.fetchedAt : null;
+      }
+    }
+  }
   if (titleCache) {
     for (const w of workers) {
       titleCache.ensure(w.issue, repoSlug);
@@ -384,7 +511,17 @@ export function readSnapshot({
   }
   const hint = workers.length === 0 && escalations.length === 0 ? EMPTY_HINT : null;
   const totals = fleetUsage(workers);
-  return { workers, escalations, hint, totals };
+
+  // Supervisor liveness, distinct from UI-server liveness. lastHeartbeatTs and
+  // thresholdSeconds are sent so the browser can re-derive the age (and the
+  // silent/live transition) locally every second; ageSeconds/state are the
+  // server-side snapshot for the API and tests.
+  const lastHeartbeatTs = latestHeartbeatTs(events);
+  const thresholdSeconds = heartbeatThresholdSeconds(config?.pollSeconds);
+  const { state: hbState, ageSeconds } = heartbeatStatus({ lastHeartbeatTs, thresholdSeconds, now });
+  const heartbeat = { lastHeartbeatTs, thresholdSeconds, ageSeconds, state: hbState };
+
+  return { workers, escalations, hint, totals, heartbeat };
 }
 
 // A change key that ignores the ever-advancing clock, so the live stream pushes
@@ -392,7 +529,12 @@ export function readSnapshot({
 // an age ticked. Ages are recomputed by the browser from claimStartTs.
 export function snapshotKey(snapshot) {
   const workers = snapshot.workers.map(({ claimAgeSeconds, ...rest }) => rest);
-  return JSON.stringify({ workers, escalations: snapshot.escalations, hint: snapshot.hint, totals: snapshot.totals ?? null });
+  // Drop the clock-derived heartbeat fields (ageSeconds/state) for the same
+  // reason as claim ages: the browser recomputes them each second, so keeping
+  // them here would push a frame every tick. A new heartbeat changes
+  // lastHeartbeatTs, which does re-push.
+  const { ageSeconds, state, ...heartbeat } = snapshot.heartbeat || {};
+  return JSON.stringify({ workers, escalations: snapshot.escalations, hint: snapshot.hint, totals: snapshot.totals ?? null, heartbeat });
 }
 
 // --- incremental log tail ----------------------------------------------------
@@ -462,10 +604,13 @@ export function createDashboardServer({
   repoSlug = null,
   now = Date.now,
   pollMs = 1000,
+  fetchChecks = null,
+  checksRefreshMs = 30_000,
   fetchTitle = null,
 } = {}) {
+  const checksCache = createChecksCache({ fetchChecks: fetchChecks || defaultFetchChecks, refreshMs: checksRefreshMs });
   const titleCache = createTitleCache({ fetchTitle: fetchTitle || defaultFetchTitle });
-  const snap = () => readSnapshot({ statePath, eventsPath, escalationsPath, config, now: now(), repoSlug, titleCache });
+  const snap = () => readSnapshot({ statePath, eventsPath, escalationsPath, config, now: now(), repoSlug, checksCache, titleCache });
 
   const server = httpCreateServer((req, res) => {
     const url = new URL(req.url, "http://localhost");
@@ -624,6 +769,9 @@ export const PAGE_HTML = `<!doctype html>
   td.usage { text-align:right; font-variant-numeric:tabular-nums; }
   main { padding:20px; max-width:1100px; margin:0 auto; }
   .hint { color:var(--muted); padding:40px 0; text-align:center; }
+  .hbbanner { border-radius:6px; padding:12px 16px; margin-bottom:16px; font-weight:600; border:1px solid; border-left-width:4px; }
+  .hbbanner.silent { color:var(--over); border-color:var(--over); background:color-mix(in srgb, var(--over) 10%, transparent); }
+  .hbbanner.unseen { color:var(--warn); border-color:var(--warn); background:color-mix(in srgb, var(--warn) 10%, transparent); }
   .layout { display:flex; gap:16px; align-items:flex-start; }
   .fleet { flex:1 1 auto; min-width:0; }
   .fleet-toolbar { display:flex; align-items:center; gap:12px; margin-bottom:12px; }
@@ -666,6 +814,12 @@ export const PAGE_HTML = `<!doctype html>
   .logsearch:focus { outline:none; border-color:var(--accent); }
   pre.log { background:var(--card); border:1px solid var(--line); border-radius:6px; padding:12px; max-height:360px; overflow:auto; white-space:pre-wrap; word-break:break-word; margin:0; font:12px/1.5 ui-monospace, monospace; }
   .empty { color:var(--muted); }
+  .checks { font-size:12px; font-weight:600; margin-left:4px; }
+  .checks.pass { color:#2da44e; }
+  .checks.fail { color:var(--over); }
+  .checks.pend { color:var(--warn); }
+  .checks.unknown { color:var(--muted); font-style:italic; font-weight:400; }
+  .checks-time { font-size:11px; color:var(--muted); margin-left:2px; }
   .issue-title { color:var(--muted); font-size:13px; }
   .issue-title.empty { font-style:italic; }
   .lognomatch { color:var(--muted); padding:12px; }
@@ -678,6 +832,7 @@ export const PAGE_HTML = `<!doctype html>
   <span id="fleettotals" class="fleettotals empty"></span>
 </header>
 <main>
+  <div id="hbbanner" class="hbbanner" role="status" hidden></div>
   <div class="layout" id="layout">
     <div class="fleet" id="fleet">
       <div class="fleet-toolbar">
@@ -702,7 +857,8 @@ export const PAGE_HTML = `<!doctype html>
 </main>
 <script>
   const $ = (id) => document.getElementById(id);
-  let selected = null, logSource = null, logBuffer = "", panelOpen = false, snapshot = { workers: [], escalations: [], hint: null };
+  let selected = null, logSource = null, logBuffer = "", panelOpen = false, gotSnapshot = false;
+  let snapshot = { workers: [], escalations: [], hint: null, heartbeat: null };
 
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
 
@@ -748,6 +904,17 @@ export const PAGE_HTML = `<!doctype html>
     const cls = w.attempts >= w.reworkCap ? "over" : w.attempts >= w.reworkCap ? "warn" : "";
     return '<span class="gauge ' + cls + '">' + w.attempts + " / " + w.reworkCap + "</span>";
   }
+  function checksClass(s) {
+    return s === "passing" ? "pass" : s === "failing" ? "fail" : s === "pending" ? "pend" : "unknown";
+  }
+  function checksTitle(w) {
+    if (!w.checksFetchedAt) return "checks status: " + esc(w.checksStatus);
+    return "checks: " + esc(w.checksStatus) + " · fetched " + new Date(w.checksFetchedAt).toLocaleTimeString();
+  }
+  function checksAgo(ts) {
+    const secs = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+    return secs >= 60 ? Math.floor(secs / 60) + "m ago" : secs + "s ago";
+  }
 
   function issueCell(w) {
     const num = "#" + esc(w.issue);
@@ -789,13 +956,17 @@ export const PAGE_HTML = `<!doctype html>
   function rowHtml(w) {
     const pr = w.prUrl ? '<a href="' + esc(w.prUrl) + '" target="_blank" rel="noopener">#' + esc(w.pr) + "</a>"
       : (w.pr != null ? "#" + esc(w.pr) : '<span class="empty">—</span>');
+    const checks = w.checksStatus
+      ? '<span class="checks ' + checksClass(w.checksStatus) + '" title="' + checksTitle(w) + '">' + esc(w.checksStatus) + "</span>" +
+        (w.checksFetchedAt ? '<span class="checks-time">' + esc(checksAgo(w.checksFetchedAt)) + "</span>" : "")
+      : "";
     return '<tr class="worker' + (w.issue === selected ? " sel" : "") + '" data-issue="' + w.issue + '">' +
       "<td>" + issueCell(w) + "</td>" +
       '<td class="status">' + esc(w.status) + "</td>" +
       '<td><span class="adapter">' + avatarImg(w) + "<span>" + esc(w.adapter || "—") + "</span></span></td>" +
       "<td>" + attemptsText(w) + "</td>" +
       "<td>" + ageText(w) + "</td>" +
-      "<td>" + pr + "</td>" +
+      "<td>" + pr + checks + "</td>" +
       '<td class="usage">' + usdCell(w.costUsd) + "</td>" +
       '<td class="usage">' + tokCell(w.tokensIn) + "</td>" +
       '<td class="usage">' + tokCell(w.tokensOut) + "</td></tr>";
@@ -848,6 +1019,43 @@ export const PAGE_HTML = `<!doctype html>
     logSource.addEventListener("note", (ev) => { logBuffer = JSON.parse(ev.data); renderLog(); });
   }
 
+  function durText(secs) {
+    if (secs < 60) return secs + "s";
+    const m = Math.floor(secs / 60), s = secs % 60;
+    return s ? m + "m" + s + "s" : m + "m";
+  }
+
+  // Supervisor liveness, recomputed locally every tick from the last heartbeat
+  // so the age advances and the silent banner appears without a page reload or a
+  // server push. The green dot means "supervisor still polling" — never merely
+  // "UI server up": with no heartbeat at all the dot stays grey and labelled.
+  function renderHeartbeat() {
+    if (!gotSnapshot) return;
+    const hb = snapshot.heartbeat || {};
+    const dot = $("livedot"), text = $("livetext"), banner = $("hbbanner");
+    text.classList.remove("empty");
+    if (hb.lastHeartbeatTs == null || !Number.isFinite(Date.parse(hb.lastHeartbeatTs))) {
+      dot.classList.remove("live");
+      text.textContent = "supervisor not seen";
+      banner.hidden = false;
+      banner.className = "hbbanner unseen";
+      banner.textContent = "Supervisor has not been seen — no heartbeat in the event stream yet.";
+      return;
+    }
+    const age = Math.max(0, Math.floor((Date.now() - Date.parse(hb.lastHeartbeatTs)) / 1000));
+    if (age > hb.thresholdSeconds) {
+      dot.classList.remove("live");
+      text.textContent = "supervisor silent";
+      banner.hidden = false;
+      banner.className = "hbbanner silent";
+      banner.textContent = "Supervisor silent since " + durText(age) + " — last heartbeat " + durText(age) + " ago.";
+    } else {
+      dot.classList.add("live");
+      text.textContent = "supervisor live · heartbeat " + durText(age) + " ago";
+      banner.hidden = true;
+    }
+  }
+
   // Re-render the log pane from logBuffer, applying the active search query.
   // An empty query shows the full tail; a non-empty query filters to matching
   // lines (case-insensitive); zero matches shows a "no matches" message, never
@@ -890,7 +1098,7 @@ export const PAGE_HTML = `<!doctype html>
     el.textContent = "Fleet: " + usdText(t.costUsd) + " · " + tokText(t.tokensIn) + " in · " + tokText(t.tokensOut) + " out";
   }
 
-  function render() { renderErrToggle(); renderEscalations(); renderWorkers(); renderTotals(); }
+  function render() { renderErrToggle(); renderEscalations(); renderWorkers(); renderTotals(); renderHeartbeat(); }
 
   $("errtoggle").addEventListener("click", () => { panelOpen = !panelOpen; applyPanel(); });
   $("errclose").addEventListener("click", () => { panelOpen = false; applyPanel(); });
@@ -898,15 +1106,17 @@ export const PAGE_HTML = `<!doctype html>
   const stream = new EventSource("/api/stream");
   stream.addEventListener("snapshot", (ev) => {
     snapshot = JSON.parse(ev.data);
-    $("livedot").classList.add("live");
-    $("livetext").textContent = "live";
-    $("livetext").classList.remove("empty");
+    gotSnapshot = true;
     render();
   });
-  stream.onerror = () => { $("livedot").classList.remove("live"); $("livetext").textContent = "reconnecting…"; };
 
-  // Tick ages locally once a second without waiting on a server push.
-  setInterval(() => { if (snapshot.workers.length) renderWorkers(); }, 1000);
+  // Tick locally once a second without waiting on a server push: claim ages
+  // advance, and the heartbeat age climbs so the silent banner appears on its
+  // own the moment the supervisor stops emitting — the whole point of the alarm.
+  setInterval(() => {
+    if (snapshot.workers.length) renderWorkers();
+    renderHeartbeat();
+  }, 1000);
 </script>
 </body>
 </html>`;
