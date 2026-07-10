@@ -1,0 +1,39 @@
+name: state-label-exclusivity
+
+# When any label is added to an issue, enforce that at most one state:* label
+# survives. State labels are a state machine (draft → ready → in-progress →
+# in-review → changes-requested); the claim/rework instructions add the new
+# label and remove the previous one, but a single missed removal used to linger
+# forever (observed on #181: state:ready survived next to state:in-review, so
+# the pick step saw an in-review issue as pickable). This closes the loop
+# GitHub-side: the newest state label wins and any older state label is stripped,
+# so no agent-side discipline is load-bearing.
+#
+# The trigger is `issues: labeled` (fires once per label added), carrying the
+# added label and the issue in the event payload. A non-state label added to the
+# issue is a no-op — only a duplicate state label is corrected, and non-state
+# labels (priority:*, herd, …) are never touched. All logic lives in
+# scripts/state-label-exclusivity.mjs so it can be regression-tested off the
+# network; this workflow is only its trigger.
+
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  issues: write
+
+jobs:
+  enforce:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+      - run: node scripts/state-label-exclusivity.mjs
+        env:
+          # Prefer a PAT so this workflow can trigger further workflows.
+          # Falls back to the default token (fine for pure human-merge flows).
+          GITHUB_TOKEN: ${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
