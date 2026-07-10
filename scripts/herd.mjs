@@ -139,6 +139,12 @@ export function normalizeConfig(raw, file = CONFIG_PATH) {
       fail(`adapter "${name}" has a "requiresEnv" that is not an array of non-empty variable names.`);
     if ("model" in adapter && (typeof adapter.model !== "string" || adapter.model === ""))
       fail(`adapter "${name}" has a "model" that is not a non-empty string.`);
+    // Optional avatar the dashboard renders beside this adapter's worker rows.
+    // The core only stores and passes the string — it never fetches or
+    // interprets it. Must be a string when present; an empty string is allowed
+    // and means "use the bundled default" (treated as absent below).
+    if ("avatar" in adapter && typeof adapter.avatar !== "string")
+      fail(`adapter "${name}" has an "avatar" that is not a string.`);
     // An adapter that uses the {model} placeholder anywhere it is substituted
     // (launch, resume, or promptTemplate) must declare the model it stands for.
     const hasModel = typeof adapter.model === "string" && adapter.model !== "";
@@ -162,6 +168,10 @@ export function normalizeConfig(raw, file = CONFIG_PATH) {
       // Optional: present only when declared, so a model-free adapter is byte-for-byte
       // the shape it was before {model} existed (back-compat).
       ...(hasModel ? { model: adapter.model } : {}),
+      // Optional avatar, stored only when non-empty. An empty string is dropped
+      // here so it is indistinguishable from an absent field downstream — the
+      // dashboard then renders the bundled default, never a broken image.
+      ...(typeof adapter.avatar === "string" && adapter.avatar !== "" ? { avatar: adapter.avatar } : {}),
     };
   }
 
