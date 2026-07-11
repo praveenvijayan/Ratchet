@@ -46,6 +46,7 @@ import {
   listenOrFail,
   parsePort,
   run,
+  PAGE_HTML,
 } from "./herd-ui.mjs";
 import { pollOnce } from "./herd-survey.mjs";
 
@@ -1429,6 +1430,118 @@ await inTempDir(async (dir) => {
   assert.equal(markers.length, unique.size, "each #182 criterion is tested exactly once (no duplicate markers)");
   assert.equal(markers.length, CRITERIA_COUNT, `one test per #182 acceptance criterion (${CRITERIA_COUNT})`);
   for (let n = 1; n <= CRITERIA_COUNT; n++) assert.ok(unique.has(n), `#182 criterion ${n} has a test`);
+}
+
+// ===========================================================================
+// Issue #275 — Herd dashboard Santorini reskin, foundation slice (0119).
+// One test per acceptance criterion, driven through the page's public HTML
+// (PAGE_HTML). Structural CSS/markup assertions — the reskin is presentational,
+// so there is no server behaviour to fetch. Each Criterion-N block carries its
+// own `#275 Criterion N` marker; Criterion 5 self-counts them so the "exactly
+// one test per criterion" criterion enforces itself, mirroring the #182 block.
+// ===========================================================================
+
+// --- #275 Criterion 1: the Santorini palette is defined as CSS custom
+// properties and drives the page background, text, and borders. ---
+{
+  const pal = {
+    "--paper": "#e4e3f5",
+    "--paper-hi": "#f4f2fc",
+    "--paper-lo": "#d7d4ee",
+    "--ink": "#3f3e78",
+    "--ink-deep": "#2b2a58",
+    "--terra": "#7c68c4",
+  };
+  for (const [name, hex] of Object.entries(pal)) {
+    assert.match(
+      PAGE_HTML,
+      new RegExp(`${name}\\s*:\\s*${hex}`, "i"),
+      `:root defines ${name} as ${hex}`,
+    );
+  }
+  for (const alpha of ["--ink-soft", "--ink-faint", "--ink-hair"]) {
+    assert.match(
+      PAGE_HTML,
+      new RegExp(`${alpha}\\s*:\\s*rgba\\(63,\\s*62,\\s*120`, "i"),
+      `:root defines the ${alpha} ink alpha`,
+    );
+  }
+  // Used for background, text, and borders.
+  assert.match(PAGE_HTML, /body\s*\{[^}]*color:\s*var\(--ink\)/i, "the page text colour is the Santorini ink");
+  assert.match(PAGE_HTML, /body\s*\{[^}]*var\(--paper/i, "the page background is painted from the paper palette");
+  assert.match(PAGE_HTML, /border-bottom:\s*2px solid var\(--ink\)/i, "the header border uses the ink palette");
+}
+
+// --- #275 Criterion 2: the type system follows the design (Marcellus /
+// Space Grotesk / Space Mono) and every font-family ends in a generic fallback
+// so an unreachable fonts CDN never blocks rendering. ---
+{
+  assert.match(PAGE_HTML, /--serif\s*:\s*'Marcellus',\s*serif/i, "display font is Marcellus with a serif fallback");
+  assert.match(PAGE_HTML, /--sans\s*:\s*'Space Grotesk',\s*sans-serif/i, "body font is Space Grotesk with a sans-serif fallback");
+  assert.match(PAGE_HTML, /--mono\s*:\s*'Space Mono',\s*monospace/i, "label/metric font is Space Mono with a monospace fallback");
+
+  // Every literal font-family declaration ends in a generic family, or resolves
+  // to one of the three type vars (which themselves end in a generic).
+  const families = [...PAGE_HTML.matchAll(/font-family:\s*([^;}]+)/gi)].map((m) => m[1].trim());
+  assert.ok(families.length > 0, "the page declares at least one font-family");
+  for (const value of families) {
+    assert.match(
+      value,
+      /(serif|sans-serif|monospace)\s*$|var\(--(serif|sans|mono)\)\s*$/i,
+      `font-family "${value}" ends in a generic fallback`,
+    );
+  }
+
+  // The fonts <link> is the ONE external stylesheet reference; its failure only
+  // drops the CDN faces, leaving the generic fallbacks in place.
+  const stylesheets = [...PAGE_HTML.matchAll(/<link[^>]*rel="stylesheet"[^>]*>/gi)];
+  assert.equal(stylesheets.length, 1, "exactly one external stylesheet link (the fonts)");
+  assert.match(stylesheets[0][0], /fonts\.googleapis\.com\/css2\?family=Marcellus[^"]*Space\+Grotesk[^"]*Space\+Mono/i, "the fonts link requests all three families");
+}
+
+// --- #275 Criterion 3: the header renders the brand block and a right-aligned
+// heartbeat (pulsing dot, liveness text, time since last heartbeat), keeping
+// the existing live / silent / not-seen states. ---
+{
+  assert.match(
+    PAGE_HTML,
+    /<div class="brand">\s*<h1>Herd Dashboard<\/h1>\s*<span class="ordinal">Santorini<\/span>/i,
+    "the brand block pairs the serif title with the Santorini ordinal",
+  );
+  assert.match(PAGE_HTML, /\.brand h1\s*\{[^}]*font-family:\s*var\(--serif\)/i, "the title is set in the display serif");
+  assert.match(PAGE_HTML, /header \.heartbeat\s*\{[^}]*margin-left:\s*auto/i, "the heartbeat is pushed to the right of the header");
+  assert.match(PAGE_HTML, /<div class="heartbeat"><span class="dot" id="livedot">/i, "the heartbeat carries the live dot and liveness text");
+  // Pulsing dot.
+  assert.match(PAGE_HTML, /header \.dot\.live\s*\{[^}]*animation:\s*hb-pulse/i, "the live dot pulses");
+  assert.match(PAGE_HTML, /@keyframes hb-pulse/i, "the pulse animation is defined");
+  // Existing liveness states and the time-since text are preserved.
+  assert.match(PAGE_HTML, /supervisor not seen/, "the not-seen state is kept");
+  assert.match(PAGE_HTML, /supervisor silent/, "the silent state is kept");
+  assert.match(PAGE_HTML, /"supervisor live · heartbeat " \+ durText\(age\) \+ " ago"/, "the live state shows the time since the last heartbeat");
+}
+
+// --- #275 Criterion 4: the main content is a two-column grid (work column +
+// 400px incidents aside) that collapses to one column below 1180px, with the
+// existing errors-panel toggle behaviour intact. ---
+{
+  assert.match(PAGE_HTML, /\.layout\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/i, "the layout is a single-column grid by default");
+  assert.match(PAGE_HTML, /\.layout\.panel-open\s*\{\s*grid-template-columns:\s*minmax\(0,\s*1fr\)\s*400px/i, "opening the panel adds the 400px incidents aside track");
+  assert.match(PAGE_HTML, /@media \(max-width:\s*1180px\)\s*\{\s*\.layout\.panel-open\s*\{\s*grid-template-columns:\s*minmax\(0,\s*1fr\)/i, "below 1180px the grid collapses to a single column");
+  // Toggle behaviour intact: the same handler still shows/hides the panel and
+  // now also drives the grid track.
+  assert.match(PAGE_HTML, /\$\("errpanel"\)\.hidden = !panelOpen/, "the panel is still shown/hidden by the toggle");
+  assert.match(PAGE_HTML, /\$\("layout"\)\.classList\.toggle\("panel-open", panelOpen\)/, "the toggle drives the grid's aside track");
+}
+
+// --- #275 Criterion 5: every criterion above has exactly one test. ---
+{
+  const CRITERIA_COUNT = 5;
+  const selfText = readFileSync(fileURLToPath(import.meta.url), "utf8");
+  const markers = [...selfText.matchAll(/^\/\/ --- #275 Criterion (\d+):/gim)].map((m) => Number(m[1]));
+  const unique = new Set(markers);
+  assert.equal(markers.length, unique.size, "each #275 criterion is tested exactly once (no duplicate markers)");
+  assert.equal(markers.length, CRITERIA_COUNT, `one test per #275 acceptance criterion (${CRITERIA_COUNT})`);
+  for (let n = 1; n <= CRITERIA_COUNT; n++) assert.ok(unique.has(n), `#275 criterion ${n} has a test`);
 }
 
 console.log("PASS herd-ui.test.mjs");
