@@ -174,9 +174,29 @@ const liveWorkers = (state, isAlive) =>
 // worker. Any gh failure — a 404 for the not-yet-created ref or a transient
 // blip — is treated as "still waiting", so it never counts as a claim and
 // never (on its own) as a dispatch failure. Returns { claimed }.
-export async function waitForClaim({ gh, issue, timeoutMs, intervalMs = 1000, now = () => Date.now(), sleep = defaultSleep }) {
+//
+// The pass emitted its heartbeat once at the top of pollOnce, but this wait can
+// block the whole pass for up to claimTimeoutSeconds — long past the dashboard's
+// silence threshold — so a stuck dispatch would falsely alarm "supervisor silent"
+// while the supervisor is alive and busy-waiting here (issue-0285). We beat again
+// on the poll cadence throughout the wait: `heartbeat` fires no more than once per
+// `heartbeatIntervalMs` so the events stream isn't flooded, and it's a no-op when
+// unset (0 interval) so direct callers and tests keep the old behaviour. The
+// heartbeat itself must swallow its own write failure (see dispatchOne), so a
+// broken events path never aborts the wait.
+export async function waitForClaim({
+  gh,
+  issue,
+  timeoutMs,
+  intervalMs = 1000,
+  now = () => Date.now(),
+  sleep = defaultSleep,
+  heartbeat = null,
+  heartbeatIntervalMs = 0,
+}) {
   const ref = `repos/{owner}/{repo}/git/ref/heads/agent/issue-${issue}`;
   const start = now();
+  let lastBeat = start; // the pass already beat at its start; the next is due one interval on
   for (;;) {
     try {
       await gh(["api", ref]);
@@ -186,6 +206,10 @@ export async function waitForClaim({ gh, issue, timeoutMs, intervalMs = 1000, no
     }
     if (now() - start >= timeoutMs) return { claimed: false };
     await sleep(intervalMs);
+    if (heartbeat && heartbeatIntervalMs > 0 && now() - lastBeat >= heartbeatIntervalMs) {
+      heartbeat();
+      lastBeat = now();
+    }
   }
 }
 
@@ -213,6 +237,9 @@ export async function dispatchOne(opts) {
     maxWorkers = config.maxWorkers,
     claimTimeoutMs = (config.claimTimeoutSeconds ?? 300) * 1000,
     claimIntervalMs = 1000,
+    // Keep the fleet heartbeat alive while the claim wait blocks the pass, on the
+    // same poll cadence the loop beats at otherwise. See waitForClaim (issue-0285).
+    heartbeatIntervalMs = (config.pollSeconds ?? 60) * 1000,
     env = process.env,
     onPath,
   } = opts;
@@ -322,7 +349,21 @@ export async function dispatchOne(opts) {
     status: "dispatched",
   }, log);
 
-  const { claimed } = await waitForClaim({ gh, issue: issue.number, timeoutMs: claimTimeoutMs, intervalMs: claimIntervalMs, now, sleep });
+  // Beat the fleet heartbeat across the wait so a dispatch stuck for the full
+  // claimTimeoutSeconds never reads as a silent supervisor. Its own write failure
+  // is swallowed (warn: () => {}), matching pollOnce's heartbeat error policy, so
+  // a broken events path never aborts the wait or the pass.
+  const heartbeat = () => appendHerdEvent(eventsPath, { now: now(), event: "heartbeat" }, () => {});
+  const { claimed } = await waitForClaim({
+    gh,
+    issue: issue.number,
+    timeoutMs: claimTimeoutMs,
+    intervalMs: claimIntervalMs,
+    now,
+    sleep,
+    heartbeat,
+    heartbeatIntervalMs,
+  });
   if (!claimed) {
     try {
       kill(pid);
