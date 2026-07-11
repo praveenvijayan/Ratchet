@@ -1623,4 +1623,76 @@ await inTempDir(async (dir) => {
   for (let n = 1; n <= CRITERIA_COUNT; n++) assert.ok(unique.has(n), `#278 criterion ${n} has a test`);
 }
 
+// ===========================================================================
+// Issue #279 — Herd dashboard Santorini reskin, slice 0122 (incidents aside &
+// log console). One test per acceptance criterion, asserted against the page's
+// source (PAGE_HTML) — the reskin is presentational, so the checks are
+// structural CSS + render-code assertions. Each Criterion-N block carries a
+// `#279 Criterion N` marker; Criterion 5 self-counts them.
+// ===========================================================================
+
+// --- #279 Criterion 1: the errors & escalations panel is a bordered aside with
+// an ink-inverted head; each incident is a card, and unresolved (flagged)
+// incidents get the terra border, terra action buttons, and an offset shadow
+// while resolved ones are de-emphasised. ---
+{
+  assert.match(PAGE_HTML, /\.errpanel\s*\{[^}]*border:1\.5px solid var\(--ink\)[^}]*box-shadow:8px 8px 0/i, "the incidents aside is a bordered card with an offset shadow");
+  assert.match(PAGE_HTML, /\.errpanel-head\s*\{[^}]*background:var\(--ink\)[^}]*color:var\(--paper-hi\)/i, "the panel head is ink-inverted");
+  assert.match(PAGE_HTML, /\.esc\s*\{[^}]*border:1\.5px solid var\(--terra\)[^}]*box-shadow:4px 4px 0/i, "an unresolved incident card gets the accent border and offset shadow");
+  assert.match(PAGE_HTML, /\.esc \.act-btn\s*\{[^}]*border:1\.5px solid var\(--terra\)[^}]*color:var\(--terra\)/i, "the incident action buttons are accent-coloured");
+  assert.match(PAGE_HTML, /\.esc\.resolved\s*\{[^}]*opacity:0\.6/i, "a resolved incident is de-emphasised");
+}
+
+// --- #279 Criterion 2: the adapter-failure alerts and per-adapter breakdown
+// still render inside the aside (renderAdapterHealth into #adapterhealth) and
+// match the incident-card visual language (terra alert card, dashed-ruled table
+// under an ink header). ---
+{
+  assert.match(PAGE_HTML, /'<div class="adapter-alert">adapter <strong>'/, "the broken-adapter alerts still render as adapter-alert cards");
+  assert.match(PAGE_HTML, /'<table class="adapter-breakdown">/, "the per-adapter breakdown table still renders");
+  assert.match(PAGE_HTML, /s\.successes === 0 && s\.failures > 0 \? ' class="broken"'/, "an all-failing adapter row is flagged .broken");
+  assert.match(PAGE_HTML, /\.adapter-alert\s*\{[^}]*border:1\.5px solid var\(--terra\)/i, "the adapter alert card carries the incident accent border");
+  assert.match(PAGE_HTML, /\.adapter-breakdown th\s*\{[^}]*background:var\(--ink\)[^}]*color:var\(--paper-hi\)/i, "the breakdown header is ink-inverted");
+  assert.match(PAGE_HTML, /\.adapter-breakdown td\s*\{[^}]*border-top:1px dashed/i, "the breakdown rows are separated by dashed rules");
+}
+
+// --- #279 Criterion 3: the log console renders lines as timestamp / bold event
+// / faint meta, with escalation events in the accent colour; the filter input
+// matches the design and non-matching lines are hidden with a "No matches."
+// message when nothing matches. ---
+{
+  assert.match(PAGE_HTML, /\.timeline-ts\s*\{[^}]*color:var\(--ink-soft\)/i, "the timestamp is faint");
+  assert.match(PAGE_HTML, /\.timeline-event\s*\{[^}]*font-weight:700/i, "the event is bold");
+  assert.match(PAGE_HTML, /\.timeline-fields\s*\{[^}]*color:var\(--ink-soft\)/i, "the meta fields are faint");
+  assert.match(PAGE_HTML, /\.timeline-event\.esc\s*\{[^}]*color:var\(--terra\)/i, "escalation events are accent-coloured");
+  assert.match(PAGE_HTML, /String\(e\.event \|\| ""\)\.startsWith\("escalat"\) \? "timeline-event esc"/, "an escalation event is rendered with the accent class");
+  assert.match(PAGE_HTML, /\.logsearch\s*\{[^}]*border:1\.5px solid var\(--ink\)[^}]*box-shadow:4px 4px 0/i, "the filter input carries the design border and offset shadow");
+  assert.match(PAGE_HTML, /matched\.length === 0 && logBuffer\.length > 0/, "a query with zero matches hides the log tail");
+  assert.match(PAGE_HTML, /nomatch\.hidden = false/, "the No-matches message is shown when nothing matches");
+  assert.match(PAGE_HTML, /No matches\./, "the log pane carries the visible No-matches text");
+}
+
+// --- #279 Criterion 4: the acknowledge and copy-command actions keep working,
+// and an acknowledge failure shows a friendly, visible error on the incident
+// card (never a raw stack trace). ---
+{
+  assert.match(PAGE_HTML, /onclick="copyCmd\(this\)"[^>]*|data-cmd="/, "the copy-command action is wired");
+  assert.match(PAGE_HTML, /onclick="ackEsc\(this\)"/, "the acknowledge action is wired");
+  assert.match(PAGE_HTML, /fetch\("\/api\/acknowledge"/, "acknowledge still POSTs to /api/acknowledge");
+  assert.match(PAGE_HTML, /err\.textContent = "Failed to acknowledge: " \+ \(data\.error \|\| "unknown error"\)/, "an acknowledge failure shows a friendly message, not a raw stack trace");
+  assert.match(PAGE_HTML, /err\.className = "esc-error"/, "the failure is surfaced in a visible esc-error element on the card");
+  assert.match(PAGE_HTML, /\.esc \.esc-error\s*\{[^}]*color:var\(--terra\)/i, "the esc-error message is styled to stand out");
+}
+
+// --- #279 Criterion 5: every criterion above has exactly one test. ---
+{
+  const CRITERIA_COUNT = 5;
+  const selfText = readFileSync(fileURLToPath(import.meta.url), "utf8");
+  const markers = [...selfText.matchAll(/^\/\/ --- #279 Criterion (\d+):/gim)].map((m) => Number(m[1]));
+  const unique = new Set(markers);
+  assert.equal(markers.length, unique.size, "each #279 criterion is tested exactly once (no duplicate markers)");
+  assert.equal(markers.length, CRITERIA_COUNT, `one test per #279 acceptance criterion (${CRITERIA_COUNT})`);
+  for (let n = 1; n <= CRITERIA_COUNT; n++) assert.ok(unique.has(n), `#279 criterion ${n} has a test`);
+}
+
 console.log("PASS herd-ui.test.mjs");
