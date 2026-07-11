@@ -214,4 +214,56 @@ const memory = read("memory/MEMORY.md");
   }
 }
 
-console.log("PASS docs-refresh.test.mjs (6 #60 criteria + 4 #191 criteria + 4 #91 criteria + 3 #233 criteria)");
+// --- #268 Criterion 1: AGENTS.md instructs agents to update their branch onto
+// latest `main` (resolving conflicts) before moving the issue to
+// `state:in-review`. ---
+{
+  const handoff = agents.slice(
+    agents.indexOf("### 5. Hand off"),
+    agents.indexOf("### 6. Rework"),
+  );
+  assert.ok(handoff.length > 0, "AGENTS must have a §5 Hand off section to slice");
+  assert.match(
+    handoff,
+    /bring the latest `main` into your branch[\s\S]*resolve any conflicts/,
+    "AGENTS §5 must tell agents to update their branch onto latest main and resolve conflicts",
+  );
+  // The instruction must precede the state:in-review flip within §5.
+  assert.ok(
+    handoff.indexOf("bring the latest `main`") < handoff.indexOf("Set the issue to"),
+    "AGENTS §5 must require the branch update before the state:in-review flip",
+  );
+}
+
+// --- #268 Criterion 2: AGENTS.md documents that a PR with merge conflicts
+// triggers no event-driven workflows — no gates, no review-verdict — and is
+// therefore not reviewable until conflicts are resolved. ---
+{
+  assert.match(
+    agents,
+    /a PR with merge conflicts gets no\s+event-driven CI at all/,
+    "AGENTS must document that a conflicted PR gets no event-driven CI",
+  );
+  assert.match(
+    agents,
+    /`pr-gates` \*\*and\*\*\s*`review-verdict`[\s\S]*silently \*skipped\*/,
+    "AGENTS must name pr-gates and review-verdict as silently skipped on a conflicted PR",
+  );
+  assert.match(
+    agents,
+    /not reviewable/,
+    "AGENTS must state that conflicted, un-gated work is not reviewable",
+  );
+}
+
+// --- #268 Criterion 3: every #268 criterion above has exactly one test named
+// after it. ---
+{
+  const self = read("scripts/docs-refresh.test.mjs");
+  for (const n of [1, 2]) {
+    const hits = (self.match(new RegExp(`#268 Criterion ${n}:`, "g")) || []).length;
+    assert.equal(hits, 1, `#268 Criterion ${n} must have exactly one named test`);
+  }
+}
+
+console.log("PASS docs-refresh.test.mjs (6 #60 criteria + 4 #191 criteria + 4 #91 criteria + 3 #233 criteria + 2 #268 criteria)");
