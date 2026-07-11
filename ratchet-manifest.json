@@ -99,6 +99,7 @@
     { "path": "scripts/herd-ui-log-search.test.mjs", "class": "excluded" },
     { "path": "scripts/herd-ui-mascot-deck.test.mjs", "class": "excluded" },
     { "path": "scripts/herd-ui-summary-strip.test.mjs", "class": "excluded" },
+    { "path": "scripts/herd-ui-truthful-tally.test.mjs", "class": "excluded" },
     { "path": "scripts/herd-ui.test.mjs", "class": "excluded" },
     { "path": "scripts/herd-verify.test.mjs", "class": "excluded" },
     { "path": "scripts/herd.test.mjs", "class": "excluded" },

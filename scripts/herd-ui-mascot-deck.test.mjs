@@ -65,7 +65,7 @@ const workers = [
 
   // The client renders each of the six card parts. Bay number is derived from the
   // card's position (i + 1), the vitals strip has three labelled cells.
-  for (const marker of ['class="family"', 'class="slot-no">bay ', 'class="mascot"><img', 'class="name"', 'class="duty', 'class="vitals"', 'vital("Disp.", c.dispatches)', 'vital("Fail", c.failures)', 'vital("OK", c.successes)']) {
+  for (const marker of ['class="family"', 'class="slot-no">bay ', 'class="mascot"><img', 'class="name"', 'class="duty', 'class="vitals"', 'vital("Disp.", c.dispatches)', 'vital("Fail", c.failures)', 'vital("Launched", c.successes)']) {
     assert.ok(PAGE_HTML.includes(marker), `card renders ${marker}`);
   }
 }
@@ -137,7 +137,7 @@ const workers = [
 // "10 bays · new agents dock automatically". ---
 {
   assert.ok(PAGE_HTML.includes('<span class="tally" id="decktally">'), "the heading has a live adapter tally element");
-  assert.ok(PAGE_HTML.includes("tallyEl.textContent = String(cards.length)"), "the tally is set to the live adapter count");
+  assert.ok(PAGE_HTML.includes("cards.filter((c) => c.activeIssue != null)"), "the tally counts only adapters with a live worker");
   assert.ok(PAGE_HTML.includes("10 bays · new agents dock automatically"), "the heading carries the capacity note");
   assert.ok(PAGE_HTML.includes(">Active Agents<"), "the section is headed Active Agents");
 }
