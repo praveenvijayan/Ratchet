@@ -12,13 +12,13 @@
 // Zero dependencies: node:http, node:fs, node:child_process (git remote lookup).
 
 import { createServer as httpCreateServer } from "node:http";
-import { existsSync, readFileSync, openSync, readSync, fstatSync, closeSync, appendFileSync } from "node:fs";
+import { existsSync, readFileSync, openSync, readSync, fstatSync, closeSync, appendFileSync, statSync } from "node:fs";
 import { execFileSync, execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { realpathSync } from "node:fs";
 
-import { join } from "node:path";
+import { join, basename, extname, sep } from "node:path";
 import { readState, STATE_FILE, EVENTS_FILE, ESCALATIONS_FILE, STALE_CLAIM_STATUS, resolveRepoRoot, ratchetPaths } from "./herd-survey.mjs";
 import { DEFAULTS, CONFIG_PATH, loadConfig, HerdConfigError } from "./herd.mjs";
 import { defaultAvatarFor } from "./herd-avatars.mjs";
@@ -286,6 +286,103 @@ export function adapterFamily(name) {
   return dash > 0 ? s.slice(0, dash) : s;
 }
 
+// The URL prefix the static image route serves repo-local avatar art under.
+// Framework-pure: names no CLI, model, or vendor — just the served directory.
+export const MASCOT_ROUTE = "/mascots/";
+
+// Resolve an adapter's avatar to the URL the browser loads. A remote URL
+// (http://, https://) or an inline data: URI passes through unchanged. A
+// repo-local path (no protocol) is served from the dashboard's static image
+// route at /mascots/<basename>, so the photographic art loads by direct URL
+// — never base64/data-URI inlined. A null/empty avatar stays null so the
+// bundled default renders. Pure: same input → same URL, no I/O. The basename
+// extraction means `mascots/fig-goggles.png` and `fig-goggles.png` both serve
+// from the same route — the route validates the filename against traversal.
+export function resolveAvatarUrl(avatar) {
+  if (avatar == null || avatar === "") return null;
+  if (/^(https?:|data:)/.test(avatar)) return avatar;
+  const base = basename(avatar.replace(/^\/+/, ""));
+  return base ? MASCOT_ROUTE + base : null;
+}
+
+// Content types for the static image route. The route serves whatever the
+// host repo places in mascots/; the framework knows no specific art file.
+const IMAGE_CONTENT_TYPES = Object.freeze({
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".svg": "image/svg+xml",
+  ".avif": "image/avif",
+});
+
+// Serve a single image file from mascotsDir, or return a 404 response. The
+// filename is validated at every layer against path traversal: it must be a
+// bare single-segment name (no /, \, .., or empty), and the joined path must
+// still resolve inside mascotsDir. A traversal attempt gets a 404 — never file
+// contents from outside the served directory. Exported for testing.
+export function serveMascotImage(req, res, mascotsDir, url) {
+  if (!mascotsDir || !existsSync(mascotsDir)) {
+    res.writeHead(404, { "Content-Type": "text/plain" });
+    res.end("not found");
+    return;
+  }
+  const raw = url.pathname.slice(MASCOT_ROUTE.length);
+  let filename;
+  try {
+    filename = decodeURIComponent(raw);
+  } catch {
+    res.writeHead(404, { "Content-Type": "text/plain" });
+    res.end("not found");
+    return;
+  }
+  // Reject any multi-segment path, parent reference, or empty name — only a
+  // bare filename directly in the served directory is served. This is the
+  // primary traversal guard; the realpath check below is belt-and-braces.
+  if (filename === "" || /[/\\]/.test(filename) || filename === "." || filename === "..") {
+    res.writeHead(404, { "Content-Type": "text/plain" });
+    res.end("not found");
+    return;
+  }
+  const resolved = join(mascotsDir, filename);
+  // Belt-and-braces: the joined path must still be inside mascotsDir. A
+  // symlink or other escape resolves outside and gets a 404.
+  const dirReal = realpathSync(mascotsDir);
+  let fileReal;
+  try {
+    fileReal = realpathSync(resolved);
+  } catch {
+    res.writeHead(404, { "Content-Type": "text/plain" });
+    res.end("not found");
+    return;
+  }
+  if (!fileReal.startsWith(dirReal + sep) && fileReal !== dirReal) {
+    res.writeHead(404, { "Content-Type": "text/plain" });
+    res.end("not found");
+    return;
+  }
+  let st;
+  try {
+    st = statSync(fileReal);
+  } catch {
+    res.writeHead(404, { "Content-Type": "text/plain" });
+    res.end("not found");
+    return;
+  }
+  if (!st.isFile()) {
+    res.writeHead(404, { "Content-Type": "text/plain" });
+    res.end("not found");
+    return;
+  }
+  const ct = IMAGE_CONTENT_TYPES[extname(filename).toLowerCase()] || "application/octet-stream";
+  const data = readFileSync(fileReal);
+  // Cache the art in the browser so live-stream updates never re-transmit or
+  // re-fetch it — the snapshot carries a URL, not the image data.
+  res.writeHead(200, { "Content-Type": ct, "Content-Length": data.length, "Cache-Control": "public, max-age=3600" });
+  res.end(data);
+}
+
 // One deck card per *configured* adapter, in config order, each joined with its
 // dispatch counts and the issue any live worker currently holds on it. Adapters
 // that have never dispatched still get a card (zero counts), so a freshly added
@@ -305,10 +402,12 @@ export function buildDeck({ config, adapters = [], workers = [] }) {
     return {
       name,
       family: adapterFamily(name),
-      // Avatar the browser tries first: the adapter's own non-empty avatar, else
-      // null so it renders the bundled default. defaultAvatar is always a valid
-      // data URI, doubling as the load-failure fallback — never a broken image.
-      avatar: cfg && typeof cfg.avatar === "string" && cfg.avatar !== "" ? cfg.avatar : null,
+      // Avatar the browser tries first: the adapter's own non-empty avatar,
+      // resolved to a served URL for local paths (or passed through for remote
+      // URLs / data URIs), else null so it renders the bundled default.
+      // defaultAvatar is always a valid data URI, doubling as the load-failure
+      // fallback — never a broken image.
+      avatar: resolveAvatarUrl(cfg && typeof cfg.avatar === "string" && cfg.avatar !== "" ? cfg.avatar : null),
       defaultAvatar: defaultAvatarFor(name),
       dispatches: s ? s.dispatches : 0,
       failures: s ? s.failures : 0,
@@ -516,12 +615,15 @@ export function buildWorkers({ state, events, config, now = Date.now(), repoSlug
     const claimAgeSeconds =
       claimStartTs !== null ? Math.max(0, Math.floor((now - Date.parse(claimStartTs)) / 1000)) : null;
     // Avatar the browser should try first: the adapter's own `avatar` when it
-    // declared a non-empty one, else null so the row shows its bundled default.
-    // The default is deterministic per adapter name (same mascot every restart)
-    // and always a valid data URI, so it doubles as the load-failure fallback.
+    // declared a non-empty one, resolved to a served URL for local paths (or
+    // passed through for remote URLs / data URIs), else null so the row shows
+    // its bundled default. The default is deterministic per adapter name (same
+    // mascot every restart) and always a valid data URI, so it doubles as the
+    // load-failure fallback.
     const adapterCfg = config.adapters ? config.adapters[e.adapter] : undefined;
-    const avatar =
-      adapterCfg && typeof adapterCfg.avatar === "string" && adapterCfg.avatar !== "" ? adapterCfg.avatar : null;
+    const avatar = resolveAvatarUrl(
+      adapterCfg && typeof adapterCfg.avatar === "string" && adapterCfg.avatar !== "" ? adapterCfg.avatar : null,
+    );
     const status = e.status ?? "unknown";
     const claimActive = e.pid != null && !TERMINAL_STATUS.has(status);
     // Usage from the issue's latest usage-bearing worker-exit event (0075), or
@@ -990,6 +1092,7 @@ export function createDashboardServer({
   escalationsPath = ESCALATIONS_FILE,
   resolutionsPath = RESOLUTIONS_FILE,
   config = { ...DEFAULTS },
+  configPath = null,
   repoSlug = null,
   now = Date.now,
   pollMs = 1000,
@@ -998,11 +1101,29 @@ export function createDashboardServer({
   fetchTitle = null,
   notify = null,
   fetchReadyCount = null,
+  mascotsDir = null,
 } = {}) {
   const checksCache = createChecksCache({ fetchChecks: fetchChecks || defaultFetchChecks, refreshMs: checksRefreshMs });
   const titleCache = createTitleCache({ fetchTitle: fetchTitle || defaultFetchTitle });
   const readyQueueCache = createReadyQueueCache({ fetchReadyCount: fetchReadyCount || defaultFetchReadyCount });
-  const snap = () => readSnapshot({ statePath, eventsPath, escalationsPath, resolutionsPath, config, now: now(), repoSlug, checksCache, titleCache, readyQueueCache });
+  // Re-read herd.json for every snapshot so operator edits (avatars,
+  // claimTimeoutSeconds, pollSeconds …) reflect in the next snapshot the browser
+  // receives, without restarting the server. One read per snapshot means the whole
+  // snapshot is built from a single config value — never a half-old, half-new mix.
+  // A missing or unparseable file (any HerdConfigError, or any read failure) keeps
+  // the last good config and never crashes the request. With no configPath the
+  // config stays fixed at the value passed in — the offline test path.
+  let liveConfig = config;
+  const resolveConfig = () => {
+    if (!configPath) return liveConfig;
+    try {
+      liveConfig = loadConfig(configPath, { warn: false });
+    } catch {
+      // keep last good liveConfig
+    }
+    return liveConfig;
+  };
+  const snap = () => readSnapshot({ statePath, eventsPath, escalationsPath, resolutionsPath, config: resolveConfig(), now: now(), repoSlug, checksCache, titleCache, readyQueueCache });
 
   const server = httpCreateServer((req, res) => {
     const url = new URL(req.url, "http://localhost");
@@ -1149,6 +1270,15 @@ export function createDashboardServer({
       return;
     }
 
+    // Static image route — serves the photographic mascot figures from the
+    // repo's mascots/ directory. Path-traversal is rejected at every layer;
+    // a request like /mascots/../.ratchet/herd.json gets a 404, never file
+    // contents from outside the served directory. See serveMascotImage.
+    if (req.method === "GET" && url.pathname.startsWith(MASCOT_ROUTE)) {
+      serveMascotImage(req, res, mascotsDir, url);
+      return;
+    }
+
     res.writeHead(404, { "Content-Type": "text/plain" });
     res.end("not found");
   });
@@ -1199,9 +1329,11 @@ export async function run(argv, { log = console.log, cwd = process.cwd() } = {})
   const root = resolveRepoRoot(cwd);
   const { statePath, eventsPath, escalationsPath } = ratchetPaths(root);
   const resolutionsPath = join(root, RESOLUTIONS_FILE);
-  const config = loadConfigOrDefaults(join(root, CONFIG_PATH));
+  const configPath = join(root, CONFIG_PATH);
+  const config = loadConfigOrDefaults(configPath);
   const repoSlug = resolveRepoSlug(gitOriginUrl(cwd));
-  const server = createDashboardServer({ statePath, eventsPath, escalationsPath, resolutionsPath, config, repoSlug, notify: createNotifier() });
+  const mascotsDir = join(root, "mascots");
+  const server = createDashboardServer({ statePath, eventsPath, escalationsPath, resolutionsPath, config, repoSlug, notify: createNotifier(), mascotsDir });
   const bound = await listenOrFail(server, port);
   log(`Herd dashboard on http://localhost:${bound}  (Ctrl-C to stop)`);
   return { server, port: bound };
@@ -1356,16 +1488,25 @@ export const PAGE_HTML = `<!doctype html>
   .sec .roster { font-family:var(--mono); font-size:10px; letter-spacing:.12em; text-transform:uppercase; color:var(--ink-soft); }
   /* Active Agents mascot deck (0120) — center stage above the work column. */
   .deckwrap { margin:0 0 30px; }
-  /* auto-fill grid flexes from 1 to 10 mascots without any layout change. */
-  .deck { display:grid; grid-template-columns:repeat(auto-fill, minmax(206px, 1fr)); gap:20px; }
+  /* auto-fill grid flexes from 1 to 10 mascots without any layout change.
+     padding-top:52px and row-gap:72px give the overflowing figures headroom
+     so they never collide with the section header or the row of cards above. */
+  .deck { display:grid; grid-template-columns:repeat(auto-fill, minmax(206px, 1fr)); gap:20px; padding-top:52px; row-gap:72px; }
   .mascot-card { position:relative; border:1.5px solid var(--ink); background:var(--paper-hi); box-shadow:6px 6px 0 var(--ink-faint); padding:26px 18px 18px; display:flex; flex-direction:column; align-items:center; gap:14px; transition:transform .18s ease, box-shadow .18s ease; }
   .mascot-card:hover { transform:translateY(-4px); box-shadow:8px 10px 0 var(--ink-faint); }
-  .mascot-card::before { content:""; position:absolute; inset:6px; border:1px dashed var(--ink-faint); pointer-events:none; }
-  .mascot-card .family { position:absolute; top:12px; left:14px; font-family:var(--mono); font-size:8.5px; letter-spacing:.2em; text-transform:uppercase; color:var(--ink-soft); }
-  .mascot-card .slot-no { position:absolute; top:12px; right:14px; font-family:var(--mono); font-size:8.5px; letter-spacing:.14em; color:var(--ink-soft); }
-  .mascot { position:relative; width:132px; height:126px; margin-top:6px; display:grid; place-items:center; }
-  .mascot img { width:126px; height:126px; object-fit:contain; filter:drop-shadow(3px 4px 0 var(--ink-faint)); transition:transform .18s ease; }
-  .mascot-card:hover .mascot img { transform:translateY(-3px) scale(1.03); }
+  .mascot-card::before { content:""; position:absolute; inset:6px; border:1px dashed var(--ink-faint); pointer-events:none; z-index:1; }
+  .mascot-card .family { position:absolute; top:12px; left:14px; font-family:var(--mono); font-size:8.5px; letter-spacing:.2em; text-transform:uppercase; color:var(--ink-soft); z-index:4; }
+  .mascot-card .slot-no { position:absolute; top:12px; right:14px; font-family:var(--mono); font-size:8.5px; letter-spacing:.14em; color:var(--ink-soft); z-index:4; }
+  /* The mascot itself: a 3D vinyl figure popping out of the card frame. The
+     slot is 132×126 but the image is 192px tall, absolutely positioned at the
+     bottom, overflowing ~60px above the card's top border — unclipped, z-index:3
+     so it sits over the card border and the dashed inner frame (::before). */
+  .mascot { position:relative; width:132px; height:126px; margin-top:6px; }
+  /* Contact shadow where the figure meets the card — an elliptical ground
+     shadow, centered, sitting just below the slot. */
+  .mascot::after { content:""; position:absolute; left:50%; bottom:-6px; transform:translateX(-50%); width:96px; height:16px; border-radius:50%; background:radial-gradient(closest-side, rgba(31,41,51,.28), rgba(31,41,51,0) 72%); z-index:2; }
+  .mascot img { position:absolute; left:50%; bottom:0; transform:translateX(-50%); height:192px; width:auto; max-width:none; object-fit:contain; z-index:3; filter:drop-shadow(0 12px 10px rgba(31,41,51,.30)) drop-shadow(0 3px 3px rgba(31,41,51,.18)); transition:transform .22s ease, filter .22s ease; }
+  .mascot-card:hover .mascot img { transform:translateX(-50%) translateY(-7px) scale(1.05); filter:drop-shadow(0 20px 16px rgba(31,41,51,.32)) drop-shadow(0 4px 4px rgba(31,41,51,.16)); }
   .mascot-card .name { font-family:var(--mono); font-weight:700; font-size:13px; text-align:center; overflow-wrap:anywhere; }
   .mascot-card .duty { display:inline-flex; align-items:center; gap:7px; font-family:var(--mono); font-size:9px; letter-spacing:.16em; text-transform:uppercase; padding:4px 10px; border:1px solid currentColor; }
   .duty.on { color:var(--ink-deep); background:rgba(63,62,120,.08); }
@@ -1596,7 +1737,8 @@ export const PAGE_HTML = `<!doctype html>
   // failures / successes per adapter so the worst one reads at a glance.
   // Active Agents deck (0120): one mascot card per configured adapter, then
   // dashed empty bays out to the fleet's capacity. The card's avatar tries the
-  // adapter's own image first and falls back to the bundled data-URI mascot via
+  // adapter's own image first (now a served URL for repo-local photographic art,
+  // or a remote URL / data URI) and falls back to the bundled data-URI mascot via
   // avatarFallback — a broken image is never shown. Zero vital counts keep their
   // cell (faint treatment) so a fresh adapter still reads all three.
   function renderDeck() {
