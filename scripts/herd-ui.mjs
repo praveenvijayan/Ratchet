@@ -1441,14 +1441,28 @@ export const PAGE_HTML = `<!doctype html>
   .hbbanner { border-radius:6px; padding:12px 16px; margin-bottom:16px; font-weight:600; border:1px solid; border-left-width:4px; }
   .hbbanner.silent { color:var(--over); border-color:var(--over); background:color-mix(in srgb, var(--over) 10%, transparent); }
   .hbbanner.unseen { color:var(--warn); border-color:var(--warn); background:color-mix(in srgb, var(--warn) 10%, transparent); }
-  /* Top region (0132): errors & escalations sit top-left and the active agents
-     deck sits to their right. Two-column grid on a desktop-width viewport
-     (fixed errors column + flexible deck); below 1180px it collapses to a
-     single column so the two regions stack vertically without overlapping. */
-  .topregion { display:grid; grid-template-columns:minmax(0,420px) minmax(0,1fr); gap:34px; align-items:start; margin:0 0 36px; }
+  /* Top region (0135): the active agents deck — with the workers pane and the
+     log console stacked beneath it, all inside #deckwrap — is the flexible
+     left column; errors & escalations is the fixed right column. Two-column
+     grid on a desktop-width viewport; below 1180px it collapses to a single
+     column so the two regions stack vertically without overlapping. */
+  .topregion { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,420px); gap:34px; align-items:start; margin:0 0 36px; }
   @media (max-width:1180px) { .topregion { grid-template-columns:minmax(0,1fr); } }
-  /* Below the top region the work column spans the full width. */
-  .layout { display:block; }
+  /* 0135: cap the page at 100vh on a desktop-width viewport so it never grows
+     unbounded. The header/top strip stay fixed at the top of a flex-column
+     body, and each top-region column scrolls its own overflowing content
+     rather than the whole page. Scoped to >=1181px only: below 1180px the
+     columns stack and the page scrolls normally, so the cap never clips. */
+  @media (min-width:1181px) {
+    html, body { height:100%; }
+    body { overflow:hidden; display:flex; flex-direction:column; }
+    main { flex:1 1 auto; min-height:0; display:flex; flex-direction:column; overflow:hidden; }
+    .topregion { flex:1 1 auto; min-height:0; align-items:stretch; }
+    .deckwrap, .errpanel { min-height:0; overflow-y:auto; }
+  }
+  /* Inside #deckwrap the workers pane and log console span the column width,
+     separated from the deck above by a matching gap. */
+  .layout { display:block; margin-top:34px; }
   .fleet { min-width:0; }
   /* Error count badge in the errors-region head (0132: replaces the toggle chip). */
   .errcount { background:var(--terra); color:var(--paper-hi); border-radius:99px; padding:1px 9px; font-size:11px; font-weight:700; min-width:20px; text-align:center; }
@@ -1519,7 +1533,8 @@ export const PAGE_HTML = `<!doctype html>
   .sec .rule::after { content:""; position:absolute; right:0; top:-3px; width:7px; height:7px; background:var(--ink); transform:rotate(45deg); }
   .sec .note { font-family:var(--mono); font-size:9.5px; letter-spacing:.18em; text-transform:uppercase; color:var(--ink-soft); }
   .sec .roster { font-family:var(--mono); font-size:10px; letter-spacing:.12em; text-transform:uppercase; color:var(--ink-soft); }
-  /* Active Agents mascot deck (0120; 0132: sits right of the errors region). */
+  /* Active Agents mascot deck (0120; 0135: the left column, above the workers
+     pane and log console). */
   .deckwrap { margin:0; }
   /* auto-fill grid flexes from 1 to 10 mascots without any layout change.
      padding-top:52px and row-gap:72px give the overflowing figures headroom
@@ -1627,6 +1642,28 @@ export const PAGE_HTML = `<!doctype html>
   <div class="summarystrip" id="summarystrip" aria-label="Fleet summary"></div>
   <div id="hbbanner" class="hbbanner" role="status" hidden></div>
   <div class="topregion" id="topregion">
+    <section class="deckwrap" id="deckwrap" aria-label="Active agents" hidden>
+      <div class="sec">
+        <h2 class="group-head">Active Agents</h2>
+        <span class="tally" id="decktally">0</span>
+        <span class="roster" id="deckroster">0/${DECK_CAPACITY}</span>
+        <span class="rule"></span>
+        <span class="note">${DECK_CAPACITY} bays · new agents dock automatically</span>
+      </div>
+      <div class="deck" id="deck"></div>
+      <div class="layout" id="layout">
+        <div class="fleet" id="fleet">
+          <div id="workers"></div>
+        </div>
+      </div>
+      <div class="logpane" id="logpane" hidden>
+        <h2 id="logtitle"></h2>
+        <div id="timeline" class="timeline"></div>
+        <input type="search" id="logsearch" class="logsearch" placeholder="Filter log lines…" autocomplete="off">
+        <div id="lognomatch" class="lognomatch" hidden>No matches.</div>
+        <pre class="log" id="log"></pre>
+      </div>
+    </section>
     <aside class="errpanel" id="errpanel" aria-label="Errors and escalations">
       <div class="errpanel-head">
         <h2>Errors &amp; escalations</h2>
@@ -1635,28 +1672,6 @@ export const PAGE_HTML = `<!doctype html>
       <div class="adapterhealth" id="adapterhealth"></div>
       <div class="escalations" id="escalations"></div>
     </aside>
-    <section class="deckwrap" id="deckwrap" aria-label="Active agents" hidden>
-    <div class="sec">
-      <h2 class="group-head">Active Agents</h2>
-      <span class="tally" id="decktally">0</span>
-      <span class="roster" id="deckroster">0/${DECK_CAPACITY}</span>
-      <span class="rule"></span>
-      <span class="note">${DECK_CAPACITY} bays · new agents dock automatically</span>
-    </div>
-    <div class="deck" id="deck"></div>
-  </section>
-  </div>
-  <div class="layout" id="layout">
-    <div class="fleet" id="fleet">
-      <div id="workers"></div>
-    </div>
-  </div>
-  <div class="logpane" id="logpane" hidden>
-    <h2 id="logtitle"></h2>
-    <div id="timeline" class="timeline"></div>
-    <input type="search" id="logsearch" class="logsearch" placeholder="Filter log lines…" autocomplete="off">
-    <div id="lognomatch" class="lognomatch" hidden>No matches.</div>
-    <pre class="log" id="log"></pre>
   </div>
 </main>
 <script>

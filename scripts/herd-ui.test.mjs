@@ -1406,14 +1406,15 @@ await inTempDir(async (dir) => {
   assert.match(PAGE_HTML, /"supervisor live · heartbeat " \+ durText\(age\) \+ " ago"/, "the live state shows the time since the last heartbeat");
 }
 
-// --- #275 Criterion 4: the top region is a two-column grid (errors &
-// escalations + active agents deck) that collapses to one column below 1180px.
-// (Superseded #306 layout: the toggled aside became the top-left errors region;
-// the responsive top-region grid keeps this criterion's intent.) ---
+// --- #275 Criterion 4: the top region is a two-column grid (active agents deck
+// + errors & escalations) that collapses to one column below 1180px.
+// (Superseded #306/#316 layout: the deck is now the flexible left column and the
+// errors region the fixed right column; the responsive top-region grid keeps
+// this criterion's intent.) ---
 {
-  assert.match(PAGE_HTML, /\.topregion\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*minmax\(0,\s*420px\)\s*minmax\(0,\s*1fr\)/i, "the top region is a two-column grid on a desktop-width viewport");
+  assert.match(PAGE_HTML, /\.topregion\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s*minmax\(0,\s*420px\)/i, "the top region is a two-column grid on a desktop-width viewport");
   assert.match(PAGE_HTML, /@media \(max-width:\s*1180px\)\s*\{\s*\.topregion\s*\{\s*grid-template-columns:\s*minmax\(0,\s*1fr\)/i, "below 1180px the top region collapses to a single column");
-  assert.match(PAGE_HTML, /<div class="topregion"[\s\S]*id="errpanel"[\s\S]*id="deckwrap"/, "the errors region precedes the deck inside the top region");
+  assert.match(PAGE_HTML, /<div class="topregion"[\s\S]*id="deckwrap"[\s\S]*id="errpanel"/, "the deck precedes the errors region inside the top region");
 }
 
 // --- #275 Criterion 5: every criterion above has exactly one test. ---
@@ -1657,19 +1658,14 @@ await inTempDir(async (dir) => {
   assert.match(PAGE_HTML, /data-default="' \+ esc\(c\.defaultAvatar\)/, "the deck card carries the bundled default the fallback swaps to");
 }
 
-// --- #304 Criterion 1: the header brand renders the text "Ratchet herd
-// dashboard", with the "herd dashboard" portion in lowercase (not uppercased
-// by CSS). ---------------------------------------------------------------
+// --- #304 Criterion 1: the header brand renders the dashboard name in the h1,
+// not uppercased by CSS. (The "Name updated" change on main set the visible
+// header to "Herd Dashboard"; this criterion tracks that intended name.) -----
 {
   assert.match(
     PAGE_HTML,
-    /<div class="brand">\s*<h1>.*?Ratchet.*?herd dashboard.*?<\/h1>/is,
-    "the header brand renders the text \"Ratchet herd dashboard\" inside the h1",
-  );
-  assert.match(
-    PAGE_HTML,
-    /<span class="role">herd dashboard<\/span>/,
-    "the \"herd dashboard\" portion is literal lowercase text in its own span",
+    /<div class="brand">\s*<h1>Herd Dashboard<\/h1>/,
+    "the header brand renders \"Herd Dashboard\" inside the h1",
   );
   // The .brand h1 rule must not uppercase the text (the old treatment did).
   assert.doesNotMatch(
@@ -1679,28 +1675,13 @@ await inTempDir(async (dir) => {
   );
 }
 
-// --- #304 Criterion 2: "Ratchet" is visually distinguished from the lowercase
-// "herd dashboard" (its own weight/size/element), so the product name leads. -
+// --- #304 Criterion 2: the header name is set in the display serif at the
+// brand size, so it reads as the page title. --------------------------------
 {
   assert.match(
     PAGE_HTML,
-    /<h1><span class="product">Ratchet<\/span> <span class="role">herd dashboard<\/span><\/h1>/,
-    "\"Ratchet\" is its own element (.product) separate from the lowercase role span",
-  );
-  assert.match(
-    PAGE_HTML,
-    /\.brand h1 \.product\s*\{[^}]*font-family:\s*var\(--serif\)/i,
-    "\"Ratchet\" (.product) is set in the display serif",
-  );
-  assert.match(
-    PAGE_HTML,
-    /\.brand h1 \.role\s*\{[^}]*font-family:\s*var\(--sans\)/i,
-    "\"herd dashboard\" (.role) is set in the sans family, distinct from the serif product name",
-  );
-  assert.match(
-    PAGE_HTML,
-    /\.brand h1 \.role\s*\{[^}]*font-size:\s*19px/i,
-    "\"herd dashboard\" (.role) uses a smaller size than the 30px product name",
+    /\.brand h1\s*\{[^}]*font-family:\s*var\(--serif\)[^}]*font-size:\s*30px/i,
+    "the header name (.brand h1) is set in the display serif at 30px",
   );
 }
 

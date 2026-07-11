@@ -64,6 +64,7 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 | 4y    | test: herd-ui                   | `node scripts/herd-ui.test.mjs`                   | exit 0 |
 | 4y2   | test: herd-avatar               | `node scripts/herd-avatar.test.mjs`               | exit 0 |
 | 4y3   | test: herd-ui-log-search        | `node scripts/herd-ui-log-search.test.mjs`        | exit 0 |
+| 4y15  | test: herd-ui-dashboard-columns | `node scripts/herd-ui-dashboard-columns.test.mjs` | exit 0 |
 | 4y14  | test: herd-ui-supervisor-status | `node scripts/herd-ui-supervisor-status.test.mjs` | exit 0 |
 | 4y4   | test: herd-ui-escalation        | `node scripts/herd-ui-escalation.test.mjs`        | exit 0 |
 | 4y5   | test: herd-ui-acknowledge       | `node scripts/herd-ui-acknowledge.test.mjs`       | exit 0 |
