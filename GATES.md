@@ -70,6 +70,7 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 | 4y7   | test: herd-ui-summary-strip     | `node scripts/herd-ui-summary-strip.test.mjs`     | exit 0 |
 | 4y9   | test: herd-ui-mascot-deck       | `node scripts/herd-ui-mascot-deck.test.mjs`       | exit 0 |
 | 4y10  | test: herd-ui-truthful-tally    | `node scripts/herd-ui-truthful-tally.test.mjs`  | exit 0 |
+| 4y13  | test: herd-ui-mascot-deck-live  | `node scripts/herd-ui-mascot-deck-live.test.mjs` | exit 0 |
 | 4y11  | test: herd-ui-vinyl-deck        | `node scripts/herd-ui-vinyl-deck.test.mjs`        | exit 0 |
 | 4y12  | test: herd-mascots-install      | `node scripts/herd-mascots-install.test.mjs`   | exit 0 |
 | 4y8   | test: herd-notify               | `node scripts/herd-notify.test.mjs`               | exit 0 |

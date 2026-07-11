@@ -383,12 +383,14 @@ export function serveMascotImage(req, res, mascotsDir, url) {
   res.end(data);
 }
 
-// One deck card per *configured* adapter, in config order, each joined with its
-// dispatch counts and the issue any live worker currently holds on it. Adapters
-// that have never dispatched still get a card (zero counts), so a freshly added
-// adapter is visible before its first run. The browser draws the empty bays up
-// to DECK_CAPACITY from this array's length. Pure: given the same config,
-// dispatch stats, and workers it always returns the same cards.
+// One deck *entry* per *configured* adapter, in config order — the fleet roster,
+// each joined with its dispatch counts and the issue any live worker currently
+// holds on it. This is a projection of config, not the rendered deck: the
+// browser draws a mascot card only for entries with a live worker (`activeIssue`
+// set) and renders the rest of the capacity as open bays, so the deck shows the
+// fleet that is actually running. The roster count (this array's length over
+// DECK_CAPACITY) keeps configured composition visible. Pure: given the same
+// config, dispatch stats, and workers it always returns the same entries.
 export function buildDeck({ config, adapters = [], workers = [] }) {
   const stats = new Map();
   for (const a of adapters || []) stats.set(a.adapter, a);
@@ -397,8 +399,19 @@ export function buildDeck({ config, adapters = [], workers = [] }) {
     const cfg = config.adapters[name];
     const s = stats.get(name);
     // The issue a live worker is running on this adapter, if any — drives the
-    // active duty chip. First live match wins; null means "standing by".
-    const active = (workers || []).find((w) => w.adapter === name && w.claimActive) || null;
+    // active duty chip and whether a card renders at all. First live match wins.
+    // A null/undefined entry in the workers list is skipped, never dereferenced.
+    const active = (workers || []).find((w) => w && w.adapter === name && w.claimActive) || null;
+    // A live worker only counts when it carries a usable issue identifier — a
+    // finite number or a non-empty string. Missing or malformed worker data (no
+    // issue, NaN, an empty string, a non-scalar) leaves activeIssue null, so the
+    // adapter reads as idle: no card, never a partial one and never a throw.
+    const issue = active ? active.issue : null;
+    const liveIssue =
+      (typeof issue === "number" && Number.isFinite(issue)) ||
+      (typeof issue === "string" && issue.trim() !== "")
+        ? issue
+        : null;
     return {
       name,
       family: adapterFamily(name),
@@ -412,7 +425,7 @@ export function buildDeck({ config, adapters = [], workers = [] }) {
       dispatches: s ? s.dispatches : 0,
       failures: s ? s.failures : 0,
       successes: s ? s.successes : 0,
-      activeIssue: active ? active.issue : null,
+      activeIssue: liveIssue,
     };
   });
 }
@@ -1735,29 +1748,38 @@ export const PAGE_HTML = `<!doctype html>
   // Aggregate per-adapter failure view (0095): the broken-adapter alerts sit
   // above the individual escalations, and a breakdown table shows dispatches /
   // failures / successes per adapter so the worst one reads at a glance.
-  // Active Agents deck (0120): one mascot card per configured adapter, then
-  // dashed empty bays out to the fleet's capacity. The card's avatar tries the
-  // adapter's own image first (now a served URL for repo-local photographic art,
-  // or a remote URL / data URI) and falls back to the bundled data-URI mascot via
-  // avatarFallback — a broken image is never shown. Zero vital counts keep their
-  // cell (faint treatment) so a fresh adapter still reads all three.
+  // Active Agents deck (0129): one mascot card per adapter with a *live worker*,
+  // then dashed empty bays out to the fleet's capacity. A configured adapter with
+  // no live worker renders no card — the deck shows the fleet that is actually
+  // running, not the configured roster (that count stays in the header). The
+  // card's avatar tries the adapter's own image first (now a served URL for
+  // repo-local photographic art, or a remote URL / data URI) and falls back to
+  // the bundled data-URI mascot via avatarFallback — a broken image is never
+  // shown. Zero vital counts keep their cell (faint treatment) so a fresh adapter
+  // still reads all three.
   function renderDeck() {
     const wrap = $("deckwrap");
     if (!wrap) return;
+    // The full configured roster (buildDeck's projection). 'live' is the subset
+    // with a live worker — only these become mascot cards; the tally counts them.
     const cards = (snapshot.deck || []);
-    const live = cards.filter((c) => c.activeIssue != null).length;
+    const live = cards.filter((c) => c.activeIssue != null);
     const tallyEl = $("decktally");
-    if (tallyEl) tallyEl.textContent = String(live);
+    if (tallyEl) tallyEl.textContent = String(live.length);
+    // Roster keeps configured composition visible (configured / capacity), so the
+    // fleet's makeup is not lost even when zero workers are live.
     const rosterEl = $("deckroster");
     if (rosterEl) rosterEl.textContent = String(cards.length) + "/${DECK_CAPACITY}";
     const host = $("deck");
+    // Hide only when nothing is configured at all. With adapters configured but
+    // none live, the section still renders — zero cards, all bays open.
     if (!cards.length) { wrap.hidden = true; if (host) host.innerHTML = ""; return; }
     wrap.hidden = false;
     const bay = (n) => String(n).padStart(2, "0");
     const vital = (label, n) =>
       '<div class="cell"><span class="k">' + label + '</span><span class="v' +
       (n === 0 ? " zero" : "") + '">' + String(n) + "</span></div>";
-    let html = cards.map((c, i) => {
+    let html = live.map((c, i) => {
       const src = c.avatar || c.defaultAvatar;
       const duty = c.activeIssue != null
         ? '<span class="duty on"><span class="dot"></span>dispatched · #' + String(c.activeIssue) + "</span>"
@@ -1773,7 +1795,7 @@ export const PAGE_HTML = `<!doctype html>
         vital("Launched", c.successes) + "</div>" +
         "</article>";
     }).join("");
-    for (let n = cards.length + 1; n <= ${DECK_CAPACITY}; n++) {
+    for (let n = live.length + 1; n <= ${DECK_CAPACITY}; n++) {
       html += '<div class="bay"><span class="ring">' + bay(n) + '</span><span class="k">Bay open</span></div>';
     }
     host.innerHTML = html;

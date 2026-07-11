@@ -106,9 +106,11 @@ const workers = [
 // capacity. ---
 {
   assert.equal(DECK_CAPACITY, 10, "the deck capacity is 10 bays");
-  // The client fills bays from cards.length + 1 up to the capacity, so N adapters
-  // leave (10 - N) open bays; more than 10 adapters leave none.
-  assert.ok(PAGE_HTML.includes("for (let n = cards.length + 1; n <= 10; n++)"), "empty bays fill the remaining capacity up to 10");
+  // The client fills bays from live.length + 1 up to the capacity, so L live
+  // workers leave (10 - L) open bays; a full 10 live workers leave none. (Since
+  // #300 the deck cards the live fleet, not the configured roster, so bays fill
+  // from the live count — see herd-ui-mascot-deck-live.test.mjs.)
+  assert.ok(PAGE_HTML.includes("for (let n = live.length + 1; n <= 10; n++)"), "empty bays fill the remaining capacity up to 10");
   assert.ok(PAGE_HTML.includes('class="bay"><span class="ring">'), "an empty bay renders its bay number in a ring");
   assert.ok(PAGE_HTML.includes('class="k">Bay open</span>'), "an empty bay is labelled Bay open");
   assert.ok(PAGE_HTML.includes(".bay { border:1.5px dashed var(--ink-faint)"), "empty bays are dashed placeholders");

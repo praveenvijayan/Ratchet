@@ -443,6 +443,10 @@
       "class": "excluded"
     },
     {
+      "path": "scripts/herd-ui-mascot-deck-live.test.mjs",
+      "class": "excluded"
+    },
+    {
       "path": "scripts/herd-mascots-install.test.mjs",
       "class": "excluded"
     },
