@@ -1353,6 +1353,7 @@ export const PAGE_HTML = `<!doctype html>
   .sec .rule { flex:1; height:1px; background:var(--ink-faint); position:relative; }
   .sec .rule::after { content:""; position:absolute; right:0; top:-3px; width:7px; height:7px; background:var(--ink); transform:rotate(45deg); }
   .sec .note { font-family:var(--mono); font-size:9.5px; letter-spacing:.18em; text-transform:uppercase; color:var(--ink-soft); }
+  .sec .roster { font-family:var(--mono); font-size:10px; letter-spacing:.12em; text-transform:uppercase; color:var(--ink-soft); }
   /* Active Agents mascot deck (0120) — center stage above the work column. */
   .deckwrap { margin:0 0 30px; }
   /* auto-fill grid flexes from 1 to 10 mascots without any layout change. */
@@ -1454,6 +1455,7 @@ export const PAGE_HTML = `<!doctype html>
     <div class="sec">
       <h2 class="group-head">Active Agents</h2>
       <span class="tally" id="decktally">0</span>
+      <span class="roster" id="deckroster">0/${DECK_CAPACITY}</span>
       <span class="rule"></span>
       <span class="note">${DECK_CAPACITY} bays · new agents dock automatically</span>
     </div>
@@ -1601,8 +1603,11 @@ export const PAGE_HTML = `<!doctype html>
     const wrap = $("deckwrap");
     if (!wrap) return;
     const cards = (snapshot.deck || []);
+    const live = cards.filter((c) => c.activeIssue != null).length;
     const tallyEl = $("decktally");
-    if (tallyEl) tallyEl.textContent = String(cards.length);
+    if (tallyEl) tallyEl.textContent = String(live);
+    const rosterEl = $("deckroster");
+    if (rosterEl) rosterEl.textContent = String(cards.length) + "/${DECK_CAPACITY}";
     const host = $("deck");
     if (!cards.length) { wrap.hidden = true; if (host) host.innerHTML = ""; return; }
     wrap.hidden = false;
@@ -1623,7 +1628,7 @@ export const PAGE_HTML = `<!doctype html>
         '<div class="name">' + esc(c.name) + "</div>" +
         duty +
         '<div class="vitals">' + vital("Disp.", c.dispatches) + vital("Fail", c.failures) +
-        vital("OK", c.successes) + "</div>" +
+        vital("Launched", c.successes) + "</div>" +
         "</article>";
     }).join("");
     for (let n = cards.length + 1; n <= ${DECK_CAPACITY}; n++) {

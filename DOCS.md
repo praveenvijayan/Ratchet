@@ -223,6 +223,7 @@ scripts/
   herd-ui-adapter-failures.test.mjs Regression test for per-adapter dispatch-failure aggregation
   herd-ui-summary-strip.test.mjs Regression test for the one-glance fleet-summary strip
   herd-ui-mascot-deck.test.mjs  Regression test for the Active Agents mascot deck
+  herd-ui-truthful-tally.test.mjs Regression test for truthful deck header tally and vitals
   manifest-check.mjs            Gate: validate ratchet-manifest.json against the repo (no drift in/out)
   manifest-check.test.mjs       Regression test for the install-manifest gate
   plan-sync-concurrency.test.mjs Workflow concurrency regression test
