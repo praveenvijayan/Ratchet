@@ -240,8 +240,10 @@ scripts/
   ratchet-watch.sh              Real-time GitHub→local bridge
   release.mjs                   Opt-in release tag + changelog publisher
   release.test.mjs              Regression test for releases
-  review-verdict.mjs            Flip issue to state:changes-requested on a Request Changes review
-  review-verdict.test.mjs       Regression test for the review-verdict flip
+   conflicted-prs.mjs            Label conflicted open PRs so reviewers skip them
+   conflicted-prs.test.mjs       Regression test for conflicted-PR labeling
+   review-verdict.mjs            Flip issue to state:changes-requested on a Request Changes review
+   review-verdict.test.mjs       Regression test for the review-verdict flip
   run-gates.mjs                 Run GATES.md locally and in CI
   run-gates.test.mjs            Regression test for the gate runner
   skill-parity.mjs              Guard: every skill has agents/openai.yaml + byte-identical .claude/plugin mirrors
@@ -260,8 +262,9 @@ scripts/
   version-consistency.mjs       Version single source of truth + gate: fail a tree whose four version strings disagree
   version-consistency.test.mjs  Regression test for the version-consistency gate
 .github/workflows/
-  archive-closed-plans.yml      Archive closed-issue plans via an automatic PR
-  plan-sync.yml                 Compile plan/*.md → issues on push
+   archive-closed-plans.yml      Archive closed-issue plans via an automatic PR
+   conflicted-prs.yml            Label conflicted open PRs on a schedule
+   plan-sync.yml                 Compile plan/*.md → issues on push
   pr-gates.yml                  Run GATES.md gates and PR size check on agent PRs
   ratchet-run.yml               OPTIONAL CI runner (off by default)
   release.yml                   OPTIONAL release tag + changelog lane
@@ -329,6 +332,7 @@ See §8 — this is the routine that responds to a human's PR decision.
 | `plan-sync` | push to `plan/**` on `main` (i.e. planning-PR merge), or manual | Compiles `plan/*.md` into issues, idempotently (dedup via a `<!-- plan-id -->` marker). Scoped to `main` so the planning branch doesn't create issues early. |
 | `unblock-dependents` | `issues: closed` | Strips the closed issue's own `state:*` label (closed is terminal; a lingering `state:in-review` misleads), then promotes every issue whose blockers are now all closed to `state:ready`. This re-feeds the queue. |
 | `review-verdict` | `pull_request_review: submitted` | Flips the issue mapped to a PR (by `agent/issue-<N>` branch or a `Closes #<N>` body marker) from `state:in-review` to `state:changes-requested` when a Request Changes review is submitted. APPROVED/COMMENTED reviews change nothing; a PR mapping to no issue is a logged no-op. One-directional — the flip back to `state:in-review` after rework stays with the agent (AGENTS.md step 6). |
+| `conflicted-prs` | every 30 min, or manual | Marks open PRs with merge conflicts (`mergeable_state: dirty`) with a `conflict` label so reviewers can see unmergeable work before spending a review. The label is removed once the PR becomes mergeable again. A PR whose mergeability GitHub has not yet computed (`mergeable: null`) is skipped, not labeled. Idempotent: re-running on an already-labeled conflicted PR changes nothing. All logic lives in `scripts/conflicted-prs.mjs`; this workflow is only its trigger and env. |
 | `archive-closed-plans` | daily schedule, or manual | Moves each `plan/*.md` whose issue is closed into `plan/done/` and opens a reviewable PR for the moves — never pushes to `main`. When nothing maps to a closed issue the tree stays clean and no PR is opened. The archive decision lives in `scripts/archive-closed-plans.mjs`; this workflow is only its trigger and the branch/PR plumbing. |
 | `state-label-exclusivity` | `issues: labeled` | Enforces that at most one `state:*` label survives on an issue. When a new state label is added, any older state label is stripped — so a missed removal during claim/rework transitions can't leave two state labels side by side. Non-state labels (`priority:*`, etc.) are never touched. All logic lives in `scripts/state-label-exclusivity.mjs`; this workflow is only its trigger. |
 | `sweep-stale-claims` | every 30 min, or manual | Patrols `state:in-progress`, `state:in-review`, and `state:changes-requested`. Freshness is the newest proof of life: a branch commit, a claim event, or a heartbeat issue comment containing `<!-- ratchet-heartbeat -->`. Stale zero-commit claims return to `state:ready` and have the orphan ref deleted; committed branches are kept. In-review issues with no live PR are requeued, while merged PRs whose issue stayed open are moved to `state:blocked` for human cleanup. Changes-requested work is requeued only after the inactivity window. Two knobs control the thresholds: `STALE_HOURS` (default `2`) is the inactivity window for `state:in-progress` and `state:in-review`; `REWORK_GRACE_HOURS` (default matches `STALE_HOURS`) is the separate window for `state:changes-requested`, giving rework extra time after a human review. Both are env vars on the workflow. |
