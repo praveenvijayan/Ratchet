@@ -355,6 +355,10 @@
       "class": "generated"
     },
     {
+      "path": "mascots",
+      "class": "generated"
+    },
+    {
       "path": "scripts/bootstrap.test.mjs",
       "class": "excluded"
     },
@@ -436,6 +440,10 @@
     },
     {
       "path": "scripts/herd-ui-vinyl-deck.test.mjs",
+      "class": "excluded"
+    },
+    {
+      "path": "scripts/herd-mascots-install.test.mjs",
       "class": "excluded"
     },
     {
