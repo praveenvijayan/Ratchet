@@ -40,7 +40,8 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 | 4f    | test: archive-closed-plans-workflow | `node scripts/archive-closed-plans-workflow.test.mjs` | exit 0 |
 | 4g    | test: unblock-dependents        | `node scripts/unblock-dependents.test.mjs`        | exit 0 |
 | 4g2   | test: review-verdict            | `node scripts/review-verdict.test.mjs`            | exit 0 |
-| 4g3   | test: conflicted-prs            | `node scripts/conflicted-prs.test.mjs`             | exit 0 |
+| 4g3   | test: review-verdict-workflow   | `node scripts/review-verdict-workflow.test.mjs`   | exit 0 |
+| 4g4   | test: conflicted-prs            | `node scripts/conflicted-prs.test.mjs`             | exit 0 |
 | 4h    | test: ratchet-update            | `node scripts/ratchet-update.test.mjs`            | exit 0 |
 | 4i    | test: criteria                  | `node scripts/criteria.test.mjs`                  | exit 0 |
 | 4j    | test: pr-size-check             | `node scripts/pr-size-check.test.mjs`             | exit 0 |
