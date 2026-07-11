@@ -173,8 +173,15 @@ const liveWorkers = (state, isAlive) =>
 // the worker's run, so waiting on the label SIGTERMs a correctly-claiming
 // worker. Any gh failure — a 404 for the not-yet-created ref or a transient
 // blip — is treated as "still waiting", so it never counts as a claim and
-// never (on its own) as a dispatch failure. Returns { claimed }.
-export async function waitForClaim({ gh, issue, timeoutMs, intervalMs = 1000, now = () => Date.now(), sleep = defaultSleep }) {
+// never (on its own) as a dispatch failure.
+// `hasExited` reports whether the spawned worker's process has already exited.
+// A worker that dies before creating its claim ref can never claim, so once it
+// has exited we stop waiting immediately rather than burning the whole timeout
+// (and starving the heartbeat) on a dead process — the ref check runs first
+// every pass, so a worker that claimed and *then* exited still reports claimed.
+// Returns { claimed } on a claim, or { claimed: false, exited } on the exit
+// short-circuit (exited: true) versus the plain timeout (exited: false).
+export async function waitForClaim({ gh, issue, timeoutMs, intervalMs = 1000, now = () => Date.now(), sleep = defaultSleep, hasExited = () => false }) {
   const ref = `repos/{owner}/{repo}/git/ref/heads/agent/issue-${issue}`;
   const start = now();
   for (;;) {
@@ -184,7 +191,11 @@ export async function waitForClaim({ gh, issue, timeoutMs, intervalMs = 1000, no
     } catch {
       // ref not created yet (404) or a transient gh error — keep waiting
     }
-    if (now() - start >= timeoutMs) return { claimed: false };
+    // The worker's process exited before its claim ref appeared. It can no
+    // longer claim, so end the wait within this poll interval instead of
+    // running to the full timeout. The caller re-checks origin for a raced ref.
+    if (hasExited()) return { claimed: false, exited: true };
+    if (now() - start >= timeoutMs) return { claimed: false, exited: false };
     await sleep(intervalMs);
   }
 }
@@ -275,7 +286,14 @@ export async function dispatchOne(opts) {
     writeRouting(routingPath, cursors);
   }
 
-  const onExit = (code, signal) => recordExit(statePath, issue.number, code, signal, { config, eventsPath, now, warn: log });
+  // Capture the worker's exit so the claim wait can short-circuit when the
+  // process dies before claiming (issue #286). recordExit still runs — it clears
+  // the pid and records the exit code/usage for the monitor exactly as before.
+  let workerExit = null;
+  const onExit = (code, signal) => {
+    workerExit = { code, signal };
+    recordExit(statePath, issue.number, code, signal, { config, eventsPath, now, warn: log });
+  };
   const pid = spawnFn(plan.argv, plan.env, plan.logFile, onExit);
 
   // A missing or unexecutable adapter binary never starts, so spawn returns no
@@ -322,7 +340,56 @@ export async function dispatchOne(opts) {
     status: "dispatched",
   }, log);
 
-  const { claimed } = await waitForClaim({ gh, issue: issue.number, timeoutMs: claimTimeoutMs, intervalMs: claimIntervalMs, now, sleep });
+  const { claimed, exited } = await waitForClaim({ gh, issue: issue.number, timeoutMs: claimTimeoutMs, intervalMs: claimIntervalMs, now, sleep, hasExited: () => workerExit != null });
+
+  // The worker's process exited before the wait saw its claim ref. It is
+  // already dead, so there is nothing to kill. But an exit right after a claim
+  // races the ref check, so re-check origin (the same guard the kill path uses,
+  // issue #138): a present ref is a real claim the worker made before exiting —
+  // report it claimed, never dispatch-failed (issue #286). Only an exit with no
+  // ref is a genuine early death, escalated distinctly from the timeout.
+  if (!claimed && exited) {
+    const refLeft = await claimRefPresent(gh, issue.number);
+    if (refLeft) {
+      appendHerdEvent(eventsPath, {
+        now: now(),
+        event: "claim-detected",
+        issue: issue.number,
+        adapter: plan.adapter,
+        pid,
+        logFile: plan.logFile,
+        attempts: 1,
+        status: "dispatched",
+      }, log);
+      return { dispatched: issue.number, claimed: true, pid, adapter: plan.adapter };
+    }
+    const after = readState(statePath);
+    if (after[issue.number]) {
+      after[issue.number].status = "dispatch-failed";
+      after[issue.number].pid = null;
+      writeState(statePath, after);
+    }
+    const sec = Math.round(claimTimeoutMs / 1000);
+    const how =
+      workerExit.code != null
+        ? `exit code ${Number(workerExit.code)}`
+        : workerExit.signal
+          ? `signal ${workerExit.signal}`
+          : "an unknown exit";
+    appendEscalation(escalationsPath, {
+      now: now(),
+      issue: issue.number,
+      what: `worker for adapter "${plan.adapter}" exited (${how}) before creating its claim ref agent/issue-${issue.number} on origin — it can no longer claim, so the ${sec}s claim wait was ended on the observed exit rather than run to the timeout; the issue was never claimed (pid ${pid})`,
+      adapter: plan.adapter,
+      pid,
+      logFile: plan.logFile,
+      attempts: 1,
+      status: "dispatch-failed",
+      action: "inspect the log for why the worker exited on startup; the adapter CLI may be crashing, misconfigured, or exiting before it can claim",
+    }, { eventsPath, warn: log });
+    return { dispatched: issue.number, claimed: false, status: "dispatch-failed", exited: true };
+  }
+
   if (!claimed) {
     try {
       kill(pid);
