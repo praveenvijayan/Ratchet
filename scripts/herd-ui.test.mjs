@@ -1695,4 +1695,82 @@ await inTempDir(async (dir) => {
   for (let n = 1; n <= CRITERIA_COUNT; n++) assert.ok(unique.has(n), `#279 criterion ${n} has a test`);
 }
 
+// --- #288 live config reload -------------------------------------------------
+// The dashboard re-reads .ratchet/herd.json for each snapshot (configPath wired
+// through run()), so operator edits reflect without a server restart. These
+// tests drive a real server pointed at a temp herd.json and edit it live.
+function writeHerdConfig(dir, obj) {
+  mkdirSync(join(dir, ".ratchet"), { recursive: true });
+  const path = join(dir, ".ratchet", "herd.json");
+  writeFileSync(path, JSON.stringify(obj));
+  return path;
+}
+const herdConfig = (avatar, pollSeconds) => ({
+  adapters: { claude: { launch: ["run"], avatar } },
+  routing: { default: "claude" },
+  pollSeconds,
+});
+
+// --- #288 Criterion 1: editing an adapter's avatar in herd.json while the
+// dashboard runs is reflected in the next snapshot the browser receives, with
+// no server restart. ---
+await inTempDir(async (dir) => {
+  const configPath = writeHerdConfig(dir, herdConfig("data:image/png;base64,AAAA", 60));
+  await withServer({ configPath }, async (base) => {
+    const before = (await fetchJson(`${base}/api/snapshot`)).json;
+    assert.equal(before.deck[0].name, "claude");
+    assert.equal(before.deck[0].avatar, "data:image/png;base64,AAAA", "serves the original avatar");
+    writeHerdConfig(dir, herdConfig("data:image/png;base64,BBBB", 60));
+    const after = (await fetchJson(`${base}/api/snapshot`)).json;
+    assert.equal(after.deck[0].avatar, "data:image/png;base64,BBBB", "the edited avatar reflects in the next snapshot without a restart");
+  });
+});
+
+// --- #288 Criterion 2: other config-derived values from the same read (poll-
+// derived heartbeat threshold) update consistently with the avatar — the next
+// snapshot is all-new, never half-old, half-new. ---
+await inTempDir(async (dir) => {
+  const configPath = writeHerdConfig(dir, herdConfig("data:image/png;base64,AAAA", 60));
+  await withServer({ configPath }, async (base) => {
+    const before = (await fetchJson(`${base}/api/snapshot`)).json;
+    assert.equal(before.deck[0].avatar, "data:image/png;base64,AAAA");
+    assert.equal(before.heartbeat.thresholdSeconds, heartbeatThresholdSeconds(60));
+    writeHerdConfig(dir, herdConfig("data:image/png;base64,BBBB", 90));
+    const after = (await fetchJson(`${base}/api/snapshot`)).json;
+    // Both derive from the one config read for this snapshot: they move together.
+    assert.equal(after.deck[0].avatar, "data:image/png;base64,BBBB", "avatar reflects the edit");
+    assert.equal(after.heartbeat.thresholdSeconds, heartbeatThresholdSeconds(90), "the poll-derived threshold reflects the same edit — no half-old snapshot");
+    assert.notEqual(heartbeatThresholdSeconds(90), heartbeatThresholdSeconds(60), "sanity: the two pollSeconds yield distinct thresholds");
+  });
+});
+
+// --- #288 Criterion 3: while herd.json is missing or unparseable, the dashboard
+// keeps serving the last good config and the server does not crash. ---
+await inTempDir(async (dir) => {
+  const configPath = writeHerdConfig(dir, herdConfig("data:image/png;base64,AAAA", 60));
+  await withServer({ configPath }, async (base) => {
+    assert.equal((await fetchJson(`${base}/api/snapshot`)).json.deck[0].avatar, "data:image/png;base64,AAAA");
+    // Unparseable: keep last good, still 200.
+    writeFileSync(configPath, "{ not valid json");
+    const garbled = await fetchJson(`${base}/api/snapshot`);
+    assert.equal(garbled.status, 200, "server does not crash on unparseable config");
+    assert.equal(garbled.json.deck[0].avatar, "data:image/png;base64,AAAA", "keeps serving the last good avatar while the file is unparseable");
+    // Missing: still last good, still 200.
+    rmSync(configPath);
+    const missing = await fetchJson(`${base}/api/snapshot`);
+    assert.equal(missing.status, 200, "server does not crash when the config file is gone");
+    assert.equal(missing.json.deck[0].avatar, "data:image/png;base64,AAAA", "keeps serving the last good avatar while the file is missing");
+  });
+});
+
+// --- #288 Criterion 4: an avatar URL that fails to load in the browser still
+// falls back to the bundled mascot with no broken-image icon, as today. This is
+// the client-side onerror path baked into the served page. ---
+{
+  assert.match(PAGE_HTML, /window\.avatarFallback = function \(img\)/, "the client avatar-fallback handler is present");
+  assert.match(PAGE_HTML, /img\.onerror = null;/, "the handler clears onerror first so the default can never loop into a broken image");
+  assert.match(PAGE_HTML, /onerror="avatarFallback\(this\)"/, "each mascot img wires onerror to the fallback");
+  assert.match(PAGE_HTML, /data-default="' \+ esc\(c\.defaultAvatar\)/, "the deck card carries the bundled default the fallback swaps to");
+}
+
 console.log("PASS herd-ui.test.mjs");
