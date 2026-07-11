@@ -427,6 +427,10 @@
       "class": "excluded"
     },
     {
+      "path": "scripts/herd-ui-dashboard-columns.test.mjs",
+      "class": "excluded"
+    },
+    {
       "path": "scripts/herd-ui-mascot-deck.test.mjs",
       "class": "excluded"
     },

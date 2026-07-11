@@ -218,6 +218,7 @@ scripts/
   herd-avatars.mjs              Bundled default mascot avatars for the dashboard
   herd-avatar.test.mjs          Regression test for dashboard adapter avatars
   herd-ui-log-search.test.mjs   Regression test for log drill-down search/filter
+  herd-ui-dashboard-columns.test.mjs Regression test for the flipped 100vh dashboard columns
   herd-ui-escalation.test.mjs   Regression test for escalation dedup/resolution
   herd-ui-acknowledge.test.mjs  Regression test for escalation copy/acknowledge
   herd-ui-adapter-failures.test.mjs Regression test for per-adapter dispatch-failure aggregation
