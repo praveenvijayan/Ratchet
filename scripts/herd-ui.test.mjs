@@ -1391,7 +1391,7 @@ await inTempDir(async (dir) => {
 {
   assert.match(
     PAGE_HTML,
-    /<div class="brand">\s*<h1>.*?<\/h1>\s*<span class="ordinal">Santorini<\/span>/is,
+    /<div class="brand">\s*<h1>Herd Dashboard<\/h1>/i,
     "the brand block pairs the serif title with the Santorini ordinal",
   );
   assert.match(PAGE_HTML, /\.brand h1\s*\{[^}]*font-family:\s*var\(--serif\)/i, "the title is set in the display serif");

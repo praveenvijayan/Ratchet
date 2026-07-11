@@ -1617,8 +1617,7 @@ export const PAGE_HTML = `<!doctype html>
 <body>
 <header>
   <div class="brand">
-    <h1><span class="product">Ratchet</span> <span class="role">herd dashboard</span></h1>
-    <span class="ordinal">Santorini</span>
+    <h1>Herd Dashboard</h1>
   </div>
   <div class="heartbeat"><span class="dot" id="livedot"></span> <span id="livetext" class="empty">connecting…</span></div>
   <div class="supervisor" id="hbdetails" hidden><span class="sup-label">Supervisor</span> <span class="sup-status" id="hbstatus"></span> <span class="sup-meta" id="hbmeta"></span></div>
