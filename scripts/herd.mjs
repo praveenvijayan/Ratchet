@@ -531,13 +531,30 @@ if (isMain) {
     // Anchor every `.ratchet/*` path (and the log dir) at the repo root so the
     // whole poll loop reads and writes the one true state regardless of cwd.
     const paths = ratchetPaths(root);
-    config = { ...config, logDir: isAbsolute(config.logDir) ? config.logDir : join(root, config.logDir) };
+    const anchor = (c) => ({ ...c, logDir: isAbsolute(c.logDir) ? c.logDir : join(root, c.logDir) });
+    // Re-read herd.json every poll, mirroring the dashboard: operator edits
+    // (adding/removing adapters, avatars, caps) take effect on the next pass
+    // without a restart. An invalid file keeps the last good config — one
+    // warning per failed poll, never a crash — the same contract the dashboard
+    // shows in its config banner. pollSeconds stays the startup value (runLoop
+    // holds it); a changed poll interval still needs a restart.
+    let liveConfig = anchor(config);
+    const resolveConfig = (log) => {
+      try {
+        liveConfig = anchor(loadConfig(join(root, CONFIG_PATH), { warn: false }));
+      } catch (e) {
+        if (!(e instanceof HerdConfigError)) throw e;
+        log(`herd: herd.json is invalid (${e.message}); keeping the last good config this poll.`);
+      }
+      return liveConfig;
+    };
     const maxIdx = argv.indexOf("--max");
-    const maxWorkers = maxIdx >= 0 && Number.isInteger(Number(argv[maxIdx + 1]))
-      ? Number(argv[maxIdx + 1])
-      : config.maxWorkers;
     const dryRun = argv.includes("--dry-run");
     const step = async (o) => {
+      const config = resolveConfig(o.log);
+      const maxWorkers = maxIdx >= 0 && Number.isInteger(Number(argv[maxIdx + 1]))
+        ? Number(argv[maxIdx + 1])
+        : config.maxWorkers;
       await pollOnce({ ...o, config });
       // Monitor exited workers (verify / resume / escalate) before dispatching,
       // so a concluded worker frees a slot this same pass. Skipped on --dry-run,
