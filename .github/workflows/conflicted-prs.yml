@@ -1,0 +1,31 @@
+name: conflicted-prs
+
+# A scheduled pass that marks open PRs with merge conflicts
+# (`mergeable_state: dirty`) with a `conflict` label so reviewers can see
+# unmergeable work before spending a review. The label is removed once the PR
+# becomes mergeable again. A PR whose mergeability GitHub has not yet computed
+# (`mergeable: null`) is skipped, not labeled. Re-running on an already-labeled
+# conflicted PR changes nothing (idempotent). The decision logic lives in
+# scripts/conflicted-prs.mjs so it is regression-tested off the network; this
+# workflow is only its trigger and env.
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  pull-requests: write   # read open PRs, add/remove the conflict label
+
+jobs:
+  label-conflicts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+      - run: node scripts/conflicted-prs.mjs
+        env:
+          GITHUB_TOKEN: ${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
