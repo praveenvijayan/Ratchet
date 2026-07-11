@@ -1163,24 +1163,67 @@ export const PAGE_HTML = `<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Herd dashboard</title>
+<!-- Fonts are the ONLY external reference on this page. If the CDN is
+     unreachable the link simply fails and every font-family below falls back to
+     its generic family (serif/sans-serif/monospace) — rendering is never blocked. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Marcellus&family=Space+Grotesk:wght@400;500;600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
 <style>
-  :root { color-scheme: light dark; --fg:#1a1a1a; --bg:#fafafa; --card:#fff; --line:#e2e2e2; --muted:#666; --accent:#0969da; --warn:#b35900; --over:#cf222e; }
-  @media (prefers-color-scheme: dark) { :root { --fg:#e6e6e6; --bg:#0d1117; --card:#161b22; --line:#30363d; --muted:#8b949e; --accent:#58a6ff; --warn:#d29922; --over:#f85149; } }
+  :root {
+    color-scheme: light;
+    /* Santorini palette — design 040de050 "Herd Dashboard Santorini". */
+    --paper:#e4e3f5; --paper-hi:#f4f2fc; --paper-lo:#d7d4ee;
+    --ink:#3f3e78; --ink-deep:#2b2a58;
+    --ink-soft:rgba(63,62,120,.55); --ink-faint:rgba(63,62,120,.22); --ink-hair:rgba(63,62,120,.12);
+    --terra:#7c68c4;
+    /* Type system — every family ends in a generic fallback so the page still
+       renders when the fonts CDN is unreachable. */
+    --serif:'Marcellus', serif; --sans:'Space Grotesk', sans-serif; --mono:'Space Mono', monospace;
+    /* Legacy tokens — still consumed by the not-yet-reskinned section, stat,
+       row, incident and log markup (restyled in slices 0121/0122). */
+    --fg:#1a1a1a; --bg:#fafafa; --card:#fff; --line:#e2e2e2; --muted:#666; --accent:#0969da; --warn:#b35900; --over:#cf222e;
+  }
   * { box-sizing: border-box; }
-  body { margin:0; font:14px/1.5 system-ui, sans-serif; color:var(--fg); background:var(--bg); }
-  header { padding:14px 20px; border-bottom:1px solid var(--line); display:flex; align-items:baseline; gap:12px; }
-  header h1 { font-size:16px; margin:0; }
-  header .dot { width:8px; height:8px; border-radius:50%; background:var(--muted); display:inline-block; }
-  header .dot.live { background:#2da44e; }
-  header .fleettotals { margin-left:auto; color:var(--muted); font-variant-numeric:tabular-nums; }
+  body {
+    margin:0;
+    font-family:var(--sans); font-size:14px; line-height:1.5;
+    color:var(--ink);
+    background:
+      radial-gradient(circle at 84% -8%, rgba(124,104,196,.12), transparent 44%),
+      repeating-linear-gradient(0deg, transparent 0 47px, var(--ink-hair) 47px 48px),
+      repeating-linear-gradient(90deg, transparent 0 47px, var(--ink-hair) 47px 48px),
+      linear-gradient(168deg, var(--paper-hi) 0%, var(--paper) 46%, var(--paper-lo) 100%);
+    min-height:100vh;
+  }
+  header {
+    display:flex; align-items:center; gap:22px;
+    padding:20px 36px;
+    border-bottom:2px solid var(--ink);
+    background:linear-gradient(180deg, var(--paper-hi), transparent);
+  }
+  .brand { display:flex; align-items:baseline; gap:14px; }
+  .brand h1 { font-family:var(--serif); font-size:30px; font-weight:400; letter-spacing:.04em; text-transform:uppercase; line-height:1; margin:0; }
+  .brand .ordinal { font-family:var(--mono); font-size:10px; letter-spacing:.28em; color:var(--ink-soft); text-transform:uppercase; }
+  header .heartbeat { display:flex; align-items:center; gap:10px; margin-left:auto; font-family:var(--mono); font-size:12px; letter-spacing:.05em; color:var(--ink); }
+  header .dot { width:10px; height:10px; border-radius:50%; background:var(--ink-faint); display:inline-block; }
+  header .dot.live { background:#8f9ad0; box-shadow:0 0 0 3px rgba(143,154,208,.35); animation:hb-pulse 2.2s ease-in-out infinite; }
+  @keyframes hb-pulse { 0%,100% { box-shadow:0 0 0 3px rgba(143,154,208,.35); } 50% { box-shadow:0 0 0 7px rgba(143,154,208,.10); } }
+  header .fleettotals { color:var(--ink-soft); font-variant-numeric:tabular-nums; font-family:var(--mono); font-size:12px; }
   header .fleettotals.empty { display:none; }
   td.usage { text-align:right; font-variant-numeric:tabular-nums; }
-  main { padding:20px; max-width:1100px; margin:0 auto; }
+  main { padding:34px 36px 70px; max-width:1480px; margin:0 auto; }
   .hint { color:var(--muted); padding:40px 0; text-align:center; }
   .hbbanner { border-radius:6px; padding:12px 16px; margin-bottom:16px; font-weight:600; border:1px solid; border-left-width:4px; }
   .hbbanner.silent { color:var(--over); border-color:var(--over); background:color-mix(in srgb, var(--over) 10%, transparent); }
   .hbbanner.unseen { color:var(--warn); border-color:var(--warn); background:color-mix(in srgb, var(--warn) 10%, transparent); }
-  .layout { display:flex; gap:16px; align-items:flex-start; }
+  /* Two-column grid shell: work column + 400px incidents aside. The aside is
+     the toggled errors panel, so the second track exists only when the panel is
+     open (.panel-open) — otherwise the work column spans full width, preserving
+     the existing toggle. Below 1180px the grid collapses to a single column. */
+  .layout { display:grid; grid-template-columns:minmax(0,1fr); gap:34px; align-items:start; }
+  .layout.panel-open { grid-template-columns:minmax(0,1fr) 400px; }
+  @media (max-width:1180px) { .layout.panel-open { grid-template-columns:minmax(0,1fr); } }
   .fleet { flex:1 1 auto; min-width:0; }
   .fleet-toolbar { display:flex; align-items:center; gap:12px; margin-bottom:12px; }
   .errtoggle { display:inline-flex; align-items:center; gap:6px; background:var(--card); border:1px solid var(--line); border-radius:6px; padding:6px 12px; cursor:pointer; font:inherit; color:var(--fg); }
@@ -1267,8 +1310,11 @@ export const PAGE_HTML = `<!doctype html>
 </head>
 <body>
 <header>
-  <h1>Herd dashboard</h1>
-  <span><span class="dot" id="livedot"></span> <span id="livetext" class="empty">connecting…</span></span>
+  <div class="brand">
+    <h1>Herd Dashboard</h1>
+    <span class="ordinal">Santorini</span>
+  </div>
+  <div class="heartbeat"><span class="dot" id="livedot"></span> <span id="livetext" class="empty">connecting…</span></div>
   <span id="fleettotals" class="fleettotals empty"></span>
 </header>
 <main>
@@ -1471,6 +1517,9 @@ export const PAGE_HTML = `<!doctype html>
 
   function applyPanel() {
     $("errpanel").hidden = !panelOpen;
+    // Drive the grid shell: the 400px aside track exists only while the panel
+    // is open, so a closed panel leaves the work column full width.
+    $("layout").classList.toggle("panel-open", panelOpen);
   }
 
   // Display order and labels of the lifecycle groups — mirrors the server's
