@@ -435,6 +435,10 @@
       "class": "excluded"
     },
     {
+      "path": "scripts/herd-ui-supervisor-status.test.mjs",
+      "class": "excluded"
+    },
+    {
       "path": "scripts/herd-ui-truthful-tally.test.mjs",
       "class": "excluded"
     },
