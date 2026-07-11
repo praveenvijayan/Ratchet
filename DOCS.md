@@ -225,6 +225,7 @@ scripts/
   herd-ui-mascot-deck.test.mjs  Regression test for the Active Agents mascot deck
   herd-ui-truthful-tally.test.mjs Regression test for truthful deck header tally and vitals
   herd-ui-vinyl-deck.test.mjs   Regression test for the vinyl-figure pop-out deck revision
+  herd-ui-mascot-deck-live.test.mjs Regression test for deck cards tracking live workers
   herd-mascots-install.test.mjs  Regression test for mascots/ install manifest delivery
   manifest-check.mjs            Gate: validate ratchet-manifest.json against the repo (no drift in/out)
   manifest-check.test.mjs       Regression test for the install-manifest gate

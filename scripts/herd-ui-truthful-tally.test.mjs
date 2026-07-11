@@ -77,15 +77,20 @@ const workers = [
   assert.ok(!PAGE_HTML.includes('vital("OK"'), 'the string "OK" no longer appears as a vitals cell label');
 }
 
-// --- #287 criterion 4: all configured adapters still render a card when none
-// has a live worker. ---
+// --- #287 criterion 4: buildDeck still projects one entry per configured
+// adapter (the roster source) even with zero live workers, and the deck section
+// is hidden only when nothing is configured — not merely because nothing is
+// active. (Since #300 the *render* draws a mascot card only for live workers;
+// this projection still carries every configured adapter so the roster count
+// stays truthful — see herd-ui-mascot-deck-live.test.mjs.) ---
 {
-  // With no live workers, buildDeck still returns one card per configured
-  // adapter — the deck is never empty just because nothing is active.
+  // With no live workers, buildDeck still returns one entry per configured
+  // adapter — the projection is the roster, so its count is never empty just
+  // because nothing is active.
   const deck = buildDeck({ config, adapters, workers: [] });
-  assert.equal(deck.length, 3, "all three configured adapters render a card with zero live workers");
-  assert.deepEqual(deck.map((c) => c.name), ["claude-opus", "codex", "opencode-glm"], "card order follows config, not liveness");
-  assert.ok(deck.every((c) => c.activeIssue === null), "no card has an active issue when no worker is live");
+  assert.equal(deck.length, 3, "all three configured adapters remain in the roster projection with zero live workers");
+  assert.deepEqual(deck.map((c) => c.name), ["claude-opus", "codex", "opencode-glm"], "roster order follows config, not liveness");
+  assert.ok(deck.every((c) => c.activeIssue === null), "no entry has an active issue when no worker is live");
 
   // The client only hides the deck when cards.length is zero (no configured
   // adapters), not when no worker is live.
