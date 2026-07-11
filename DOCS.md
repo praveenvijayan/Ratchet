@@ -226,6 +226,8 @@ scripts/
   herd-ui-truthful-tally.test.mjs Regression test for truthful deck header tally and vitals
   herd-ui-vinyl-deck.test.mjs   Regression test for the vinyl-figure pop-out deck revision
   herd-ui-mascot-deck-live.test.mjs Regression test for deck cards tracking live workers
+  herd-ui-deck-card-issue-status.test.mjs Regression test for deck card worked-issue number and worker status
+  herd-ui-supervisor-status.test.mjs Regression test for the supervisor-status header strip
   herd-mascots-install.test.mjs  Regression test for mascots/ install manifest delivery
   manifest-check.mjs            Gate: validate ratchet-manifest.json against the repo (no drift in/out)
   manifest-check.test.mjs       Regression test for the install-manifest gate
@@ -267,6 +269,7 @@ scripts/
   unblock-dependents.test.mjs   Regression test for unblock logic
   verify-issue-body.mjs         Trust-boundary check for ratchet-run
   verify-issue-body.test.mjs    Regression test for issue-body verification
+  workflow-checkout-permissions.test.mjs Regression test for workflow checkout permissions
   version-consistency.mjs       Version single source of truth + gate: fail a tree whose four version strings disagree
   version-consistency.test.mjs  Regression test for the version-consistency gate
 .github/workflows/
@@ -348,6 +351,7 @@ See §8 — this is the routine that responds to a human's PR decision.
 | `pr-gates` | agent PR opened, synchronized, or reopened | Runs `scripts/run-gates.mjs` as the `gates` job and `scripts/pr-size-check.mjs` as the `size` job on every `agent/issue-*` PR. Both jobs judge the PR by the **base branch's** `GATES.md`, not the copy the PR ships (see *Security: gate config is judged from the base branch* below). Branch protection should require both contexts. |
 | `ratchet-run` | PR merged, or manual | OPTIONAL, off by default. Runs an agent in CI to work the next issue. Requires `RATCHET_AUTO=true` and an agent API key. Before handing work to the agent it verifies the body/title against the reviewed plan, binds the plan marker to the picked issue number, and passes the verified issue body snapshot into the prompt (see *Security* below); most users do not enable this — the local loop (§8) is the recommended path. |
 | `release` | manual (`workflow_dispatch`) | OPTIONAL, off by default — the post-merge "ship" stage. Requires `RATCHET_RELEASE=true`. On demand it tags the next semver version (bump chosen at dispatch) and publishes a changelog built from the titles of the PRs merged since the last release. With no merges since the last tag it exits with a "nothing to release" message, not an error. The first release on a repo with no prior tags seeds its version from `.ratchet-version` (the installed framework version) rather than defaulting to `v0.0.1`. Deploy is a second opt-in: set `RATCHET_DEPLOY=true` and `RATCHET_DEPLOY_COMMAND` to a repo-owned shell command. Repos that do not opt in have no deploy job and no deploy config. If deploy fails, the workflow is visibly red after publication; it does not delete or mutate the tag/release. |
+| `static` | manual (`workflow_dispatch`) | Deploys static content to GitHub Pages. An infra workflow that lives alongside the Ratchet loop workflows, not part of the delivery loop itself. |
 
 The GitHub-mutating workflows read `${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN }}`
 so they work with the default token and upgrade automatically when the PAT is
