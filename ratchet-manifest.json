@@ -451,6 +451,10 @@
       "class": "excluded"
     },
     {
+      "path": "scripts/herd-ui-deck-card-issue-status.test.mjs",
+      "class": "excluded"
+    },
+    {
       "path": "scripts/herd-mascots-install.test.mjs",
       "class": "excluded"
     },

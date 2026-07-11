@@ -412,6 +412,14 @@ export function buildDeck({ config, adapters = [], workers = [] }) {
       (typeof issue === "string" && issue.trim() !== "")
         ? issue
         : null;
+    // The live worker's current status (the same value the worker row reports),
+    // carried onto the card so the deck and the work column agree. A missing or
+    // non-string status leaves activeStatus null — the card then omits the status
+    // chip rather than rendering "undefined" or a blank (#307).
+    const liveStatus =
+      active && typeof active.status === "string" && active.status.trim() !== ""
+        ? active.status
+        : null;
     return {
       name,
       family: adapterFamily(name),
@@ -426,6 +434,7 @@ export function buildDeck({ config, adapters = [], workers = [] }) {
       failures: s ? s.failures : 0,
       successes: s ? s.successes : 0,
       activeIssue: liveIssue,
+      activeStatus: liveStatus,
     };
   });
 }
@@ -1532,6 +1541,7 @@ export const PAGE_HTML = `<!doctype html>
   .mascot img { position:absolute; left:50%; bottom:0; transform:translateX(-50%); height:192px; width:auto; max-width:none; object-fit:contain; z-index:3; filter:drop-shadow(0 12px 10px rgba(31,41,51,.30)) drop-shadow(0 3px 3px rgba(31,41,51,.18)); transition:transform .22s ease, filter .22s ease; }
   .mascot-card:hover .mascot img { transform:translateX(-50%) translateY(-7px) scale(1.05); filter:drop-shadow(0 20px 16px rgba(31,41,51,.32)) drop-shadow(0 4px 4px rgba(31,41,51,.16)); }
   .mascot-card .name { font-family:var(--mono); font-weight:700; font-size:13px; text-align:center; overflow-wrap:anywhere; }
+  .mascot-card .card-chips { display:flex; align-items:center; justify-content:center; flex-wrap:wrap; gap:8px; }
   .mascot-card .duty { display:inline-flex; align-items:center; gap:7px; font-family:var(--mono); font-size:9px; letter-spacing:.16em; text-transform:uppercase; padding:4px 10px; border:1px solid currentColor; }
   .duty.on { color:var(--ink-deep); background:rgba(63,62,120,.08); }
   .duty.idle { color:var(--ink-soft); }
@@ -1795,13 +1805,19 @@ export const PAGE_HTML = `<!doctype html>
       const duty = c.activeIssue != null
         ? '<span class="duty on"><span class="dot"></span>dispatched · #' + String(c.activeIssue) + "</span>"
         : '<span class="duty idle"><span class="dot"></span>standing by</span>';
+      // The card mirrors the worker row's status chip (#307): the live worker's
+      // current status (dispatched / reworking / ready-for-review / in-review /
+      // stale-claim), styled via the same statusClass so the card matches the row.
+      const statusChip = c.activeStatus
+        ? '<span class="status' + statusClass(c.activeStatus) + '">' + esc(c.activeStatus) + "</span>"
+        : "";
       return '<article class="mascot-card">' +
         '<span class="family">' + esc(c.family) + "</span>" +
         '<span class="slot-no">bay ' + bay(i + 1) + "</span>" +
         '<div class="mascot"><img alt="' + esc(c.name) + ' mascot" src="' + esc(src) +
         '" data-default="' + esc(c.defaultAvatar) + '" onerror="avatarFallback(this)"></div>' +
         '<div class="name">' + esc(c.name) + "</div>" +
-        duty +
+        '<div class="card-chips">' + duty + statusChip + "</div>" +
         '<div class="vitals">' + vital("Disp.", c.dispatches) + vital("Fail", c.failures) +
         vital("Launched", c.successes) + "</div>" +
         "</article>";
