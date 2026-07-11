@@ -1226,10 +1226,12 @@ export const PAGE_HTML = `<!doctype html>
   @media (max-width:1180px) { .layout.panel-open { grid-template-columns:minmax(0,1fr); } }
   .fleet { flex:1 1 auto; min-width:0; }
   .fleet-toolbar { display:flex; align-items:center; gap:12px; margin-bottom:12px; }
-  .errtoggle { display:inline-flex; align-items:center; gap:6px; background:var(--card); border:1px solid var(--line); border-radius:6px; padding:6px 12px; cursor:pointer; font:inherit; color:var(--fg); }
-  .errtoggle:hover { border-color:var(--accent); }
-  .errcount { background:var(--over); color:#fff; border-radius:10px; padding:1px 7px; font-size:12px; font-weight:600; min-width:20px; text-align:center; }
-  .errcount.zero { background:var(--muted); }
+  /* Errors chip — Santorini alert treatment (design .errors-chip). Restyled in
+     place; the #errtoggle / #errcount hooks and toggle behaviour are unchanged. */
+  .errtoggle { display:inline-flex; align-items:center; gap:10px; border:1.5px solid var(--terra); color:var(--terra); background:rgba(124,104,196,.09); padding:7px 14px; cursor:pointer; font-family:var(--mono); font-size:11px; letter-spacing:.14em; text-transform:uppercase; }
+  .errtoggle:hover { background:rgba(124,104,196,.16); }
+  .errcount { background:var(--terra); color:var(--paper-hi); border-radius:99px; padding:1px 9px; font-size:11px; font-weight:700; min-width:20px; text-align:center; }
+  .errcount.zero { background:var(--ink-faint); color:var(--ink); }
   .errpanel { flex:0 0 360px; background:var(--card); border:1px solid var(--line); border-radius:6px; overflow:auto; max-height:calc(100vh - 120px); align-self:stretch; }
   .errpanel-head { display:flex; align-items:center; justify-content:space-between; padding:10px 14px; border-bottom:1px solid var(--line); }
   .errpanel-head h2 { font-size:14px; margin:0; }
@@ -1242,14 +1244,18 @@ export const PAGE_HTML = `<!doctype html>
   .adapter-breakdown th, .adapter-breakdown td { text-align:right; padding:3px 6px; }
   .adapter-breakdown th:first-child, .adapter-breakdown td:first-child { text-align:left; }
   .adapter-breakdown tr.broken td { color:var(--over); font-variant-numeric:tabular-nums; }
-  .summarystrip { display:flex; flex-wrap:wrap; gap:10px; margin:12px 0; }
+  /* Summary strip — Santorini stat blocks (design .topstrip/.stat): bordered,
+     offset shadow, serif number, mono uppercase label. Structure/hooks kept. */
+  .summarystrip { display:flex; align-items:stretch; flex-wrap:wrap; gap:18px; margin:0 0 36px; }
   .summarystrip.empty { display:none; }
-  .sumcell { display:flex; flex-direction:column; align-items:flex-start; min-width:96px; padding:8px 12px; border:1px solid var(--line); border-radius:8px; background:var(--card); }
-  .sumcell .sumnum { font-size:22px; font-weight:600; font-variant-numeric:tabular-nums; }
-  .sumcell .sumlabel { font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
-  .sumcell.unavailable { border-color:var(--over); cursor:help; }
-  .sumcell.unavailable .sumnum { color:var(--over); }
-  .sumcell.pending .sumnum { color:var(--muted); }
+  .sumcell { display:flex; align-items:baseline; gap:12px; min-width:96px; padding:16px 22px; border:1.5px solid var(--ink); background:var(--paper-hi); box-shadow:5px 5px 0 var(--ink-faint); }
+  .sumcell .sumnum { font-family:var(--serif); font-size:38px; line-height:1; font-weight:400; font-variant-numeric:tabular-nums; }
+  .sumcell .sumlabel { font-family:var(--mono); font-size:9.5px; text-transform:uppercase; letter-spacing:.22em; color:var(--ink-soft); max-width:90px; line-height:1.5; }
+  .sumcell.alert { border-color:var(--terra); box-shadow:5px 5px 0 rgba(124,104,196,.22); }
+  .sumcell.alert .sumnum { color:var(--terra); }
+  .sumcell.unavailable { border-color:var(--terra); cursor:help; }
+  .sumcell.unavailable .sumnum { color:var(--terra); }
+  .sumcell.pending .sumnum { color:var(--ink-soft); }
   .escalations { padding:10px 14px; }
   .esc { border:1px solid var(--over); border-left-width:4px; border-radius:6px; padding:10px 14px; margin-bottom:8px; }
   .esc.resolved { border-color:var(--line); opacity:0.6; }
@@ -1270,20 +1276,40 @@ export const PAGE_HTML = `<!doctype html>
   th, td { text-align:left; padding:8px 12px; border-bottom:1px solid var(--line); }
   th { font-size:12px; text-transform:uppercase; letter-spacing:.03em; color:var(--muted); }
   tr:last-child td { border-bottom:none; }
-  tr.worker { cursor:pointer; }
-  tr.worker:hover { background:color-mix(in srgb, var(--accent) 8%, transparent); }
-  tr.worker.sel { background:color-mix(in srgb, var(--accent) 16%, transparent); }
-  .lifecycle-group { margin-bottom:18px; }
+  .lifecycle-group { margin-bottom:44px; }
   .lifecycle-group:last-child { margin-bottom:0; }
-  .group-head { display:flex; align-items:center; gap:8px; margin:0 0 6px; font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:.03em; color:var(--muted); }
-  .group-count { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:0 7px; font-size:11px; font-weight:600; color:var(--fg); }
+  /* Section heading — design .sec: serif uppercase title, circled count tally,
+     and a hairline rule ending in a diamond. The group-head hook is preserved. */
+  .sec { display:flex; align-items:center; gap:14px; margin:0 0 18px; }
+  .sec .group-head { font-family:var(--serif); font-size:19px; font-weight:400; letter-spacing:.16em; text-transform:uppercase; margin:0; }
+  .sec .tally { font-family:var(--mono); font-size:11px; border:1px solid var(--ink); border-radius:50%; width:24px; height:24px; display:grid; place-items:center; }
+  .sec .rule { flex:1; height:1px; background:var(--ink-faint); position:relative; }
+  .sec .rule::after { content:""; position:absolute; right:0; top:-3px; width:7px; height:7px; background:var(--ink); transform:rotate(45deg); }
   .gauge.warn { color:var(--warn); }
-  .gauge.over { color:var(--over); font-weight:600; }
-  .status { font-variant:small-caps; }
-  .adapter { display:inline-flex; align-items:center; gap:8px; }
-  /* Fixed dimension so a large source image can never break the row layout;
-     object-fit crops rather than stretches, and the shape stays a 20px circle. */
-  img.avatar { width:20px; height:20px; flex:none; border-radius:50%; object-fit:cover; background:var(--line); }
+  .gauge.over { color:var(--terra); font-weight:700; }
+  /* Work rows — design .row cards: bordered, offset shadow, dashed telemetry. */
+  .rows { display:flex; flex-direction:column; gap:14px; }
+  .row { border:1.5px solid var(--ink); background:var(--paper-hi); box-shadow:5px 5px 0 var(--ink-faint); padding:16px 20px; display:flex; flex-direction:column; gap:11px; cursor:pointer; }
+  .row.sel { border-color:var(--terra); box-shadow:5px 5px 0 rgba(124,104,196,.35); }
+  .row-head { display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+  .issue-no { font-family:var(--mono); font-weight:700; font-size:13px; text-decoration:underline; text-underline-offset:3px; color:var(--ink); }
+  .status { font-family:var(--mono); font-size:10px; letter-spacing:.2em; text-transform:uppercase; padding:4px 10px; border:1px solid currentColor; color:var(--ink-soft); }
+  .status.dispatched { color:var(--ink-deep); background:rgba(63,62,120,.08); }
+  .status.review { color:#5654a8; background:rgba(143,154,208,.18); }
+  .status.stale { color:var(--terra); background:rgba(124,104,196,.09); }
+  .who { margin-left:auto; display:flex; align-items:center; gap:8px; font-family:var(--mono); font-size:11px; font-weight:700; }
+  .who .empty { color:var(--ink-faint); font-weight:400; }
+  /* Fixed dimension so a large source image can never break the card layout;
+     object-fit crops rather than stretches, and the shape stays a circular chip. */
+  img.avatar { width:20px; height:20px; flex:none; border-radius:50%; object-fit:cover; border:1.5px solid var(--ink); background:var(--paper-lo); }
+  .row-title { font-size:15.5px; font-weight:500; line-height:1.4; }
+  .row-title.empty { color:var(--ink-faint); font-style:italic; }
+  .telemetry { display:flex; flex-wrap:wrap; border-top:1px dashed var(--ink-faint); padding-top:11px; }
+  .tm { display:flex; flex-direction:column; gap:3px; padding-right:20px; margin-right:20px; border-right:1px solid var(--ink-hair); }
+  .tm:last-child { border-right:0; margin-right:0; padding-right:0; }
+  .tm .k { font-family:var(--mono); font-size:9px; letter-spacing:.2em; text-transform:uppercase; color:var(--ink-soft); }
+  .tm .v { font-family:var(--mono); font-size:12.5px; font-weight:700; }
+  .tm .v .empty { color:var(--ink-faint); font-weight:400; }
   a { color:var(--accent); }
   .logpane { margin-top:18px; }
   .logpane h2 { font-size:14px; margin:0 0 6px; }
@@ -1297,8 +1323,8 @@ export const PAGE_HTML = `<!doctype html>
   .checks.pend { color:var(--warn); }
   .checks.unknown { color:var(--muted); font-style:italic; font-weight:400; }
   .checks-time { font-size:11px; color:var(--muted); margin-left:2px; }
-  .issue-title { color:var(--muted); font-size:13px; }
-  .issue-title.empty { font-style:italic; }
+  /* Title styling lives on .row-title now; the .issue-title class is retained on
+     the element only as a test/telemetry hook. */
   .timeline { margin-bottom:14px; max-height:200px; overflow:auto; border:1px solid var(--line); border-radius:6px; background:var(--card); padding:8px 12px; }
   .timeline-entry { padding:2px 0; font-size:13px; border-bottom:1px solid color-mix(in srgb, var(--line) 50%, transparent); }
   .timeline-entry:last-child { border-bottom:none; }
@@ -1405,14 +1431,27 @@ export const PAGE_HTML = `<!doctype html>
     return secs >= 60 ? Math.floor(secs / 60) + "m ago" : secs + "s ago";
   }
 
-  function issueCell(w) {
+  // The card's issue-number link, rendered in the row head.
+  function issueLink(w) {
     const num = "#" + esc(w.issue);
-    const link = w.issueUrl ? '<a href="' + esc(w.issueUrl) + '" target="_blank" rel="noopener">' + num + "</a>" : num;
-    if (w.issueTitle) {
-      const title = esc(w.issueTitle);
-      return link + ' <span class="issue-title">' + title + "</span>";
-    }
-    return link + ' <span class="issue-title empty">—</span>';
+    return w.issueUrl
+      ? '<a class="issue-no" href="' + esc(w.issueUrl) + '" target="_blank" rel="noopener">' + num + "</a>"
+      : '<span class="issue-no">' + num + "</span>";
+  }
+  // issueCell renders the row title. A missing title shows the faint em dash —
+  // never blank or "undefined". (The .issue-title class is kept as a test hook.)
+  function issueCell(w) {
+    return w.issueTitle
+      ? '<div class="row-title issue-title">' + esc(w.issueTitle) + "</div>"
+      : '<div class="row-title issue-title empty">—</div>';
+  }
+  // Map a worker status to a chip variant: dispatched / ready-for-review /
+  // stale-claim get distinct treatment; any other status uses the plain chip.
+  function statusClass(s) {
+    if (s === "dispatched") return " dispatched";
+    if (s === "stale-claim") return " stale";
+    if (s === "ready-for-review" || s === "in-review") return " review";
+    return "";
   }
 
   function renderEscalations() {
@@ -1526,25 +1565,31 @@ export const PAGE_HTML = `<!doctype html>
   // LIFECYCLE_GROUPS. "other" is the catch-all so an unmapped status is always
   // shown, never dropped.
   const GROUP_ORDER = [["live", "Live"], ["awaiting-review", "Awaiting review"], ["escalated", "Escalated"], ["terminal", "Terminal"], ["other", "Other"]];
-  const THEAD = '<thead><tr><th>Issue</th><th>Status</th><th>Adapter</th><th>Attempts</th><th>Age</th><th>PR</th><th>Cost</th><th>Tokens in</th><th>Tokens out</th></tr></thead>';
 
   function rowHtml(w) {
-    const pr = w.prUrl ? '<a href="' + esc(w.prUrl) + '" target="_blank" rel="noopener">#' + esc(w.pr) + "</a>"
+    const prInner = w.prUrl ? '<a class="pr-link" href="' + esc(w.prUrl) + '" target="_blank" rel="noopener">#' + esc(w.pr) + "</a>"
       : (w.pr != null ? "#" + esc(w.pr) : '<span class="empty">—</span>');
     const checks = w.checksStatus
       ? '<span class="checks ' + checksClass(w.checksStatus) + '" title="' + checksTitle(w) + '">' + esc(w.checksStatus) + "</span>" +
         (w.checksFetchedAt ? '<span class="checks-time">' + esc(checksAgo(w.checksFetchedAt)) + "</span>" : "")
       : "";
-    return '<tr class="worker' + (w.issue === selected ? " sel" : "") + '" data-issue="' + w.issue + '">' +
-      "<td>" + issueCell(w) + "</td>" +
-      '<td class="status">' + esc(w.status) + "</td>" +
-      '<td><span class="adapter">' + avatarImg(w) + "<span>" + esc(w.adapter || "—") + "</span></span></td>" +
-      "<td>" + attemptsText(w) + "</td>" +
-      "<td>" + ageText(w) + "</td>" +
-      "<td>" + pr + checks + "</td>" +
-      '<td class="usage">' + usdCell(w.costUsd) + "</td>" +
-      '<td class="usage">' + tokCell(w.tokensIn) + "</td>" +
-      '<td class="usage">' + tokCell(w.tokensOut) + "</td></tr>";
+    // Assignee with avatar chip; an unassigned worker shows the faint em dash.
+    const who = w.adapter
+      ? '<span class="who">' + avatarImg(w) + "<span>" + esc(w.adapter) + "</span></span>"
+      : '<span class="who"><span class="empty">—</span></span>';
+    const tm = (k, v) => '<div class="tm"><span class="k">' + k + '</span><span class="v">' + v + "</span></div>";
+    return '<article class="row' + (w.issue === selected ? " sel" : "") + '" data-issue="' + w.issue + '">' +
+      '<div class="row-head">' + issueLink(w) +
+        '<span class="status' + statusClass(w.status) + '">' + esc(w.status) + "</span>" + who + "</div>" +
+      issueCell(w) +
+      '<div class="telemetry">' +
+        tm("Attempts", attemptsText(w)) +
+        tm("Age", ageText(w)) +
+        tm("PR", prInner + checks) +
+        tm("Cost", usdCell(w.costUsd)) +
+        tm("Tokens In", tokCell(w.tokensIn)) +
+        tm("Tokens Out", tokCell(w.tokensOut)) +
+      "</div></article>";
   }
 
   function renderWorkers() {
@@ -1571,11 +1616,12 @@ export const PAGE_HTML = `<!doctype html>
       const rows = buckets.get(key);
       if (!rows || !rows.length) continue; // an empty group renders nothing
       html += '<section class="lifecycle-group" data-group="' + esc(key) + '">' +
-        '<h3 class="group-head">' + esc(labelOf(key)) + ' <span class="group-count">' + rows.length + "</span></h3>" +
-        "<table>" + THEAD + "<tbody>" + rows.map(rowHtml).join("") + "</tbody></table></section>";
+        '<div class="sec"><h2 class="group-head">' + esc(labelOf(key)) + "</h2>" +
+        '<span class="tally">' + rows.length + '</span><span class="rule"></span></div>' +
+        '<div class="rows">' + rows.map(rowHtml).join("") + "</div></section>";
     }
     host.innerHTML = html;
-    host.querySelectorAll("tr.worker").forEach((tr) => tr.addEventListener("click", () => select(Number(tr.dataset.issue))));
+    host.querySelectorAll(".row").forEach((row) => row.addEventListener("click", () => select(Number(row.dataset.issue))));
   }
 
   function select(issue) {
@@ -1704,9 +1750,10 @@ export const PAGE_HTML = `<!doctype html>
   // One-glance summary strip (0087). Each cell is a labelled count. A field
   // carrying { error } renders a "—" placeholder with the failure in a tooltip
   // (never a 0 that reads as "all clear"); a { pending } field shows "…".
-  function summaryCell(label, field) {
+  function summaryCell(label, field, alert = false) {
     let text;
     let cls = "sumcell";
+    if (alert) cls += " alert";
     let title = "";
     if (field && field.error) { text = "—"; cls += " unavailable"; title = field.error; }
     else if (!field || field.pending) { text = "…"; cls += " pending"; }
@@ -1724,7 +1771,7 @@ export const PAGE_HTML = `<!doctype html>
       summaryCell("ready", s.ready) +
       summaryCell("live workers", s.liveWorkers) +
       summaryCell("awaiting review", s.awaitingReview) +
-      summaryCell("escalations", s.unresolvedEscalations);
+      summaryCell("escalations", s.unresolvedEscalations, true);
   }
 
   function render() { renderSummaryStrip(); renderErrToggle(); renderAdapterHealth(); renderEscalations(); renderWorkers(); renderTotals(); renderHeartbeat(); }

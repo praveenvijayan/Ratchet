@@ -1025,7 +1025,7 @@ await inTempDir(async (dir) => {
   assert.equal(row.tokensOut, 300, "the row carries the latest event's tokensOut");
   await withServer({ statePath, eventsPath, escalationsPath }, async (base) => {
     const page = (await fetchText(`${base}/`)).body;
-    assert.match(page, /<th>Cost<\/th><th>Tokens in<\/th><th>Tokens out<\/th>/, "the table header carries the three usage columns");
+    assert.match(page, /tm\("Cost",[\s\S]*?tm\("Tokens In",[\s\S]*?tm\("Tokens Out",/, "the telemetry strip carries the three usage columns");
     assert.match(page, /usdCell\(w\.costUsd\)/, "the row renders the cost cell from the row's costUsd");
     assert.match(page, /tokCell\(w\.tokensIn\)/, "the row renders the tokens-in cell from the row's tokensIn");
     assert.match(page, /tokCell\(w\.tokensOut\)/, "the row renders the tokens-out cell from the row's tokensOut");
@@ -1542,6 +1542,85 @@ await inTempDir(async (dir) => {
   assert.equal(markers.length, unique.size, "each #275 criterion is tested exactly once (no duplicate markers)");
   assert.equal(markers.length, CRITERIA_COUNT, `one test per #275 acceptance criterion (${CRITERIA_COUNT})`);
   for (let n = 1; n <= CRITERIA_COUNT; n++) assert.ok(unique.has(n), `#275 criterion ${n} has a test`);
+}
+
+// ===========================================================================
+// Issue #278 — Herd dashboard Santorini reskin, slice 0121 (sections, summary
+// strip, work rows). One test per acceptance criterion, asserted against the
+// page's source (PAGE_HTML) — the reskin is presentational, so the checks are
+// structural CSS + render-code assertions. Each Criterion-N block carries a
+// `#278 Criterion N` marker; Criterion 5 self-counts them.
+// ===========================================================================
+
+// --- #278 Criterion 1: section headings render as a serif uppercase title +
+// circled count tally + horizontal rule ending in a diamond, applied to each
+// lifecycle group heading. ---
+{
+  assert.match(PAGE_HTML, /\.sec \.group-head\s*\{[^}]*font-family:var\(--serif\)[^}]*text-transform:uppercase/i, "the section title is serif and uppercase");
+  assert.match(PAGE_HTML, /\.sec \.tally\s*\{[^}]*border-radius:50%/i, "the count tally is circled");
+  assert.match(PAGE_HTML, /\.sec \.rule\s*\{[^}]*flex:1[^}]*height:1px/i, "the heading carries a horizontal rule");
+  assert.match(PAGE_HTML, /\.sec \.rule::after\s*\{[^}]*transform:rotate\(45deg\)/i, "the rule ends in a diamond");
+  // Applied to each lifecycle group: the .sec heading is built inside the
+  // per-group render loop, so every group (awaiting review, live, escalated,
+  // terminal, other) gets the pattern.
+  assert.match(PAGE_HTML, /'<div class="sec"><h2 class="group-head">' \+ esc\(labelOf\(key\)\)/, "each lifecycle group heading uses the .sec pattern");
+  assert.match(PAGE_HTML, /<span class="tally">' \+ rows\.length \+ '<\/span><span class="rule">/, "each heading carries the group's count tally and rule");
+}
+
+// --- #278 Criterion 2: the summary strip renders each stat as a bordered block
+// with offset shadow (serif number + mono uppercase label); the escalations
+// stat and the errors chip get the --terra alert treatment with the error
+// count in a filled pill. ---
+{
+  assert.match(PAGE_HTML, /\.sumcell\s*\{[^}]*border:1\.5px solid var\(--ink\)[^}]*box-shadow:5px 5px 0/i, "each stat is a bordered block with an offset shadow");
+  assert.match(PAGE_HTML, /\.sumcell \.sumnum\s*\{[^}]*font-family:var\(--serif\)/i, "the stat number is a large serif");
+  assert.match(PAGE_HTML, /\.sumcell \.sumlabel\s*\{[^}]*font-family:var\(--mono\)[^}]*text-transform:uppercase/i, "the stat label is a mono uppercase");
+  assert.match(PAGE_HTML, /\.sumcell\.alert\s*\{[^}]*border-color:var\(--terra\)/i, "the alert stat gets the terra treatment");
+  assert.match(PAGE_HTML, /summaryCell\("escalations", s\.unresolvedEscalations, true\)/, "the escalations stat is rendered with the alert flag");
+  assert.match(PAGE_HTML, /\.errtoggle\s*\{[^}]*border:1\.5px solid var\(--terra\)/i, "the errors chip gets the terra alert border");
+  assert.match(PAGE_HTML, /\.errcount\s*\{[^}]*background:var\(--terra\)[^}]*border-radius:99px/i, "the error count is a filled pill");
+}
+
+// --- #278 Criterion 3: work rows render as bordered cards with an issue-number
+// link, uppercase status chip (dispatched / ready-for-review / stale-claim
+// variants), assignee avatar chip, title, and a dashed-rule telemetry strip. ---
+{
+  assert.match(PAGE_HTML, /\.row\s*\{[^}]*border:1\.5px solid var\(--ink\)[^}]*box-shadow:5px 5px 0/i, "work rows are bordered cards with an offset shadow");
+  assert.match(PAGE_HTML, /'<article class="row' \+ \(w\.issue === selected \? " sel" : ""\) \+ '" data-issue="'/, "each row is an article card keyed by its issue");
+  assert.match(PAGE_HTML, /'<a class="issue-no"/, "the card links the issue number");
+  // Status chip with the three distinct variants.
+  assert.match(PAGE_HTML, /'<span class="status' \+ statusClass\(w\.status\)/, "the card renders an uppercase status chip");
+  assert.match(PAGE_HTML, /s === "dispatched"[\s\S]*?s === "stale-claim"[\s\S]*?s === "ready-for-review"/, "statusClass distinguishes dispatched / stale-claim / ready-for-review");
+  assert.match(PAGE_HTML, /\.status\.dispatched\b/, "the dispatched chip has distinct styling");
+  assert.match(PAGE_HTML, /\.status\.review\b/, "the ready-for-review chip has distinct styling");
+  assert.match(PAGE_HTML, /\.status\.stale\b/, "the stale-claim chip has distinct styling");
+  // Assignee avatar chip, title, dashed telemetry strip.
+  assert.match(PAGE_HTML, /'<span class="who">' \+ avatarImg\(w\)/, "the assignee is shown with an avatar chip");
+  assert.match(PAGE_HTML, /\.telemetry\s*\{[^}]*border-top:1px dashed/i, "the telemetry strip is separated by a dashed rule");
+  assert.match(PAGE_HTML, /tm\("Attempts",[\s\S]*?tm\("Age",[\s\S]*?tm\("PR",[\s\S]*?tm\("Cost",[\s\S]*?tm\("Tokens In",[\s\S]*?tm\("Tokens Out",/, "the telemetry lists attempts, age, PR, cost, and tokens in/out");
+}
+
+// --- #278 Criterion 4: missing telemetry values show a faint em dash, never
+// blank or "undefined" (unreadable usage, no PR, or missing title all render
+// "—"). ---
+{
+  assert.match(PAGE_HTML, /usdCell = \(n\) => isNum\(n\) \? usdText\(n\) : '<span class="empty">—<\/span>'/, "a null cost renders the em-dash placeholder");
+  assert.match(PAGE_HTML, /tokCell = \(n\) => isNum\(n\) \? tokText\(n\) : '<span class="empty">—<\/span>'/, "a null token count renders the em-dash placeholder");
+  assert.match(PAGE_HTML, /'<div class="row-title issue-title empty">—<\/div>'/, "a missing title renders the em dash, never blank");
+  assert.match(PAGE_HTML, /w\.pr != null \? "#" \+ esc\(w\.pr\) : '<span class="empty">—<\/span>'/, "a worker with no PR renders the em dash");
+  assert.match(PAGE_HTML, /'<span class="who"><span class="empty">—<\/span><\/span>'/, "an unassigned worker renders the em dash");
+  assert.match(PAGE_HTML, /\.tm \.v \.empty\s*\{[^}]*color:var\(--ink-faint\)/i, "the em-dash telemetry value is faint");
+}
+
+// --- #278 Criterion 5: every criterion above has exactly one test. ---
+{
+  const CRITERIA_COUNT = 5;
+  const selfText = readFileSync(fileURLToPath(import.meta.url), "utf8");
+  const markers = [...selfText.matchAll(/^\/\/ --- #278 Criterion (\d+):/gim)].map((m) => Number(m[1]));
+  const unique = new Set(markers);
+  assert.equal(markers.length, unique.size, "each #278 criterion is tested exactly once (no duplicate markers)");
+  assert.equal(markers.length, CRITERIA_COUNT, `one test per #278 acceptance criterion (${CRITERIA_COUNT})`);
+  for (let n = 1; n <= CRITERIA_COUNT; n++) assert.ok(unique.has(n), `#278 criterion ${n} has a test`);
 }
 
 console.log("PASS herd-ui.test.mjs");
