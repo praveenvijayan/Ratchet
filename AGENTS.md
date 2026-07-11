@@ -214,9 +214,23 @@ After push, the `pr-gates` workflow backstops the handoff on every
 ### 5. Hand off — one PR, then stop
 Push, then open a PR whose **first line is `Closes #<N>`**, followed by a summary
 and the gate checklist with real results. If an open PR already exists for
-`agent/issue-<N>`, update it — never open a second. Set the issue to
-`state:in-review`, remove `state:in-progress`. Then **full stop**: no polling,
-no self-review, no nudging.
+`agent/issue-<N>`, update it — never open a second.
+
+**An up-to-date branch is part of the definition of review-ready.** Before you
+flip the issue to `state:in-review`, bring the latest `main` into your branch
+(rebase onto it, or merge it in), resolve any conflicts, then re-run the gates
+and push. This is not optional polish: **a PR with merge conflicts gets no
+event-driven CI at all.** GitHub cannot build the merge ref, so every
+`pull_request` and `pull_request_review` workflow — `pr-gates` **and**
+`review-verdict` — is silently *skipped*, not failed. The PR shows no checks,
+and because `review-verdict` never runs, no review can flip its labels. Un-gated
+and un-flippable work is not reviewable — moving a conflicted branch to
+`state:in-review` hands the human un-verified work and a review that can never
+take effect. Only once the branch is current, conflict-free, and green is the
+work review-ready.
+
+Set the issue to `state:in-review`, remove `state:in-progress`. Then **full
+stop**: no polling, no self-review, no nudging.
 
 > You never merge, never approve, never close issues, never push to `main`.
 > The PR is your terminal action.
