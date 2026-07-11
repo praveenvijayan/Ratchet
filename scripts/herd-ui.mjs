@@ -1092,6 +1092,7 @@ export function createDashboardServer({
   escalationsPath = ESCALATIONS_FILE,
   resolutionsPath = RESOLUTIONS_FILE,
   config = { ...DEFAULTS },
+  configPath = null,
   repoSlug = null,
   now = Date.now,
   pollMs = 1000,
@@ -1105,7 +1106,24 @@ export function createDashboardServer({
   const checksCache = createChecksCache({ fetchChecks: fetchChecks || defaultFetchChecks, refreshMs: checksRefreshMs });
   const titleCache = createTitleCache({ fetchTitle: fetchTitle || defaultFetchTitle });
   const readyQueueCache = createReadyQueueCache({ fetchReadyCount: fetchReadyCount || defaultFetchReadyCount });
-  const snap = () => readSnapshot({ statePath, eventsPath, escalationsPath, resolutionsPath, config, now: now(), repoSlug, checksCache, titleCache, readyQueueCache });
+  // Re-read herd.json for every snapshot so operator edits (avatars,
+  // claimTimeoutSeconds, pollSeconds …) reflect in the next snapshot the browser
+  // receives, without restarting the server. One read per snapshot means the whole
+  // snapshot is built from a single config value — never a half-old, half-new mix.
+  // A missing or unparseable file (any HerdConfigError, or any read failure) keeps
+  // the last good config and never crashes the request. With no configPath the
+  // config stays fixed at the value passed in — the offline test path.
+  let liveConfig = config;
+  const resolveConfig = () => {
+    if (!configPath) return liveConfig;
+    try {
+      liveConfig = loadConfig(configPath, { warn: false });
+    } catch {
+      // keep last good liveConfig
+    }
+    return liveConfig;
+  };
+  const snap = () => readSnapshot({ statePath, eventsPath, escalationsPath, resolutionsPath, config: resolveConfig(), now: now(), repoSlug, checksCache, titleCache, readyQueueCache });
 
   const server = httpCreateServer((req, res) => {
     const url = new URL(req.url, "http://localhost");
@@ -1311,7 +1329,8 @@ export async function run(argv, { log = console.log, cwd = process.cwd() } = {})
   const root = resolveRepoRoot(cwd);
   const { statePath, eventsPath, escalationsPath } = ratchetPaths(root);
   const resolutionsPath = join(root, RESOLUTIONS_FILE);
-  const config = loadConfigOrDefaults(join(root, CONFIG_PATH));
+  const configPath = join(root, CONFIG_PATH);
+  const config = loadConfigOrDefaults(configPath);
   const repoSlug = resolveRepoSlug(gitOriginUrl(cwd));
   const mascotsDir = join(root, "mascots");
   const server = createDashboardServer({ statePath, eventsPath, escalationsPath, resolutionsPath, config, repoSlug, notify: createNotifier(), mascotsDir });
