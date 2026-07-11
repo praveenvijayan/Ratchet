@@ -50,9 +50,14 @@ export function hasClosesRef(body, issue) {
 
 // Text-only check: does the body carry a gates section — a markdown heading or
 // bold label whose name starts with "gate" (## Gates, ### Gate results,
-// **Gates**)? A bare mention of the word is not a section.
+// **Gates**), or a bare label line that is nothing but the section name
+// ("Gates", "Gate results:")? AGENTS.md demands "the gate checklist" without
+// mandating markdown formatting, so a plain label line counts too. A mention
+// of the word inside a sentence is still not a section.
 export function hasGatesSection(body) {
-  return /(^|\n)\s{0,3}(#{1,6}\s*|\*\*\s*)gate/i.test(String(body));
+  const s = String(body);
+  if (/(^|\n)\s{0,3}(#{1,6}\s*|\*\*\s*)gate/i.test(s)) return true;
+  return /(^|\n)\s{0,3}gates?(\s+(results?|checklist))?\s*:?\s*(\r?\n|$)/i.test(s);
 }
 
 // Decide a PR's verification outcome from its `gh pr view` JSON. Pure and total.
