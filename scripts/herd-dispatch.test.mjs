@@ -451,6 +451,109 @@ await inTempDir(async () => {
   );
 });
 
+// --- Issue #285: the fleet heartbeat must not starve while a poll pass blocks in
+// the dispatch claim wait. One test per acceptance criterion. ---
+
+// #285 criterion 1: a claim wait that blocks for the full claimTimeoutSeconds keeps
+// beating the fleet heartbeat, so its age never exceeds the dashboard's silence
+// threshold (pollSeconds * HEARTBEAT_SILENCE_FACTOR) while the supervisor is alive.
+await inTempDir(async () => {
+  let t = NOW;
+  const now = () => t;
+  const sleep = (ms) => ((t += ms), Promise.resolve());
+  await dispatchOne({
+    onPath: () => true,
+    config: mkConfig(), // pollSeconds 60 -> beat cadence 60s, silence threshold 150s
+    ready: [{ number: 20, labels: [] }],
+    statePath: "s.json",
+    escalationsPath: "esc.md",
+    eventsPath: "events.jsonl",
+    spawn: () => 5000,
+    gh: async () => {
+      throw new Error("404 Not Found"); // the ref never appears -> the wait runs to the full timeout
+    },
+    isAlive: () => false,
+    kill: () => {},
+    now,
+    sleep,
+    log: () => {},
+    claimTimeoutMs: 300000, // 300s — the default claim window, longer than the 150s silence threshold
+    claimIntervalMs: 1000,
+  });
+  const beats = readFileSync("events.jsonl", "utf8")
+    .trim()
+    .split("\n")
+    .map((l) => JSON.parse(l))
+    .filter((e) => e.event === "heartbeat")
+    .map((e) => Date.parse(e.ts));
+  assert.ok(beats.length >= 4, "the supervisor beats repeatedly across the 300s claim wait, not just once");
+  const SILENCE = 60 * 2.5 * 1000; // HEARTBEAT_SILENCE_FACTOR (2.5) * pollSeconds, in ms
+  assert.ok(beats[0] - NOW <= SILENCE, "the first in-wait beat lands within one silence threshold of the pass start");
+  for (let i = 1; i < beats.length; i++) {
+    assert.ok(beats[i] - beats[i - 1] <= SILENCE, "no gap between consecutive heartbeats exceeds the silence threshold");
+  }
+});
+
+// #285 criterion 2: heartbeats are bound to an active wait — once the claim
+// resolves (or the process stops) no further beats fire, so a genuinely stopped
+// supervisor is still reported silent within one threshold, same as today. A wait
+// that ends well under the beat cadence emits no beats at all: beats never outlive
+// the wait.
+{
+  let t = NOW;
+  const now = () => t;
+  const sleep = (ms) => ((t += ms), Promise.resolve());
+  let beats = 0;
+  let calls = 0;
+  const gh = async () => {
+    if (++calls < 3) throw new Error("404 Not Found");
+    return { ref: "refs/heads/agent/issue-21" }; // claim resolves after ~2s of waiting
+  };
+  const r = await waitForClaim({
+    gh,
+    issue: 21,
+    timeoutMs: 300000,
+    intervalMs: 1000,
+    now,
+    sleep,
+    heartbeat: () => beats++,
+    heartbeatIntervalMs: 60000, // 60s cadence — far longer than the ~2s this wait lasts
+  });
+  assert.equal(r.claimed, true, "the claim resolves");
+  assert.equal(beats, 0, "a short wait fires no heartbeat, and a returned wait beats no more — beats never outlive the wait");
+}
+
+// #285 criterion 3: a heartbeat write failure during the claim wait is swallowed —
+// it never aborts the wait or the pass — matching pollOnce's heartbeat error policy.
+await inTempDir(async () => {
+  writeFileSync("blocked", ""); // a file where the events dir would need to be -> every append ENOTDIRs
+  let t = NOW;
+  const now = () => t;
+  const sleep = (ms) => ((t += ms), Promise.resolve());
+  const r = await dispatchOne({
+    onPath: () => true,
+    config: mkConfig(),
+    ready: [{ number: 22, labels: [] }],
+    statePath: "s.json",
+    escalationsPath: "esc.md",
+    eventsPath: "blocked/events.jsonl", // unwritable: its dirname is a regular file
+    spawn: () => 6000,
+    gh: async () => {
+      throw new Error("404 Not Found");
+    },
+    isAlive: () => false,
+    kill: () => {},
+    now,
+    sleep,
+    log: () => {},
+    claimTimeoutMs: 180000,
+    claimIntervalMs: 1000,
+  });
+  assert.equal(r.claimed, false, "the wait still runs to timeout despite every heartbeat write failing");
+  assert.equal(readState("s.json")["22"].status, "dispatch-failed", "the pass completes and records the outcome");
+  assert.ok(!existsSync("blocked/events.jsonl"), "no events file was fabricated past the unwritable path");
+});
+
 // --- Issue #286: short-circuit the claim wait when the spawned worker exits. ---
 
 // #286 AC1) When the worker's process exits before creating its claim ref, the
@@ -588,4 +691,4 @@ await inTempDir(async () => {
   assert.ok(!existsSync("esc.md"), "no escalation for a successful late claim");
 });
 
-console.log("PASS herd-dispatch.test.mjs (8 checks for #105/#126 + 3 for #127 + 1 for #138 + 1 for #151 + 1 for #156 + 4 for #286)");
+console.log("PASS herd-dispatch.test.mjs (8 checks for #105/#126 + 3 for #127 + 1 for #138 + 1 for #151 + 1 for #156 + 3 for #285 + 4 for #286)");
