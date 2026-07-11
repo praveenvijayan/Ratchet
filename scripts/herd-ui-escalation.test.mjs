@@ -253,4 +253,32 @@ await inTempDir(async (dir) => {
   for (let n = 1; n <= CRITERIA_COUNT; n++) assert.ok(unique.has(n), `#172 criterion ${n} has a test`);
 }
 
-console.log("PASS herd-ui-escalation.test.mjs (5 criteria for #172)");
+// --- Superseded escalations: an unresolved group auto-resolves when its issue
+// moved on after the group's newest occurrence — a newer escalation with a
+// different reason, a newer dispatch/resume, or the issue closing. A recurring
+// problem keeps re-appending, stays the newest group, and is never superseded.
+{
+  const blocks = dedupEscalations(parseEscalations(escMd([
+    // issue 7: old concern, then a newer different concern → old one superseded.
+    { ts: "2026-07-09T10:00:00Z", issue: 7, what: "worker exited 0 without opening a PR", logFile: null, action: "inspect" },
+    { ts: "2026-07-09T11:00:00Z", issue: 7, what: "PR #70 body is missing a gates section", logFile: null, action: "add gates" },
+    // issue 8: one concern, then the supervisor re-dispatched → superseded.
+    { ts: "2026-07-09T10:00:00Z", issue: 8, what: "worker pid 11 is not alive", logFile: null, action: "re-queue" },
+    // issue 9: recurring concern (newest group for its issue) → stays unresolved.
+    { ts: "2026-07-09T10:00:00Z", issue: 9, what: "worker pid 22 is not alive", logFile: null, action: "re-queue" },
+    { ts: "2026-07-09T11:30:00Z", issue: 9, what: "worker pid 23 is not alive", logFile: null, action: "re-queue" },
+    // issue 10: any concern on a closed issue → resolved.
+    { ts: "2026-07-09T10:00:00Z", issue: 10, what: "worker exited 0 without opening a PR", logFile: null, action: "inspect" },
+  ]), { isPath: false }));
+  const events = [{ ts: "2026-07-09T11:00:00Z", event: "dispatch", issue: 8 }];
+  const marked = resolveEscalations(blocks, { state: {}, closedIssues: new Set([10]), events });
+  const by = (issue, re) => marked.find((b) => b.issue === issue && re.test(b.what));
+  assert.equal(by(7, /without opening a PR/).resolved, true, "older concern is superseded by a newer different concern");
+  assert.equal(by(7, /gates section/).resolved, false, "the newest concern for an issue stays unresolved");
+  assert.equal(by(8, /not alive/).resolved, true, "a concern is superseded by a later dispatch of the issue");
+  assert.equal(by(9, /not alive/).resolved, false, "a recurring concern (newest occurrence wins the group ts) is never superseded");
+  assert.equal(by(9, /not alive/).occurrences, 2, "recurrences stay one group");
+  assert.equal(by(10, /without opening a PR/).resolved, true, "any concern on a closed issue is resolved");
+}
+
+console.log("PASS herd-ui-escalation.test.mjs (5 criteria for #172 + superseded rules)");
