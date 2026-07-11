@@ -1232,18 +1232,24 @@ export const PAGE_HTML = `<!doctype html>
   .errtoggle:hover { background:rgba(124,104,196,.16); }
   .errcount { background:var(--terra); color:var(--paper-hi); border-radius:99px; padding:1px 9px; font-size:11px; font-weight:700; min-width:20px; text-align:center; }
   .errcount.zero { background:var(--ink-faint); color:var(--ink); }
-  .errpanel { flex:0 0 360px; background:var(--card); border:1px solid var(--line); border-radius:6px; overflow:auto; max-height:calc(100vh - 120px); align-self:stretch; }
-  .errpanel-head { display:flex; align-items:center; justify-content:space-between; padding:10px 14px; border-bottom:1px solid var(--line); }
-  .errpanel-head h2 { font-size:14px; margin:0; }
-  .errpanel-head .errclose { background:none; border:none; cursor:pointer; font-size:16px; color:var(--muted); padding:2px 6px; border-radius:4px; }
-  .errpanel-head .errclose:hover { background:color-mix(in srgb, var(--fg) 10%, transparent); }
-  .adapterhealth { padding:10px 14px 0; }
+  /* Incidents aside — Santorini panel (design aside/.panel-head/.incident).
+     Bordered card with an ink-inverted head; hooks (#errpanel/#errclose,
+     #adapterhealth/#escalations) and the toggle behaviour are unchanged. */
+  .errpanel { border:1.5px solid var(--ink); background:var(--paper-hi); box-shadow:8px 8px 0 var(--ink-faint); overflow:auto; max-height:calc(100vh - 120px); align-self:stretch; }
+  .errpanel-head { display:flex; align-items:center; justify-content:space-between; padding:16px 20px; border-bottom:1.5px solid var(--ink); background:var(--ink); color:var(--paper-hi); }
+  .errpanel-head h2 { font-family:var(--serif); font-size:16px; font-weight:400; letter-spacing:.14em; text-transform:uppercase; margin:0; }
+  .errpanel-head .errclose { background:none; border:none; cursor:pointer; font-family:var(--mono); font-size:15px; color:var(--paper-hi); opacity:.7; padding:2px 6px; }
+  .errpanel-head .errclose:hover { opacity:1; }
+  /* Adapter-failure alerts and breakdown share the incident-card language: a
+     terra-accented alert card and a dashed-ruled table under an ink header. */
+  .adapterhealth { padding:18px 20px 0; display:flex; flex-direction:column; gap:14px; }
   .adapterhealth:empty { display:none; }
-  .adapter-alert { border:1px solid var(--over); border-left-width:4px; border-radius:6px; padding:8px 12px; margin-bottom:8px; color:var(--over); }
-  .adapter-breakdown { width:100%; border-collapse:collapse; margin-bottom:8px; }
-  .adapter-breakdown th, .adapter-breakdown td { text-align:right; padding:3px 6px; }
+  .adapter-alert { border:1.5px solid var(--terra); box-shadow:4px 4px 0 rgba(124,104,196,.22); background:var(--paper); padding:15px 17px; font-family:var(--mono); font-size:12px; line-height:1.55; color:var(--terra); }
+  .adapter-breakdown { width:100%; border-collapse:collapse; border:1px solid var(--ink); background:var(--paper); font-family:var(--mono); }
+  .adapter-breakdown th { text-align:right; padding:6px 8px; background:var(--ink); color:var(--paper-hi); font-size:9.5px; font-weight:400; letter-spacing:.12em; text-transform:uppercase; }
+  .adapter-breakdown td { text-align:right; padding:5px 8px; font-size:11px; border-top:1px dashed var(--ink-faint); font-variant-numeric:tabular-nums; }
   .adapter-breakdown th:first-child, .adapter-breakdown td:first-child { text-align:left; }
-  .adapter-breakdown tr.broken td { color:var(--over); font-variant-numeric:tabular-nums; }
+  .adapter-breakdown tr.broken td { color:var(--terra); font-weight:700; }
   /* Summary strip — Santorini stat blocks (design .topstrip/.stat): bordered,
      offset shadow, serif number, mono uppercase label. Structure/hooks kept. */
   .summarystrip { display:flex; align-items:stretch; flex-wrap:wrap; gap:18px; margin:0 0 36px; }
@@ -1256,21 +1262,27 @@ export const PAGE_HTML = `<!doctype html>
   .sumcell.unavailable { border-color:var(--terra); cursor:help; }
   .sumcell.unavailable .sumnum { color:var(--terra); }
   .sumcell.pending .sumnum { color:var(--ink-soft); }
-  .escalations { padding:10px 14px; }
-  .esc { border:1px solid var(--over); border-left-width:4px; border-radius:6px; padding:10px 14px; margin-bottom:8px; }
-  .esc.resolved { border-color:var(--line); opacity:0.6; }
-  .esc.resolved .top { font-weight:normal; }
-  .esc .top { font-weight:600; }
-  .esc .what { margin:4px 0; }
-  .esc .meta { color:var(--muted); font-size:12px; }
-  .esc .occurrences { display:inline-block; background:var(--card); border:1px solid var(--line); border-radius:10px; padding:0 7px; font-size:11px; font-weight:600; color:var(--muted); margin-left:6px; }
-  .esc .actions { display:flex; gap:6px; margin-top:6px; flex-wrap:wrap; }
-  .esc .act-btn { display:inline-flex; align-items:center; gap:4px; background:var(--card); border:1px solid var(--line); border-radius:4px; padding:3px 8px; cursor:pointer; font:inherit; font-size:12px; color:var(--fg); }
-  .esc .act-btn:hover { border-color:var(--accent); }
-  .esc .act-btn.ack { border-color:var(--line); }
-  .esc .act-btn.ack:hover { border-color:#2da44e; color:#2da44e; }
-  .esc .act-btn.copied { border-color:#2da44e; color:#2da44e; }
-  .esc .esc-error { color:var(--over); font-size:12px; margin-top:4px; font-weight:600; }
+  /* Incident cards (design .incident/.incident.flag). An unresolved incident is
+     the flagged card: terra border, offset shadow, terra action buttons. A
+     resolved one is de-emphasised to a faint ink outline (the esc-resolved
+     class name and the display:none actions rule below are preserved hooks). */
+  .escalations { padding:18px 20px; }
+  .esc { border:1.5px solid var(--terra); box-shadow:4px 4px 0 rgba(124,104,196,.22); background:var(--paper); padding:15px 17px; margin-bottom:14px; display:flex; flex-direction:column; gap:10px; }
+  .esc:last-child { margin-bottom:0; }
+  .esc.resolved { border:1px solid var(--ink-faint); box-shadow:none; opacity:0.6; }
+  .esc.resolved .top { font-weight:normal; color:var(--ink-soft); }
+  .esc .top { font-family:var(--mono); font-weight:700; font-size:12.5px; color:var(--terra); display:flex; align-items:center; gap:10px; }
+  .esc .top::after { content:""; flex:1; height:1px; background:var(--ink-faint); }
+  .esc .what { margin:0; font-size:12.5px; line-height:1.55; }
+  .esc .meta { font-family:var(--mono); font-size:10px; line-height:1.6; color:var(--ink-soft); border-top:1px dashed var(--ink-faint); padding-top:9px; overflow-wrap:anywhere; }
+  .esc .occurrences { font-family:var(--mono); font-size:10px; font-weight:700; color:var(--terra); }
+  .esc .actions { display:flex; gap:10px; flex-wrap:wrap; }
+  .esc .act-btn { font-family:var(--mono); font-size:10px; letter-spacing:.12em; text-transform:uppercase; padding:7px 13px; border:1.5px solid var(--terra); background:var(--paper-hi); color:var(--terra); cursor:pointer; }
+  .esc .act-btn:hover { background:var(--terra); color:var(--paper-hi); }
+  .esc .act-btn.ack { background:var(--terra); color:var(--paper-hi); }
+  .esc .act-btn.ack:hover { background:#5b4aa4; color:var(--paper-hi); }
+  .esc .act-btn.copied { background:var(--ink); border-color:var(--ink); color:var(--paper-hi); }
+  .esc .esc-error { font-family:var(--mono); font-size:11px; color:var(--terra); font-weight:700; }
   .esc.resolved .actions { display:none; }
   table { width:100%; border-collapse:collapse; background:var(--card); border:1px solid var(--line); border-radius:6px; overflow:hidden; }
   th, td { text-align:left; padding:8px 12px; border-bottom:1px solid var(--line); }
@@ -1311,11 +1323,15 @@ export const PAGE_HTML = `<!doctype html>
   .tm .v { font-family:var(--mono); font-size:12.5px; font-weight:700; }
   .tm .v .empty { color:var(--ink-faint); font-weight:400; }
   a { color:var(--accent); }
-  .logpane { margin-top:18px; }
-  .logpane h2 { font-size:14px; margin:0 0 6px; }
-  .logsearch { width:100%; padding:6px 10px; border:1px solid var(--line); border-radius:6px; font:inherit; color:var(--fg); background:var(--card); margin-bottom:8px; }
-  .logsearch:focus { outline:none; border-color:var(--accent); }
-  pre.log { background:var(--card); border:1px solid var(--line); border-radius:6px; padding:12px; max-height:360px; overflow:auto; white-space:pre-wrap; word-break:break-word; margin:0; font:12px/1.5 ui-monospace, monospace; }
+  /* Log console (design .log-shell/.log-filter/.log-raw). Bordered shell with a
+     serif head; the filter input carries the design's offset shadow and the raw
+     log tail is an ink-inverted block. #logsearch/#lognomatch/pre#log unchanged. */
+  .logpane { margin-top:34px; border:1.5px solid var(--ink); background:var(--paper-hi); box-shadow:5px 5px 0 var(--ink-faint); padding:20px 24px; }
+  .logpane h2 { font-family:var(--serif); font-size:16px; font-weight:400; letter-spacing:.14em; text-transform:uppercase; margin:0 0 14px; }
+  .logsearch { display:block; width:100%; margin:0 0 16px; font-family:var(--mono); font-size:12px; color:var(--ink); padding:10px 14px; border:1.5px solid var(--ink); background:var(--paper-hi); box-shadow:4px 4px 0 var(--ink-faint); outline:none; }
+  .logsearch::placeholder { color:var(--ink-soft); }
+  .logsearch:focus { border-color:var(--terra); }
+  pre.log { border:1.5px solid var(--ink); background:var(--ink); color:var(--paper-lo); box-shadow:5px 5px 0 var(--ink-faint); padding:16px 18px; max-height:300px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; margin:0; font-family:var(--mono); font-size:11px; line-height:1.75; }
   .empty { color:var(--muted); }
   .checks { font-size:12px; font-weight:600; margin-left:4px; }
   .checks.pass { color:#2da44e; }
@@ -1325,13 +1341,16 @@ export const PAGE_HTML = `<!doctype html>
   .checks-time { font-size:11px; color:var(--muted); margin-left:2px; }
   /* Title styling lives on .row-title now; the .issue-title class is retained on
      the element only as a test/telemetry hook. */
-  .timeline { margin-bottom:14px; max-height:200px; overflow:auto; border:1px solid var(--line); border-radius:6px; background:var(--card); padding:8px 12px; }
-  .timeline-entry { padding:2px 0; font-size:13px; border-bottom:1px solid color-mix(in srgb, var(--line) 50%, transparent); }
+  /* Structured log lines (design .log-lines/.log-line): timestamp / bold event
+     / faint meta, dashed-ruled, with escalation events in the terra accent. */
+  .timeline { margin-bottom:16px; max-height:200px; overflow:auto; display:flex; flex-direction:column; }
+  .timeline-entry { display:flex; align-items:baseline; gap:10px; font-family:var(--mono); font-size:12px; line-height:1.5; padding:4px 0; border-bottom:1px dashed var(--ink-hair); }
   .timeline-entry:last-child { border-bottom:none; }
-  .timeline-ts { color:var(--muted); font-family:ui-monospace, monospace; font-size:12px; margin-right:6px; }
-  .timeline-event { font-weight:600; }
-  .timeline-fields { color:var(--muted); font-size:12px; }
-  .lognomatch { color:var(--muted); padding:12px; }
+  .timeline-ts { color:var(--ink-soft); white-space:nowrap; }
+  .timeline-event { font-weight:700; }
+  .timeline-event.esc { color:var(--terra); }
+  .timeline-fields { color:var(--ink-soft); }
+  .lognomatch { font-family:var(--mono); font-size:12px; color:var(--ink-soft); padding:12px; }
 </style>
 </head>
 <body>
@@ -1664,7 +1683,10 @@ export const PAGE_HTML = `<!doctype html>
       if (e.attempts != null) fields.push("attempt " + esc(e.attempts));
       if (e.pr != null) fields.push("PR #" + esc(e.pr));
       const fieldStr = fields.length ? ' <span class="timeline-fields">' + fields.join(" · ") + "</span>" : "";
-      return '<div class="timeline-entry"><span class="timeline-ts">' + esc(ts) + '</span><span class="timeline-event">' + esc(e.event || "?") + "</span>" + fieldStr + "</div>";
+      // Escalation events (event: "escalation", emitted by appendEscalation) are
+      // called out in the accent colour, matching the design's .log-line .ev.esc.
+      const evCls = String(e.event || "").startsWith("escalat") ? "timeline-event esc" : "timeline-event";
+      return '<div class="timeline-entry"><span class="timeline-ts">' + esc(ts) + '</span><span class="' + evCls + '">' + esc(e.event || "?") + "</span>" + fieldStr + "</div>";
     }).join("");
   }
 
