@@ -559,6 +559,10 @@
       "class": "excluded"
     },
     {
+      "path": "scripts/workflow-checkout-permissions.test.mjs",
+      "class": "excluded"
+    },
+    {
       "path": "plan",
       "class": "excluded"
     },
