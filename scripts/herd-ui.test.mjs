@@ -360,120 +360,6 @@ await (async () => {
   for (let n = 1; n <= CRITERIA_COUNT; n++) assert.ok(unique.has(n), `criterion ${n} has a test`);
 }
 
-// --- #166 Criterion 1: errors and escalations render inside a side panel
-// rather than stacked above the worker table. -------------------------------
-await (async () => {
-  await withServer({}, async (base) => {
-    const page = await fetchText(`${base}/`);
-    assert.match(page.body, /<aside[^>]*id="errpanel"/, "escalations live inside a side panel element");
-    assert.match(page.body, /id="errpanel"[\s\S]*id="escalations"/, "escalations div is inside the error panel");
-    assert.doesNotMatch(page.body, /<main>\s*<div class="escalations"/, "escalations no longer stacked directly in main");
-  });
-})();
-
-// --- #166 Criterion 2: a control toggles the panel open and closed; closing
-// it returns the worker list to full width and opening it shows the current
-// errors. ---------------------------------------------------------------------
-await (async () => {
-  await withServer({}, async (base) => {
-    const page = await fetchText(`${base}/`);
-    assert.match(page.body, /<button[^>]*id="errtoggle"/, "a toggle control opens and closes the panel");
-    assert.match(page.body, /id="errpanel"[\s\S]*<button[^>]*id="errclose"/, "a close button is inside the panel");
-    assert.match(page.body, /<aside[^>]*id="errpanel"[^>]*hidden/, "panel starts closed — worker list at full width");
-    assert.match(page.body, /\.fleet\s*\{[^}]*flex:1/, "fleet container expands to full width when panel is closed");
-  });
-})();
-
-// --- #166 Criterion 3: the control shows a count of open errors so the
-// operator sees there are errors to read while the panel is closed. -----------
-await inTempDir(async (dir) => {
-  const escPath = join(dir, "esc.md");
-  writeFileSync(escPath, [
-    "## 2026-07-09T11:00:00Z — issue #7",
-    "- What happened: worker pid 111 is not alive",
-    "- Log file: .ratchet/logs/issue-7.log",
-    "- Suggested action: review the log and re-queue",
-    "",
-    "## 2026-07-09T11:30:00Z — issue #9",
-    "- What happened: stale claim ref",
-    "- Log file: (none)",
-    "- Suggested action: delete the stale ref",
-    "",
-  ].join("\n"));
-
-  await withServer({ statePath: join(dir, "s.json"), eventsPath: join(dir, "e.jsonl"), escalationsPath: escPath }, async (base) => {
-    const page = await fetchText(`${base}/`);
-    assert.match(page.body, /id="errtoggle"[\s\S]*id="errcount"/, "the toggle control carries a count badge");
-    const { json } = await fetchJson(`${base}/api/snapshot`);
-    assert.equal(json.escalations.length, 2, "the snapshot carries the live error count");
-    assert.match(page.body, /snapshot\.escalations\.length/, "the badge count is driven by the live escalation count");
-  });
-});
-
-// --- #166 Criterion 4: new errors appearing while the panel is closed update
-// the count live and do not force the panel open. -----------------------------
-await inTempDir(async (dir) => {
-  const escPath = join(dir, "esc.md");
-  const statePath = join(dir, "s.json");
-  const eventsPath = join(dir, "e.jsonl");
-  writeFileSync(escPath, "");
-  writeFileSync(statePath, JSON.stringify({}));
-  writeFileSync(eventsPath, "");
-
-  await withServer({ statePath, eventsPath, escalationsPath: escPath, now: () => NOW }, async (base) => {
-    const page = await fetchText(`${base}/`);
-    const scriptMatch = /<script>([\s\S]*?)<\/script>/.exec(page.body);
-    assert.ok(scriptMatch, "page has a script block");
-    const script = scriptMatch[1];
-    const handlerMatch = /addEventListener\("snapshot"[\s\S]*?\}\);/.exec(script);
-    assert.ok(handlerMatch, "snapshot handler exists");
-    assert.doesNotMatch(handlerMatch[0], /panelOpen\s*=\s*true/, "the snapshot handler never forces the panel open");
-
-    const streamDone = sseCollect(
-      `${base}/api/stream`,
-      (frames) => frames.some((f) => f.event === "snapshot" && f.data.escalations.length > 0),
-    );
-    setTimeout(() => {
-      writeFileSync(escPath, [
-        "## 2026-07-09T12:00:00Z — issue #11",
-        "- What happened: worker died",
-        "- Log file: (none)",
-        "- Suggested action: restart",
-        "",
-      ].join("\n"));
-    }, 120);
-    const frames = await streamDone;
-    const last = frames[frames.length - 1];
-    assert.ok(last.data.escalations.length > 0, "the count updates live when new errors appear while the panel is closed");
-  });
-});
-
-// --- #166 Criterion 5: with zero errors the panel is empty and shows a
-// one-line "no errors" message instead of a blank panel. ----------------------
-await inTempDir(async (dir) => {
-  await withServer({ statePath: join(dir, "s.json"), eventsPath: join(dir, "e.jsonl"), escalationsPath: join(dir, "esc.md") }, async (base) => {
-    const page = await fetchText(`${base}/`);
-    assert.match(page.body, /No errors\./, "the panel shows a one-line no-errors message for zero errors");
-    const { json } = await fetchJson(`${base}/api/snapshot`);
-    assert.equal(json.escalations.length, 0, "zero escalations in the snapshot");
-  });
-});
-
-// --- #166 Criterion 6: every criterion above has exactly one test named after
-// it. The plan file carried six #166 acceptance criteria; this counts its own
-// `#166 Criterion N` markers and proves there is exactly one per criterion,
-// 1..6. It counts markers in THIS file only — it never reads the plan file at
-// runtime, so archiving the plan when the issue closes can never break it.
-{
-  const CRITERIA_COUNT = 6;
-  const selfText = readFileSync(fileURLToPath(import.meta.url), "utf8");
-  const markers = [...selfText.matchAll(/^\/\/ --- #166 Criterion (\d+):/gim)].map((m) => Number(m[1]));
-  const unique = new Set(markers);
-  assert.equal(markers.length, unique.size, "each #166 criterion is tested exactly once (no duplicate markers)");
-  assert.equal(markers.length, CRITERIA_COUNT, `one test per #166 acceptance criterion (${CRITERIA_COUNT})`);
-  for (let n = 1; n <= CRITERIA_COUNT; n++) assert.ok(unique.has(n), `#166 criterion ${n} has a test`);
-}
-
 // --- #178 Criterion 1: each worker row shows the issue title alongside its
 // number, linked to the issue. -----------------------------------------------
 await inTempDir(async (dir) => {
@@ -1520,17 +1406,14 @@ await inTempDir(async (dir) => {
   assert.match(PAGE_HTML, /"supervisor live · heartbeat " \+ durText\(age\) \+ " ago"/, "the live state shows the time since the last heartbeat");
 }
 
-// --- #275 Criterion 4: the main content is a two-column grid (work column +
-// 400px incidents aside) that collapses to one column below 1180px, with the
-// existing errors-panel toggle behaviour intact. ---
+// --- #275 Criterion 4: the top region is a two-column grid (errors &
+// escalations + active agents deck) that collapses to one column below 1180px.
+// (Superseded #306 layout: the toggled aside became the top-left errors region;
+// the responsive top-region grid keeps this criterion's intent.) ---
 {
-  assert.match(PAGE_HTML, /\.layout\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/i, "the layout is a single-column grid by default");
-  assert.match(PAGE_HTML, /\.layout\.panel-open\s*\{\s*grid-template-columns:\s*minmax\(0,\s*1fr\)\s*400px/i, "opening the panel adds the 400px incidents aside track");
-  assert.match(PAGE_HTML, /@media \(max-width:\s*1180px\)\s*\{\s*\.layout\.panel-open\s*\{\s*grid-template-columns:\s*minmax\(0,\s*1fr\)/i, "below 1180px the grid collapses to a single column");
-  // Toggle behaviour intact: the same handler still shows/hides the panel and
-  // now also drives the grid track.
-  assert.match(PAGE_HTML, /\$\("errpanel"\)\.hidden = !panelOpen/, "the panel is still shown/hidden by the toggle");
-  assert.match(PAGE_HTML, /\$\("layout"\)\.classList\.toggle\("panel-open", panelOpen\)/, "the toggle drives the grid's aside track");
+  assert.match(PAGE_HTML, /\.topregion\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*minmax\(0,\s*420px\)\s*minmax\(0,\s*1fr\)/i, "the top region is a two-column grid on a desktop-width viewport");
+  assert.match(PAGE_HTML, /@media \(max-width:\s*1180px\)\s*\{\s*\.topregion\s*\{\s*grid-template-columns:\s*minmax\(0,\s*1fr\)/i, "below 1180px the top region collapses to a single column");
+  assert.match(PAGE_HTML, /<div class="topregion"[\s\S]*id="errpanel"[\s\S]*id="deckwrap"/, "the errors region precedes the deck inside the top region");
 }
 
 // --- #275 Criterion 5: every criterion above has exactly one test. ---
@@ -1577,8 +1460,9 @@ await inTempDir(async (dir) => {
   assert.match(PAGE_HTML, /\.sumcell \.sumlabel\s*\{[^}]*font-family:var\(--mono\)[^}]*text-transform:uppercase/i, "the stat label is a mono uppercase");
   assert.match(PAGE_HTML, /\.sumcell\.alert\s*\{[^}]*border-color:var\(--terra\)/i, "the alert stat gets the terra treatment");
   assert.match(PAGE_HTML, /summaryCell\("escalations", s\.unresolvedEscalations, true\)/, "the escalations stat is rendered with the alert flag");
-  assert.match(PAGE_HTML, /\.errtoggle\s*\{[^}]*border:1\.5px solid var\(--terra\)/i, "the errors chip gets the terra alert border");
-  assert.match(PAGE_HTML, /\.errcount\s*\{[^}]*background:var\(--terra\)[^}]*border-radius:99px/i, "the error count is a filled pill");
+  // #306 superseded the toggled errors chip; the terra alert treatment now
+  // lives on the error-count pill in the top-left errors-region head.
+  assert.match(PAGE_HTML, /\.errcount\s*\{[^}]*background:var\(--terra\)[^}]*border-radius:99px/i, "the error count is a filled terra pill");
 }
 
 // --- #278 Criterion 3: work rows render as bordered cards with an issue-number
@@ -1771,6 +1655,68 @@ await inTempDir(async (dir) => {
   assert.match(PAGE_HTML, /img\.onerror = null;/, "the handler clears onerror first so the default can never loop into a broken image");
   assert.match(PAGE_HTML, /onerror="avatarFallback\(this\)"/, "each mascot img wires onerror to the fallback");
   assert.match(PAGE_HTML, /data-default="' \+ esc\(c\.defaultAvatar\)/, "the deck card carries the bundled default the fallback swaps to");
+}
+
+// ===========================================================================
+// Issue #306 — Lay out errors & escalations top-left with the active agents
+// deck to the right (slice 0132). The errors region moves out of the toggled
+// side panel into a permanent top-left region; the deck moves from full-width-
+// above into the region's right column. One test per acceptance criterion,
+// asserted against PAGE_HTML for structure/CSS and the live snapshot for the
+// empty-state data. Each block carries a `#306 Criterion N` marker; Criterion 5
+// self-counts them.
+// ===========================================================================
+
+// --- #306 Criterion 1: errors & escalations render in the top-left region of
+// the main area. ---
+{
+  assert.match(PAGE_HTML, /<main>[\s\S]*<div class="topregion" id="topregion">\s*<aside class="errpanel" id="errpanel"/, "the errors region is the first child of the top region inside main");
+  assert.doesNotMatch(PAGE_HTML, /<aside class="errpanel" id="errpanel"[^>]*hidden/, "the errors region is permanently rendered, not a toggled-away panel");
+  assert.match(PAGE_HTML, /id="errpanel"[\s\S]*id="deckwrap"/, "the errors region precedes the deck, so it sits on the left");
+}
+
+// --- #306 Criterion 2: the active agents deck renders to the right of the
+// errors & escalations region on a desktop-width viewport. ---
+{
+  assert.match(PAGE_HTML, /\.topregion\s*\{[^}]*display:grid[^}]*grid-template-columns:minmax\(0,420px\) minmax\(0,1fr\)/i, "the top region is a two-column grid (fixed errors column, flexible deck column) on desktop");
+  assert.match(PAGE_HTML, /<div class="topregion" id="topregion">\s*<aside class="errpanel"[\s\S]*<section class="deckwrap" id="deckwrap"/, "the deck is the second column, to the right of the errors region");
+}
+
+// --- #306 Criterion 3: with zero escalations and zero adapter-health issues,
+// the errors region shows an empty state rather than a blank or broken column. ---
+await inTempDir(async (dir) => {
+  const escPath = join(dir, "esc.md");
+  writeFileSync(escPath, "");
+  await withServer({ statePath: join(dir, "s.json"), eventsPath: join(dir, "e.jsonl"), escalationsPath: escPath }, async (base) => {
+    const { json } = await fetchJson(`${base}/api/snapshot`);
+    assert.equal(json.escalations.length, 0, "no escalations in the snapshot");
+    assert.equal((json.brokenAdapters || []).length, 0, "no adapter-health issues in the snapshot");
+  });
+  // The region is always present (never hidden) and renders an explicit empty
+  // state; an empty adapter-health block collapses so it is not a broken column.
+  assert.doesNotMatch(PAGE_HTML, /id="errpanel"[^>]*hidden/, "the errors region stays rendered when there is nothing to show");
+  assert.match(PAGE_HTML, /if \(!snapshot\.escalations\.length\) \{ el\.innerHTML = '<div class="empty">No errors\.<\/div>'/, "the escalations render an explicit 'No errors.' empty state");
+  assert.match(PAGE_HTML, /\.adapterhealth:empty\s*\{\s*display:none/, "an empty adapter-health block collapses rather than leaving a broken column");
+});
+
+// --- #306 Criterion 4: on a narrow viewport the two regions stack vertically
+// without overlapping. ---
+{
+  assert.match(PAGE_HTML, /@media \(max-width:1180px\)\s*\{\s*\.topregion\s*\{\s*grid-template-columns:minmax\(0,1fr\)/i, "below 1180px the top region collapses to a single column, so the regions stack");
+  assert.match(PAGE_HTML, /\.topregion\s*\{[^}]*gap:34px[^}]*align-items:start/i, "the stacked regions keep a gap and top-align, so they never overlap");
+}
+
+// --- #306 Criterion 5: every criterion above has exactly one test named after
+// it. This block reads its own source, extracts the `#306 Criterion N` markers,
+// and proves there is exactly one per criterion. ---
+{
+  const CRITERIA_COUNT = 5;
+  const selfText = readFileSync(fileURLToPath(import.meta.url), "utf8");
+  const markers = [...selfText.matchAll(/^\/\/ --- #306 Criterion (\d+):/gim)].map((m) => Number(m[1]));
+  const unique = new Set(markers);
+  assert.equal(markers.length, unique.size, "each #306 criterion is tested exactly once (no duplicate markers)");
+  assert.equal(markers.length, CRITERIA_COUNT, `one test per #306 acceptance criterion (${CRITERIA_COUNT})`);
+  for (let n = 1; n <= CRITERIA_COUNT; n++) assert.ok(unique.has(n), `#306 criterion ${n} has a test`);
 }
 
 console.log("PASS herd-ui.test.mjs");
