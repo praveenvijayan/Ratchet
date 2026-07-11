@@ -138,7 +138,7 @@ function sseCollect(url, until, timeoutMs = 3000) {
     );
     const page = await fetchText(`http://127.0.0.1:${port}/`);
     assert.equal(page.status, 200, "GET / serves the dashboard");
-    assert.match(page.body, /Herd dashboard/, "the page is the dashboard HTML");
+    assert.match(page.body, /Ratchet herd dashboard/i, "the page is the dashboard HTML");
   } finally {
     await new Promise((r) => server.close(r));
   }
@@ -1505,7 +1505,7 @@ await inTempDir(async (dir) => {
 {
   assert.match(
     PAGE_HTML,
-    /<div class="brand">\s*<h1>Herd Dashboard<\/h1>\s*<span class="ordinal">Santorini<\/span>/i,
+    /<div class="brand">\s*<h1>.*?<\/h1>\s*<span class="ordinal">Santorini<\/span>/is,
     "the brand block pairs the serif title with the Santorini ordinal",
   );
   assert.match(PAGE_HTML, /\.brand h1\s*\{[^}]*font-family:\s*var\(--serif\)/i, "the title is set in the display serif");
@@ -1771,6 +1771,78 @@ await inTempDir(async (dir) => {
   assert.match(PAGE_HTML, /img\.onerror = null;/, "the handler clears onerror first so the default can never loop into a broken image");
   assert.match(PAGE_HTML, /onerror="avatarFallback\(this\)"/, "each mascot img wires onerror to the fallback");
   assert.match(PAGE_HTML, /data-default="' \+ esc\(c\.defaultAvatar\)/, "the deck card carries the bundled default the fallback swaps to");
+}
+
+// --- #304 Criterion 1: the header brand renders the text "Ratchet herd
+// dashboard", with the "herd dashboard" portion in lowercase (not uppercased
+// by CSS). ---------------------------------------------------------------
+{
+  assert.match(
+    PAGE_HTML,
+    /<div class="brand">\s*<h1>.*?Ratchet.*?herd dashboard.*?<\/h1>/is,
+    "the header brand renders the text \"Ratchet herd dashboard\" inside the h1",
+  );
+  assert.match(
+    PAGE_HTML,
+    /<span class="role">herd dashboard<\/span>/,
+    "the \"herd dashboard\" portion is literal lowercase text in its own span",
+  );
+  // The .brand h1 rule must not uppercase the text (the old treatment did).
+  assert.doesNotMatch(
+    PAGE_HTML,
+    /\.brand h1\s*\{[^}]*text-transform:\s*uppercase/i,
+    "the .brand h1 rule no longer uppercases the brand text",
+  );
+}
+
+// --- #304 Criterion 2: "Ratchet" is visually distinguished from the lowercase
+// "herd dashboard" (its own weight/size/element), so the product name leads. -
+{
+  assert.match(
+    PAGE_HTML,
+    /<h1><span class="product">Ratchet<\/span> <span class="role">herd dashboard<\/span><\/h1>/,
+    "\"Ratchet\" is its own element (.product) separate from the lowercase role span",
+  );
+  assert.match(
+    PAGE_HTML,
+    /\.brand h1 \.product\s*\{[^}]*font-family:\s*var\(--serif\)/i,
+    "\"Ratchet\" (.product) is set in the display serif",
+  );
+  assert.match(
+    PAGE_HTML,
+    /\.brand h1 \.role\s*\{[^}]*font-family:\s*var\(--sans\)/i,
+    "\"herd dashboard\" (.role) is set in the sans family, distinct from the serif product name",
+  );
+  assert.match(
+    PAGE_HTML,
+    /\.brand h1 \.role\s*\{[^}]*font-size:\s*19px/i,
+    "\"herd dashboard\" (.role) uses a smaller size than the 30px product name",
+  );
+}
+
+// --- #304 Criterion 3: the browser tab `<title>` reads "Ratchet herd
+// dashboard". -----------------------------------------------------------
+{
+  assert.match(
+    PAGE_HTML,
+    /<title>Ratchet herd dashboard<\/title>/,
+    "the browser tab title reads \"Ratchet herd dashboard\"",
+  );
+}
+
+// --- #304 Criterion 4: every criterion above has exactly one test named after
+// it. The plan file carried four #304 acceptance criteria; this counts its own
+// `#304 Criterion N` markers and proves there is exactly one per criterion,
+// 1..4. It counts markers in THIS file only — it never reads the plan file at
+// runtime, so archiving the plan when the issue closes can never break it.
+{
+  const CRITERIA_COUNT = 4;
+  const selfText = readFileSync(fileURLToPath(import.meta.url), "utf8");
+  const markers = [...selfText.matchAll(/^\/\/ --- #304 Criterion (\d+):/gim)].map((m) => Number(m[1]));
+  const unique = new Set(markers);
+  assert.equal(markers.length, unique.size, "each #304 criterion is tested exactly once (no duplicate markers)");
+  assert.equal(markers.length, CRITERIA_COUNT, `one test per #304 acceptance criterion (${CRITERIA_COUNT})`);
+  for (let n = 1; n <= CRITERIA_COUNT; n++) assert.ok(unique.has(n), `#304 criterion ${n} has a test`);
 }
 
 console.log("PASS herd-ui.test.mjs");

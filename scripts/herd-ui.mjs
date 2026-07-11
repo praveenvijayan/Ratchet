@@ -1362,7 +1362,7 @@ export const PAGE_HTML = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Herd dashboard</title>
+<title>Ratchet herd dashboard</title>
 <!-- Fonts are the ONLY external reference on this page. If the CDN is
      unreachable the link simply fails and every font-family below falls back to
      its generic family (serif/sans-serif/monospace) — rendering is never blocked. -->
@@ -1403,7 +1403,9 @@ export const PAGE_HTML = `<!doctype html>
     background:linear-gradient(180deg, var(--paper-hi), transparent);
   }
   .brand { display:flex; align-items:baseline; gap:14px; }
-  .brand h1 { font-family:var(--serif); font-size:30px; font-weight:400; letter-spacing:.04em; text-transform:uppercase; line-height:1; margin:0; }
+  .brand h1 { font-family:var(--serif); font-size:30px; font-weight:400; letter-spacing:.04em; line-height:1; margin:0; }
+  .brand h1 .product { font-family:var(--serif); font-size:30px; font-weight:400; }
+  .brand h1 .role { font-family:var(--sans); font-size:19px; font-weight:500; letter-spacing:.02em; color:var(--ink-soft); }
   .brand .ordinal { font-family:var(--mono); font-size:10px; letter-spacing:.28em; color:var(--ink-soft); text-transform:uppercase; }
   header .heartbeat { display:flex; align-items:center; gap:10px; margin-left:auto; font-family:var(--mono); font-size:12px; letter-spacing:.05em; color:var(--ink); }
   header .dot { width:10px; height:10px; border-radius:50%; background:var(--ink-faint); display:inline-block; }
@@ -1596,7 +1598,7 @@ export const PAGE_HTML = `<!doctype html>
 <body>
 <header>
   <div class="brand">
-    <h1>Herd Dashboard</h1>
+    <h1><span class="product">Ratchet</span> <span class="role">herd dashboard</span></h1>
     <span class="ordinal">Santorini</span>
   </div>
   <div class="heartbeat"><span class="dot" id="livedot"></span> <span id="livetext" class="empty">connecting…</span></div>
