@@ -21,6 +21,7 @@ on:
     types: [labeled]
 
 permissions:
+  contents: read   # actions/checkout — a non-empty block drops this by default
   issues: write
 
 jobs:

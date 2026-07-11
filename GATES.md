@@ -79,6 +79,7 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 | 4z2   | test: state-instructions-symmetry | `node scripts/state-instructions-symmetry.test.mjs` | exit 0 |
 | 4z3   | test: version-consistency       | `node scripts/version-consistency.test.mjs`       | exit 0 |
 | 4z5   | test: manifest-check            | `node scripts/manifest-check.test.mjs`            | exit 0 |
+| 4z6   | test: workflow-checkout-permissions | `node scripts/workflow-checkout-permissions.test.mjs` | exit 0 |
 | 4z7   | test: bootstrap                 | `node scripts/bootstrap.test.mjs`                 | exit 0 |
 | 4z8   | test: ratchet-uninstall         | `node scripts/ratchet-uninstall.test.mjs`         | exit 0 |
 | 4z9   | test: install-lifecycle         | `node scripts/install-lifecycle.test.mjs`         | exit 0 |
