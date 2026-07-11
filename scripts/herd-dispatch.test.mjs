@@ -554,4 +554,141 @@ await inTempDir(async () => {
   assert.ok(!existsSync("blocked/events.jsonl"), "no events file was fabricated past the unwritable path");
 });
 
-console.log("PASS herd-dispatch.test.mjs (8 checks for #105/#126 + 3 for #127 + 1 for #138 + 1 for #151 + 1 for #156 + 3 for #285)");
+// --- Issue #286: short-circuit the claim wait when the spawned worker exits. ---
+
+// #286 AC1) When the worker's process exits before creating its claim ref, the
+// claim wait ends within one claim-poll interval of the exit instead of running
+// to the full timeout. The spawn stub fires onExit(1) to model a worker that
+// dies right after launch; the fake clock proves the wait did not burn 300s.
+await inTempDir(async () => {
+  let sleeps = 0;
+  let t = 0;
+  const now = () => t;
+  const sleep = (ms) => ((t += ms), sleeps++, Promise.resolve());
+  const r = await dispatchOne({
+    onPath: () => true,
+    config: mkConfig(),
+    ready: [{ number: 8, labels: [] }],
+    statePath: "s.json",
+    escalationsPath: "esc.md",
+    spawn: (argv, env, logFile, onExit) => (onExit(1, null), 4242), // worker exits right after spawn
+    gh: async () => {
+      throw new Error("404 Not Found"); // ref never created; post-exit re-check also absent
+    },
+    isAlive: () => false,
+    kill: () => {},
+    now,
+    sleep,
+    log: () => {},
+    claimTimeoutMs: 300000,
+    claimIntervalMs: 1000,
+  });
+  assert.equal(r.claimed, false, "the claim wait ends unclaimed");
+  assert.equal(r.exited, true, "it short-circuited on the worker's exit");
+  assert.ok(t < 300000, "the wait did not run to the full claim timeout");
+  assert.ok(sleeps <= 1, "it ended within one claim-poll interval of the exit");
+});
+
+// #286 AC2) The escalation for an exited-before-claiming worker names the
+// observed exit and says the ref was never created, distinct from the existing
+// "still running but never claimed within Ns" timeout message.
+await inTempDir(async () => {
+  let t = 0;
+  const now = () => t;
+  const sleep = (ms) => ((t += ms), Promise.resolve());
+  const r = await dispatchOne({
+    onPath: () => true,
+    config: mkConfig(),
+    ready: [{ number: 8, labels: [] }],
+    statePath: "s.json",
+    escalationsPath: "esc.md",
+    spawn: (argv, env, logFile, onExit) => (onExit(1, null), 4242),
+    gh: async () => {
+      throw new Error("404 Not Found");
+    },
+    isAlive: () => false,
+    kill: () => {},
+    now,
+    sleep,
+    log: () => {},
+    claimTimeoutMs: 300000,
+    claimIntervalMs: 1000,
+  });
+  assert.equal(r.status, "dispatch-failed", "the exited-without-claiming worker is dispatch-failed");
+  assert.equal(readState("s.json")["8"].status, "dispatch-failed", "marked dispatch-failed in the state file");
+  const esc = readFileSync("esc.md", "utf8");
+  assert.match(esc, /exited \(exit code 1\)/, "the escalation names the observed exit");
+  assert.match(esc, /before creating its claim ref agent\/issue-8 on origin/, "it says the ref was never created");
+  assert.doesNotMatch(esc, /did not claim the issue within/, "it is distinct from the running-but-never-claimed timeout message");
+});
+
+// #286 AC3) A worker that creates its claim ref and then exits is still reported
+// as claimed — the post-exit origin re-check finds the ref, so an early exit
+// after claiming never produces a dispatch-failed. The first gh call (the wait
+// poll) 404s; the second (the re-check) resolves the ref the worker left.
+await inTempDir(async () => {
+  let t = 0;
+  const now = () => t;
+  const sleep = (ms) => ((t += ms), Promise.resolve());
+  let calls = 0;
+  const gh = async () => {
+    calls++;
+    if (calls === 1) throw new Error("404 Not Found"); // ref not visible during the poll
+    return { ref: "refs/heads/agent/issue-8" }; // the post-exit re-check finds it
+  };
+  const r = await dispatchOne({
+    onPath: () => true,
+    config: mkConfig(),
+    ready: [{ number: 8, labels: [] }],
+    statePath: "s.json",
+    escalationsPath: "esc.md",
+    spawn: (argv, env, logFile, onExit) => (onExit(0, null), 4242), // claimed, then exited
+    gh,
+    isAlive: () => false,
+    kill: () => {},
+    now,
+    sleep,
+    log: () => {},
+    claimTimeoutMs: 300000,
+    claimIntervalMs: 1000,
+  });
+  assert.equal(r.claimed, true, "a worker that claimed then exited is reported as claimed");
+  assert.equal(readState("s.json")["8"].status, "dispatched", "never marked dispatch-failed");
+  assert.ok(!existsSync("esc.md"), "no escalation for a worker that did claim");
+});
+
+// #286 AC4) A worker that stays alive and claims late (within the timeout) still
+// succeeds exactly as today — onExit never fires, so the wait polls until the
+// ref appears rather than short-circuiting.
+await inTempDir(async () => {
+  let t = 0;
+  const now = () => t;
+  const sleep = (ms) => ((t += ms), Promise.resolve());
+  let calls = 0;
+  const gh = async () => {
+    calls++;
+    if (calls < 3) throw new Error("404 Not Found"); // claims on the third poll
+    return { ref: "refs/heads/agent/issue-8" };
+  };
+  const r = await dispatchOne({
+    onPath: () => true,
+    config: mkConfig(),
+    ready: [{ number: 8, labels: [] }],
+    statePath: "s.json",
+    escalationsPath: "esc.md",
+    spawn: () => 4242, // worker stays alive; onExit never fires
+    gh,
+    isAlive: () => false,
+    kill: () => {},
+    now,
+    sleep,
+    log: () => {},
+    claimTimeoutMs: 300000,
+    claimIntervalMs: 1000,
+  });
+  assert.equal(r.claimed, true, "a live worker that claims late still succeeds");
+  assert.equal(readState("s.json")["8"].status, "dispatched", "recorded as dispatched");
+  assert.ok(!existsSync("esc.md"), "no escalation for a successful late claim");
+});
+
+console.log("PASS herd-dispatch.test.mjs (8 checks for #105/#126 + 3 for #127 + 1 for #138 + 1 for #151 + 1 for #156 + 3 for #285 + 4 for #286)");
