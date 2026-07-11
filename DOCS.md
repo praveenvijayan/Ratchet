@@ -224,6 +224,7 @@ scripts/
   herd-ui-summary-strip.test.mjs Regression test for the one-glance fleet-summary strip
   herd-ui-mascot-deck.test.mjs  Regression test for the Active Agents mascot deck
   herd-ui-truthful-tally.test.mjs Regression test for truthful deck header tally and vitals
+  herd-ui-vinyl-deck.test.mjs   Regression test for the vinyl-figure pop-out deck revision
   manifest-check.mjs            Gate: validate ratchet-manifest.json against the repo (no drift in/out)
   manifest-check.test.mjs       Regression test for the install-manifest gate
   plan-sync-concurrency.test.mjs Workflow concurrency regression test
