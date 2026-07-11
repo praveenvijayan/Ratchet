@@ -1432,29 +1432,25 @@ export const PAGE_HTML = `<!doctype html>
   .hbbanner { border-radius:6px; padding:12px 16px; margin-bottom:16px; font-weight:600; border:1px solid; border-left-width:4px; }
   .hbbanner.silent { color:var(--over); border-color:var(--over); background:color-mix(in srgb, var(--over) 10%, transparent); }
   .hbbanner.unseen { color:var(--warn); border-color:var(--warn); background:color-mix(in srgb, var(--warn) 10%, transparent); }
-  /* Two-column grid shell: work column + 400px incidents aside. The aside is
-     the toggled errors panel, so the second track exists only when the panel is
-     open (.panel-open) — otherwise the work column spans full width, preserving
-     the existing toggle. Below 1180px the grid collapses to a single column. */
-  .layout { display:grid; grid-template-columns:minmax(0,1fr); gap:34px; align-items:start; }
-  .layout.panel-open { grid-template-columns:minmax(0,1fr) 400px; }
-  @media (max-width:1180px) { .layout.panel-open { grid-template-columns:minmax(0,1fr); } }
-  .fleet { flex:1 1 auto; min-width:0; }
-  .fleet-toolbar { display:flex; align-items:center; gap:12px; margin-bottom:12px; }
-  /* Errors chip — Santorini alert treatment (design .errors-chip). Restyled in
-     place; the #errtoggle / #errcount hooks and toggle behaviour are unchanged. */
-  .errtoggle { display:inline-flex; align-items:center; gap:10px; border:1.5px solid var(--terra); color:var(--terra); background:rgba(124,104,196,.09); padding:7px 14px; cursor:pointer; font-family:var(--mono); font-size:11px; letter-spacing:.14em; text-transform:uppercase; }
-  .errtoggle:hover { background:rgba(124,104,196,.16); }
+  /* Top region (0132): errors & escalations sit top-left and the active agents
+     deck sits to their right. Two-column grid on a desktop-width viewport
+     (fixed errors column + flexible deck); below 1180px it collapses to a
+     single column so the two regions stack vertically without overlapping. */
+  .topregion { display:grid; grid-template-columns:minmax(0,420px) minmax(0,1fr); gap:34px; align-items:start; margin:0 0 36px; }
+  @media (max-width:1180px) { .topregion { grid-template-columns:minmax(0,1fr); } }
+  /* Below the top region the work column spans the full width. */
+  .layout { display:block; }
+  .fleet { min-width:0; }
+  /* Error count badge in the errors-region head (0132: replaces the toggle chip). */
   .errcount { background:var(--terra); color:var(--paper-hi); border-radius:99px; padding:1px 9px; font-size:11px; font-weight:700; min-width:20px; text-align:center; }
   .errcount.zero { background:var(--ink-faint); color:var(--ink); }
-  /* Incidents aside — Santorini panel (design aside/.panel-head/.incident).
-     Bordered card with an ink-inverted head; hooks (#errpanel/#errclose,
-     #adapterhealth/#escalations) and the toggle behaviour are unchanged. */
-  .errpanel { border:1.5px solid var(--ink); background:var(--paper-hi); box-shadow:8px 8px 0 var(--ink-faint); overflow:auto; max-height:calc(100vh - 120px); align-self:stretch; }
+  /* Errors & escalations region — Santorini panel (design aside/.panel-head/
+     .incident): a bordered card with an ink-inverted head, now anchored
+     top-left rather than a toggled side panel. #adapterhealth/#escalations
+     hooks are unchanged; #279 keeps the border + offset shadow. */
+  .errpanel { border:1.5px solid var(--ink); background:var(--paper-hi); box-shadow:8px 8px 0 var(--ink-faint); overflow:hidden; }
   .errpanel-head { display:flex; align-items:center; justify-content:space-between; padding:16px 20px; border-bottom:1.5px solid var(--ink); background:var(--ink); color:var(--paper-hi); }
   .errpanel-head h2 { font-family:var(--serif); font-size:16px; font-weight:400; letter-spacing:.14em; text-transform:uppercase; margin:0; }
-  .errpanel-head .errclose { background:none; border:none; cursor:pointer; font-family:var(--mono); font-size:15px; color:var(--paper-hi); opacity:.7; padding:2px 6px; }
-  .errpanel-head .errclose:hover { opacity:1; }
   /* Adapter-failure alerts and breakdown share the incident-card language: a
      terra-accented alert card and a dashed-ruled table under an ink header. */
   .adapterhealth { padding:18px 20px 0; display:flex; flex-direction:column; gap:14px; }
@@ -1514,8 +1510,8 @@ export const PAGE_HTML = `<!doctype html>
   .sec .rule::after { content:""; position:absolute; right:0; top:-3px; width:7px; height:7px; background:var(--ink); transform:rotate(45deg); }
   .sec .note { font-family:var(--mono); font-size:9.5px; letter-spacing:.18em; text-transform:uppercase; color:var(--ink-soft); }
   .sec .roster { font-family:var(--mono); font-size:10px; letter-spacing:.12em; text-transform:uppercase; color:var(--ink-soft); }
-  /* Active Agents mascot deck (0120) — center stage above the work column. */
-  .deckwrap { margin:0 0 30px; }
+  /* Active Agents mascot deck (0120; 0132: sits right of the errors region). */
+  .deckwrap { margin:0; }
   /* auto-fill grid flexes from 1 to 10 mascots without any layout change.
      padding-top:52px and row-gap:72px give the overflowing figures headroom
      so they never collide with the section header or the row of cards above. */
@@ -1621,7 +1617,16 @@ export const PAGE_HTML = `<!doctype html>
 <main>
   <div class="summarystrip" id="summarystrip" aria-label="Fleet summary"></div>
   <div id="hbbanner" class="hbbanner" role="status" hidden></div>
-  <section class="deckwrap" id="deckwrap" aria-label="Active agents" hidden>
+  <div class="topregion" id="topregion">
+    <aside class="errpanel" id="errpanel" aria-label="Errors and escalations">
+      <div class="errpanel-head">
+        <h2>Errors &amp; escalations</h2>
+        <span id="errcount" class="errcount zero">0</span>
+      </div>
+      <div class="adapterhealth" id="adapterhealth"></div>
+      <div class="escalations" id="escalations"></div>
+    </aside>
+    <section class="deckwrap" id="deckwrap" aria-label="Active agents" hidden>
     <div class="sec">
       <h2 class="group-head">Active Agents</h2>
       <span class="tally" id="decktally">0</span>
@@ -1631,21 +1636,11 @@ export const PAGE_HTML = `<!doctype html>
     </div>
     <div class="deck" id="deck"></div>
   </section>
+  </div>
   <div class="layout" id="layout">
     <div class="fleet" id="fleet">
-      <div class="fleet-toolbar">
-        <button id="errtoggle" class="errtoggle" type="button"><span>Errors</span> <span id="errcount" class="errcount zero">0</span></button>
-      </div>
       <div id="workers"></div>
     </div>
-    <aside class="errpanel" id="errpanel" hidden>
-      <div class="errpanel-head">
-        <h2>Errors &amp; escalations</h2>
-        <button id="errclose" class="errclose" type="button" aria-label="Close error panel">\u2715</button>
-      </div>
-      <div class="adapterhealth" id="adapterhealth"></div>
-      <div class="escalations" id="escalations"></div>
-    </aside>
   </div>
   <div class="logpane" id="logpane" hidden>
     <h2 id="logtitle"></h2>
@@ -1657,7 +1652,7 @@ export const PAGE_HTML = `<!doctype html>
 </main>
 <script>
   const $ = (id) => document.getElementById(id);
-  let selected = null, logSource = null, timelineSource = null, logBuffer = "", timelineBuffer = [], panelOpen = false, gotSnapshot = false;
+  let selected = null, logSource = null, timelineSource = null, logBuffer = "", timelineBuffer = [], gotSnapshot = false;
   let snapshot = { workers: [], escalations: [], hint: null, heartbeat: null, adapters: [], brokenAdapters: [], summary: null, deck: [] };
 
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
@@ -1838,9 +1833,9 @@ export const PAGE_HTML = `<!doctype html>
     el.innerHTML = html;
   }
 
-  function renderErrToggle() {
+  function renderErrCount() {
     // The aggregate broken-adapter alerts count toward the badge alongside the
-    // unresolved escalations, so a broken adapter is visible with the panel shut.
+    // unresolved escalations, so a broken adapter is reflected in the head count.
     const count = snapshot.escalations.filter((e) => !e.resolved).length + (snapshot.brokenAdapters || []).length;
     const badge = $("errcount");
     badge.textContent = String(count);
@@ -1892,12 +1887,6 @@ export const PAGE_HTML = `<!doctype html>
     });
   };
 
-  function applyPanel() {
-    $("errpanel").hidden = !panelOpen;
-    // Drive the grid shell: the 400px aside track exists only while the panel
-    // is open, so a closed panel leaves the work column full width.
-    $("layout").classList.toggle("panel-open", panelOpen);
-  }
 
   // Display order and labels of the lifecycle groups — mirrors the server's
   // LIFECYCLE_GROUPS. "other" is the catch-all so an unmapped status is always
@@ -2130,10 +2119,7 @@ export const PAGE_HTML = `<!doctype html>
       summaryCell("escalations", s.unresolvedEscalations, true);
   }
 
-  function render() { renderSummaryStrip(); renderDeck(); renderErrToggle(); renderAdapterHealth(); renderEscalations(); renderWorkers(); renderTotals(); renderHeartbeat(); }
-
-  $("errtoggle").addEventListener("click", () => { panelOpen = !panelOpen; applyPanel(); });
-  $("errclose").addEventListener("click", () => { panelOpen = false; applyPanel(); });
+  function render() { renderSummaryStrip(); renderDeck(); renderErrCount(); renderAdapterHealth(); renderEscalations(); renderWorkers(); renderTotals(); renderHeartbeat(); }
 
   const stream = new EventSource("/api/stream");
   stream.addEventListener("snapshot", (ev) => {
