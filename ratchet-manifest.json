@@ -108,6 +108,7 @@
     { "path": "scripts/ratchet-update.test.mjs", "class": "excluded" },
     { "path": "scripts/release.test.mjs", "class": "excluded" },
     { "path": "scripts/review-verdict.test.mjs", "class": "excluded" },
+    { "path": "scripts/review-verdict-workflow.test.mjs", "class": "excluded" },
     { "path": "scripts/run-gates.test.mjs", "class": "excluded" },
     { "path": "scripts/skill-parity.test.mjs", "class": "excluded" },
     { "path": "scripts/state-instructions-symmetry.test.mjs", "class": "excluded" },

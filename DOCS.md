@@ -242,6 +242,7 @@ scripts/
   release.test.mjs              Regression test for releases
   review-verdict.mjs            Flip issue to state:changes-requested on a Request Changes review
   review-verdict.test.mjs       Regression test for the review-verdict flip
+  review-verdict-workflow.test.mjs  Guards review-verdict.yml's permissions block (contents:read + issues:write)
   run-gates.mjs                 Run GATES.md locally and in CI
   run-gates.test.mjs            Regression test for the gate runner
   skill-parity.mjs              Guard: every skill has agents/openai.yaml + byte-identical .claude/plugin mirrors
