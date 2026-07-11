@@ -329,7 +329,7 @@ export function headlessFlagWarnings(config) {
 // HerdConfigError with a one-line, file-named message for every failure the
 // operator can cause: missing file, unreadable file, malformed JSON, bad shape.
 // A shipped adapter missing its headless-permission flag is warned, not failed.
-export function loadConfig(path = CONFIG_PATH) {
+export function loadConfig(path = CONFIG_PATH, { warn = true } = {}) {
   if (!existsSync(path))
     throw new HerdConfigError(`${path} not found. Run \`node scripts/herd.mjs init\` to create it.`);
   let text;
@@ -345,7 +345,10 @@ export function loadConfig(path = CONFIG_PATH) {
     throw new HerdConfigError(`${path} is not valid JSON: ${e.message}`);
   }
   const config = normalizeConfig(raw, path);
-  for (const warning of headlessFlagWarnings(config)) console.warn(warning);
+  // The live dashboard re-reads config on every snapshot (herd-ui resolveConfig),
+  // so it passes warn:false — the headless-flag warning is emitted once at
+  // startup, never spammed per poll.
+  if (warn) for (const warning of headlessFlagWarnings(config)) console.warn(warning);
   return config;
 }
 
