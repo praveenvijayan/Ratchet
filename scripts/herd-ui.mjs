@@ -269,6 +269,55 @@ export function brokenAdapters(stats, threshold = BROKEN_ADAPTER_THRESHOLD) {
     .map((s) => ({ adapter: s.adapter, failures: s.failures, dispatches: s.dispatches, ratio: `${s.failures}/${s.dispatches}` }));
 }
 
+// --- Active Agents mascot deck (0120) ----------------------------------------
+
+// How many docking bays the deck shows. Configured adapters fill bays from the
+// front; the remainder render as empty "Bay open" placeholders up to this many,
+// so the fleet's spare capacity reads at a glance.
+export const DECK_CAPACITY = 10;
+
+// An adapter's "family" label: the segment before the first hyphen of its
+// configured name, or the whole name when it has none ("claude-opus" → "claude",
+// "codex" → "codex"). Pure string logic on the name the operator chose — the
+// framework bakes in no CLI, model, or vendor name, so the purity rule holds.
+export function adapterFamily(name) {
+  const s = typeof name === "string" ? name : "";
+  const dash = s.indexOf("-");
+  return dash > 0 ? s.slice(0, dash) : s;
+}
+
+// One deck card per *configured* adapter, in config order, each joined with its
+// dispatch counts and the issue any live worker currently holds on it. Adapters
+// that have never dispatched still get a card (zero counts), so a freshly added
+// adapter is visible before its first run. The browser draws the empty bays up
+// to DECK_CAPACITY from this array's length. Pure: given the same config,
+// dispatch stats, and workers it always returns the same cards.
+export function buildDeck({ config, adapters = [], workers = [] }) {
+  const stats = new Map();
+  for (const a of adapters || []) stats.set(a.adapter, a);
+  const configured = config && config.adapters ? Object.keys(config.adapters) : [];
+  return configured.map((name) => {
+    const cfg = config.adapters[name];
+    const s = stats.get(name);
+    // The issue a live worker is running on this adapter, if any — drives the
+    // active duty chip. First live match wins; null means "standing by".
+    const active = (workers || []).find((w) => w.adapter === name && w.claimActive) || null;
+    return {
+      name,
+      family: adapterFamily(name),
+      // Avatar the browser tries first: the adapter's own non-empty avatar, else
+      // null so it renders the bundled default. defaultAvatar is always a valid
+      // data URI, doubling as the load-failure fallback — never a broken image.
+      avatar: cfg && typeof cfg.avatar === "string" && cfg.avatar !== "" ? cfg.avatar : null,
+      defaultAvatar: defaultAvatarFor(name),
+      dispatches: s ? s.dispatches : 0,
+      failures: s ? s.failures : 0,
+      successes: s ? s.successes : 0,
+      activeIssue: active ? active.issue : null,
+    };
+  });
+}
+
 // --- derivations (pure) ------------------------------------------------------
 
 // The timestamp the current attempt on `issue` began: the most recent dispatch
@@ -845,7 +894,13 @@ export function readSnapshot({
   if (readyQueueCache) readyQueueCache.ensure(repoSlug);
   const summary = buildSummary({ workers, escalations, readyQueue: readyQueueCache ? readyQueueCache.get() : undefined });
 
-  return { workers, escalations, hint, totals, heartbeat, adapters, brokenAdapters: broken, summary };
+  // Active Agents deck (0120): one card per configured adapter, joined with its
+  // dispatch stats and live worker. A pure projection of config + adapters +
+  // workers — all already reflected in snapshotKey — so it never needs its own
+  // key entry to stream correctly.
+  const deck = buildDeck({ config, adapters, workers });
+
+  return { workers, escalations, hint, totals, heartbeat, adapters, brokenAdapters: broken, summary, deck };
 }
 
 // A change key that ignores the ever-advancing clock, so the live stream pushes
@@ -1285,6 +1340,36 @@ export const PAGE_HTML = `<!doctype html>
   .sec .tally { font-family:var(--mono); font-size:11px; border:1px solid var(--ink); border-radius:50%; width:24px; height:24px; display:grid; place-items:center; }
   .sec .rule { flex:1; height:1px; background:var(--ink-faint); position:relative; }
   .sec .rule::after { content:""; position:absolute; right:0; top:-3px; width:7px; height:7px; background:var(--ink); transform:rotate(45deg); }
+  .sec .note { font-family:var(--mono); font-size:9.5px; letter-spacing:.18em; text-transform:uppercase; color:var(--ink-soft); }
+  /* Active Agents mascot deck (0120) — center stage above the work column. */
+  .deckwrap { margin:0 0 30px; }
+  /* auto-fill grid flexes from 1 to 10 mascots without any layout change. */
+  .deck { display:grid; grid-template-columns:repeat(auto-fill, minmax(206px, 1fr)); gap:20px; }
+  .mascot-card { position:relative; border:1.5px solid var(--ink); background:var(--paper-hi); box-shadow:6px 6px 0 var(--ink-faint); padding:26px 18px 18px; display:flex; flex-direction:column; align-items:center; gap:14px; transition:transform .18s ease, box-shadow .18s ease; }
+  .mascot-card:hover { transform:translateY(-4px); box-shadow:8px 10px 0 var(--ink-faint); }
+  .mascot-card::before { content:""; position:absolute; inset:6px; border:1px dashed var(--ink-faint); pointer-events:none; }
+  .mascot-card .family { position:absolute; top:12px; left:14px; font-family:var(--mono); font-size:8.5px; letter-spacing:.2em; text-transform:uppercase; color:var(--ink-soft); }
+  .mascot-card .slot-no { position:absolute; top:12px; right:14px; font-family:var(--mono); font-size:8.5px; letter-spacing:.14em; color:var(--ink-soft); }
+  .mascot { position:relative; width:132px; height:126px; margin-top:6px; display:grid; place-items:center; }
+  .mascot img { width:126px; height:126px; object-fit:contain; filter:drop-shadow(3px 4px 0 var(--ink-faint)); transition:transform .18s ease; }
+  .mascot-card:hover .mascot img { transform:translateY(-3px) scale(1.03); }
+  .mascot-card .name { font-family:var(--mono); font-weight:700; font-size:13px; text-align:center; overflow-wrap:anywhere; }
+  .mascot-card .duty { display:inline-flex; align-items:center; gap:7px; font-family:var(--mono); font-size:9px; letter-spacing:.16em; text-transform:uppercase; padding:4px 10px; border:1px solid currentColor; }
+  .duty.on { color:var(--ink-deep); background:rgba(63,62,120,.08); }
+  .duty.idle { color:var(--ink-soft); }
+  .duty .dot { width:6px; height:6px; border-radius:50%; background:currentColor; }
+  .duty.on .dot { animation:deckpulse 2.2s ease-in-out infinite; }
+  @keyframes deckpulse { 0%,100% { opacity:1; } 50% { opacity:.25; } }
+  .mascot-card .vitals { width:100%; display:grid; grid-template-columns:1fr 1fr 1fr; border-top:1px dashed var(--ink-faint); padding-top:12px; }
+  .vitals .cell { display:flex; flex-direction:column; align-items:center; gap:3px; }
+  .vitals .cell + .cell { border-left:1px solid var(--ink-hair); }
+  .vitals .k { font-family:var(--mono); font-size:8.5px; letter-spacing:.18em; text-transform:uppercase; color:var(--ink-soft); }
+  .vitals .v { font-family:var(--mono); font-size:14px; font-weight:700; }
+  .vitals .v.zero { color:var(--ink-faint); font-weight:400; }
+  /* Empty docking bays — dashed placeholders for the fleet's spare capacity. */
+  .bay { border:1.5px dashed var(--ink-faint); display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px; min-height:262px; color:var(--ink-soft); }
+  .bay .ring { width:64px; height:64px; border-radius:50%; border:1.5px dashed var(--ink-faint); display:grid; place-items:center; font-family:var(--serif); font-size:24px; color:var(--ink-faint); }
+  .bay .k { font-family:var(--mono); font-size:9px; letter-spacing:.22em; text-transform:uppercase; color:var(--ink-faint); }
   .gauge.warn { color:var(--warn); }
   .gauge.over { color:var(--terra); font-weight:700; }
   /* Work rows — design .row cards: bordered, offset shadow, dashed telemetry. */
@@ -1346,6 +1431,15 @@ export const PAGE_HTML = `<!doctype html>
 <main>
   <div class="summarystrip" id="summarystrip" aria-label="Fleet summary"></div>
   <div id="hbbanner" class="hbbanner" role="status" hidden></div>
+  <section class="deckwrap" id="deckwrap" aria-label="Active agents" hidden>
+    <div class="sec">
+      <h2 class="group-head">Active Agents</h2>
+      <span class="tally" id="decktally">0</span>
+      <span class="rule"></span>
+      <span class="note">${DECK_CAPACITY} bays · new agents dock automatically</span>
+    </div>
+    <div class="deck" id="deck"></div>
+  </section>
   <div class="layout" id="layout">
     <div class="fleet" id="fleet">
       <div class="fleet-toolbar">
@@ -1373,7 +1467,7 @@ export const PAGE_HTML = `<!doctype html>
 <script>
   const $ = (id) => document.getElementById(id);
   let selected = null, logSource = null, timelineSource = null, logBuffer = "", timelineBuffer = [], panelOpen = false, gotSnapshot = false;
-  let snapshot = { workers: [], escalations: [], hint: null, heartbeat: null, adapters: [], brokenAdapters: [], summary: null };
+  let snapshot = { workers: [], escalations: [], hint: null, heartbeat: null, adapters: [], brokenAdapters: [], summary: null, deck: [] };
 
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
 
@@ -1479,6 +1573,46 @@ export const PAGE_HTML = `<!doctype html>
   // Aggregate per-adapter failure view (0095): the broken-adapter alerts sit
   // above the individual escalations, and a breakdown table shows dispatches /
   // failures / successes per adapter so the worst one reads at a glance.
+  // Active Agents deck (0120): one mascot card per configured adapter, then
+  // dashed empty bays out to the fleet's capacity. The card's avatar tries the
+  // adapter's own image first and falls back to the bundled data-URI mascot via
+  // avatarFallback — a broken image is never shown. Zero vital counts keep their
+  // cell (faint treatment) so a fresh adapter still reads all three.
+  function renderDeck() {
+    const wrap = $("deckwrap");
+    if (!wrap) return;
+    const cards = (snapshot.deck || []);
+    const tallyEl = $("decktally");
+    if (tallyEl) tallyEl.textContent = String(cards.length);
+    const host = $("deck");
+    if (!cards.length) { wrap.hidden = true; if (host) host.innerHTML = ""; return; }
+    wrap.hidden = false;
+    const bay = (n) => String(n).padStart(2, "0");
+    const vital = (label, n) =>
+      '<div class="cell"><span class="k">' + label + '</span><span class="v' +
+      (n === 0 ? " zero" : "") + '">' + String(n) + "</span></div>";
+    let html = cards.map((c, i) => {
+      const src = c.avatar || c.defaultAvatar;
+      const duty = c.activeIssue != null
+        ? '<span class="duty on"><span class="dot"></span>dispatched · #' + String(c.activeIssue) + "</span>"
+        : '<span class="duty idle"><span class="dot"></span>standing by</span>';
+      return '<article class="mascot-card">' +
+        '<span class="family">' + esc(c.family) + "</span>" +
+        '<span class="slot-no">bay ' + bay(i + 1) + "</span>" +
+        '<div class="mascot"><img alt="' + esc(c.name) + ' mascot" src="' + esc(src) +
+        '" data-default="' + esc(c.defaultAvatar) + '" onerror="avatarFallback(this)"></div>' +
+        '<div class="name">' + esc(c.name) + "</div>" +
+        duty +
+        '<div class="vitals">' + vital("Disp.", c.dispatches) + vital("Fail", c.failures) +
+        vital("OK", c.successes) + "</div>" +
+        "</article>";
+    }).join("");
+    for (let n = cards.length + 1; n <= ${DECK_CAPACITY}; n++) {
+      html += '<div class="bay"><span class="ring">' + bay(n) + '</span><span class="k">Bay open</span></div>';
+    }
+    host.innerHTML = html;
+  }
+
   function renderAdapterHealth() {
     const el = $("adapterhealth");
     if (!el) return;
@@ -1774,7 +1908,7 @@ export const PAGE_HTML = `<!doctype html>
       summaryCell("escalations", s.unresolvedEscalations, true);
   }
 
-  function render() { renderSummaryStrip(); renderErrToggle(); renderAdapterHealth(); renderEscalations(); renderWorkers(); renderTotals(); renderHeartbeat(); }
+  function render() { renderSummaryStrip(); renderDeck(); renderErrToggle(); renderAdapterHealth(); renderEscalations(); renderWorkers(); renderTotals(); renderHeartbeat(); }
 
   $("errtoggle").addEventListener("click", () => { panelOpen = !panelOpen; applyPanel(); });
   $("errclose").addEventListener("click", () => { panelOpen = false; applyPanel(); });
