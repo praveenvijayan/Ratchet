@@ -1,0 +1,32 @@
+name: review-verdict-sweep
+
+# Scheduled reconciliation for the review-verdict flip. GitHub silently skips
+# pull_request_review workflows on conflicted PRs (mergeable_state: dirty), so a
+# Request Changes review can land without flipping its issue. This sweep walks
+# every open PR and flips the mapped issue from state:in-review to
+# state:changes-requested when the latest review is CHANGES_REQUESTED — self-
+# healing the same way sweep-stale-claims and unblock-dependents do. Decision
+# logic lives in scripts/review-verdict-sweep.mjs (regression-tested off the
+# network); this workflow is only its trigger and env.
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  issues: write
+  pull-requests: read
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+      - run: node scripts/review-verdict-sweep.mjs
+        env:
+          GITHUB_TOKEN: ${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
