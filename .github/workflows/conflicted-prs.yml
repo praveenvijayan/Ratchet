@@ -15,6 +15,7 @@ on:
   workflow_dispatch: {}
 
 permissions:
+  contents: read         # actions/checkout — a non-empty block drops this by default
   pull-requests: write   # read open PRs, add/remove the conflict label
 
 jobs:

@@ -994,8 +994,11 @@ export function readSnapshot({
   // server-side snapshot for the API and tests.
   const lastHeartbeatTs = latestHeartbeatTs(events);
   const thresholdSeconds = heartbeatThresholdSeconds(config?.pollSeconds);
+  // The poll cadence the supervisor promises, surfaced so the details area can
+  // report it (0131). Falls back to the default when the config carries none.
+  const pollSeconds = Number.isFinite(config?.pollSeconds) && config.pollSeconds > 0 ? config.pollSeconds : DEFAULTS.pollSeconds;
   const { state: hbState, ageSeconds } = heartbeatStatus({ lastHeartbeatTs, thresholdSeconds, now });
-  const heartbeat = { lastHeartbeatTs, thresholdSeconds, ageSeconds, state: hbState };
+  const heartbeat = { lastHeartbeatTs, thresholdSeconds, pollSeconds, ageSeconds, state: hbState };
 
   // Per-adapter failure visibility (0095): fold repeated dispatch failures on
   // one adapter into a single aggregate alert plus a breakdown, so a broken
@@ -1362,7 +1365,7 @@ export const PAGE_HTML = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Herd dashboard</title>
+<title>Ratchet herd dashboard</title>
 <!-- Fonts are the ONLY external reference on this page. If the CDN is
      unreachable the link simply fails and every font-family below falls back to
      its generic family (serif/sans-serif/monospace) — rendering is never blocked. -->
@@ -1377,6 +1380,9 @@ export const PAGE_HTML = `<!doctype html>
     --ink:#3f3e78; --ink-deep:#2b2a58;
     --ink-soft:rgba(63,62,120,.55); --ink-faint:rgba(63,62,120,.22); --ink-hair:rgba(63,62,120,.12);
     --terra:#7c68c4;
+    /* Supervisor-live green — the header dot only goes this colour while the
+       supervisor is still emitting heartbeats (0131); grey/terra otherwise. */
+    --live:#1f9d78;
     /* Type system — every family ends in a generic fallback so the page still
        renders when the fonts CDN is unreachable. */
     --serif:'Marcellus', serif; --sans:'Space Grotesk', sans-serif; --mono:'Space Mono', monospace;
@@ -1403,12 +1409,21 @@ export const PAGE_HTML = `<!doctype html>
     background:linear-gradient(180deg, var(--paper-hi), transparent);
   }
   .brand { display:flex; align-items:baseline; gap:14px; }
-  .brand h1 { font-family:var(--serif); font-size:30px; font-weight:400; letter-spacing:.04em; text-transform:uppercase; line-height:1; margin:0; }
+  .brand h1 { font-family:var(--serif); font-size:30px; font-weight:400; letter-spacing:.04em; line-height:1; margin:0; }
+  .brand h1 .product { font-family:var(--serif); font-size:30px; font-weight:400; }
+  .brand h1 .role { font-family:var(--sans); font-size:19px; font-weight:500; letter-spacing:.02em; color:var(--ink-soft); }
   .brand .ordinal { font-family:var(--mono); font-size:10px; letter-spacing:.28em; color:var(--ink-soft); text-transform:uppercase; }
   header .heartbeat { display:flex; align-items:center; gap:10px; margin-left:auto; font-family:var(--mono); font-size:12px; letter-spacing:.05em; color:var(--ink); }
   header .dot { width:10px; height:10px; border-radius:50%; background:var(--ink-faint); display:inline-block; }
-  header .dot.live { background:#8f9ad0; box-shadow:0 0 0 3px rgba(143,154,208,.35); animation:hb-pulse 2.2s ease-in-out infinite; }
-  @keyframes hb-pulse { 0%,100% { box-shadow:0 0 0 3px rgba(143,154,208,.35); } 50% { box-shadow:0 0 0 7px rgba(143,154,208,.10); } }
+  header .dot.live { background:var(--live); box-shadow:0 0 0 3px rgba(31,157,120,.35); animation:hb-pulse 2.2s ease-in-out infinite; }
+  @keyframes hb-pulse { 0%,100% { box-shadow:0 0 0 3px rgba(31,157,120,.35); } 50% { box-shadow:0 0 0 7px rgba(31,157,120,.10); } }
+  header .supervisor { display:flex; align-items:baseline; gap:8px; font-family:var(--mono); font-size:11px; letter-spacing:.05em; color:var(--ink-soft); }
+  header .supervisor .sup-label { text-transform:uppercase; letter-spacing:.16em; color:var(--ink-faint); }
+  header .supervisor .sup-status { text-transform:uppercase; font-weight:700; letter-spacing:.12em; }
+  header .supervisor.live .sup-status { color:var(--live); }
+  header .supervisor.silent .sup-status { color:var(--over); }
+  header .supervisor.unseen .sup-status { color:var(--warn); }
+  header .supervisor .sup-meta { color:var(--ink-soft); font-variant-numeric:tabular-nums; }
   header .fleettotals { color:var(--ink-soft); font-variant-numeric:tabular-nums; font-family:var(--mono); font-size:12px; }
   header .fleettotals.empty { display:none; }
   td.usage { text-align:right; font-variant-numeric:tabular-nums; }
@@ -1592,10 +1607,11 @@ export const PAGE_HTML = `<!doctype html>
 <body>
 <header>
   <div class="brand">
-    <h1>Herd Dashboard</h1>
+    <h1><span class="product">Ratchet</span> <span class="role">herd dashboard</span></h1>
     <span class="ordinal">Santorini</span>
   </div>
   <div class="heartbeat"><span class="dot" id="livedot"></span> <span id="livetext" class="empty">connecting…</span></div>
+  <div class="supervisor" id="hbdetails" hidden><span class="sup-label">Supervisor</span> <span class="sup-status" id="hbstatus"></span> <span class="sup-meta" id="hbmeta"></span></div>
   <span id="fleettotals" class="fleettotals empty"></span>
 </header>
 <main>
@@ -1996,10 +2012,19 @@ export const PAGE_HTML = `<!doctype html>
     if (!gotSnapshot) return;
     const hb = snapshot.heartbeat || {};
     const dot = $("livedot"), text = $("livetext"), banner = $("hbbanner");
+    const details = $("hbdetails"), statusEl = $("hbstatus"), metaEl = $("hbmeta");
     text.classList.remove("empty");
+    // The details area is always populated once a snapshot arrives, so an
+    // operator can read the supervisor's state, freshness, and poll cadence at
+    // a glance regardless of which liveness state it is in.
+    details.hidden = false;
+    const poll = Number.isFinite(hb.pollSeconds) ? "polls every " + durText(hb.pollSeconds) : "";
     if (hb.lastHeartbeatTs == null || !Number.isFinite(Date.parse(hb.lastHeartbeatTs))) {
       dot.classList.remove("live");
       text.textContent = "supervisor not seen";
+      details.className = "supervisor unseen";
+      statusEl.textContent = "not seen";
+      metaEl.textContent = "no heartbeat yet" + (poll ? " · " + poll : "");
       banner.hidden = false;
       banner.className = "hbbanner unseen";
       banner.textContent = "Supervisor has not been seen — no heartbeat in the event stream yet.";
@@ -2009,12 +2034,18 @@ export const PAGE_HTML = `<!doctype html>
     if (age > hb.thresholdSeconds) {
       dot.classList.remove("live");
       text.textContent = "supervisor silent";
+      details.className = "supervisor silent";
+      statusEl.textContent = "silent";
+      metaEl.textContent = "last heartbeat " + durText(age) + " ago" + (poll ? " · " + poll : "");
       banner.hidden = false;
       banner.className = "hbbanner silent";
       banner.textContent = "Supervisor silent since " + durText(age) + " — last heartbeat " + durText(age) + " ago.";
     } else {
       dot.classList.add("live");
       text.textContent = "supervisor live · heartbeat " + durText(age) + " ago";
+      details.className = "supervisor live";
+      statusEl.textContent = "live";
+      metaEl.textContent = "heartbeat " + durText(age) + " ago" + (poll ? " · " + poll : "");
       banner.hidden = true;
     }
   }

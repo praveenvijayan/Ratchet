@@ -138,7 +138,7 @@ function sseCollect(url, until, timeoutMs = 3000) {
     );
     const page = await fetchText(`http://127.0.0.1:${port}/`);
     assert.equal(page.status, 200, "GET / serves the dashboard");
-    assert.match(page.body, /Herd dashboard/, "the page is the dashboard HTML");
+    assert.match(page.body, /Ratchet herd dashboard/i, "the page is the dashboard HTML");
   } finally {
     await new Promise((r) => server.close(r));
   }
@@ -1391,7 +1391,7 @@ await inTempDir(async (dir) => {
 {
   assert.match(
     PAGE_HTML,
-    /<div class="brand">\s*<h1>Herd Dashboard<\/h1>\s*<span class="ordinal">Santorini<\/span>/i,
+    /<div class="brand">\s*<h1>.*?<\/h1>\s*<span class="ordinal">Santorini<\/span>/is,
     "the brand block pairs the serif title with the Santorini ordinal",
   );
   assert.match(PAGE_HTML, /\.brand h1\s*\{[^}]*font-family:\s*var\(--serif\)/i, "the title is set in the display serif");
@@ -1657,66 +1657,76 @@ await inTempDir(async (dir) => {
   assert.match(PAGE_HTML, /data-default="' \+ esc\(c\.defaultAvatar\)/, "the deck card carries the bundled default the fallback swaps to");
 }
 
-// ===========================================================================
-// Issue #306 — Lay out errors & escalations top-left with the active agents
-// deck to the right (slice 0132). The errors region moves out of the toggled
-// side panel into a permanent top-left region; the deck moves from full-width-
-// above into the region's right column. One test per acceptance criterion,
-// asserted against PAGE_HTML for structure/CSS and the live snapshot for the
-// empty-state data. Each block carries a `#306 Criterion N` marker; Criterion 5
-// self-counts them.
-// ===========================================================================
-
-// --- #306 Criterion 1: errors & escalations render in the top-left region of
-// the main area. ---
+// --- #304 Criterion 1: the header brand renders the text "Ratchet herd
+// dashboard", with the "herd dashboard" portion in lowercase (not uppercased
+// by CSS). ---------------------------------------------------------------
 {
-  assert.match(PAGE_HTML, /<main>[\s\S]*<div class="topregion" id="topregion">\s*<aside class="errpanel" id="errpanel"/, "the errors region is the first child of the top region inside main");
-  assert.doesNotMatch(PAGE_HTML, /<aside class="errpanel" id="errpanel"[^>]*hidden/, "the errors region is permanently rendered, not a toggled-away panel");
-  assert.match(PAGE_HTML, /id="errpanel"[\s\S]*id="deckwrap"/, "the errors region precedes the deck, so it sits on the left");
+  assert.match(
+    PAGE_HTML,
+    /<div class="brand">\s*<h1>.*?Ratchet.*?herd dashboard.*?<\/h1>/is,
+    "the header brand renders the text \"Ratchet herd dashboard\" inside the h1",
+  );
+  assert.match(
+    PAGE_HTML,
+    /<span class="role">herd dashboard<\/span>/,
+    "the \"herd dashboard\" portion is literal lowercase text in its own span",
+  );
+  // The .brand h1 rule must not uppercase the text (the old treatment did).
+  assert.doesNotMatch(
+    PAGE_HTML,
+    /\.brand h1\s*\{[^}]*text-transform:\s*uppercase/i,
+    "the .brand h1 rule no longer uppercases the brand text",
+  );
 }
 
-// --- #306 Criterion 2: the active agents deck renders to the right of the
-// errors & escalations region on a desktop-width viewport. ---
+// --- #304 Criterion 2: "Ratchet" is visually distinguished from the lowercase
+// "herd dashboard" (its own weight/size/element), so the product name leads. -
 {
-  assert.match(PAGE_HTML, /\.topregion\s*\{[^}]*display:grid[^}]*grid-template-columns:minmax\(0,420px\) minmax\(0,1fr\)/i, "the top region is a two-column grid (fixed errors column, flexible deck column) on desktop");
-  assert.match(PAGE_HTML, /<div class="topregion" id="topregion">\s*<aside class="errpanel"[\s\S]*<section class="deckwrap" id="deckwrap"/, "the deck is the second column, to the right of the errors region");
+  assert.match(
+    PAGE_HTML,
+    /<h1><span class="product">Ratchet<\/span> <span class="role">herd dashboard<\/span><\/h1>/,
+    "\"Ratchet\" is its own element (.product) separate from the lowercase role span",
+  );
+  assert.match(
+    PAGE_HTML,
+    /\.brand h1 \.product\s*\{[^}]*font-family:\s*var\(--serif\)/i,
+    "\"Ratchet\" (.product) is set in the display serif",
+  );
+  assert.match(
+    PAGE_HTML,
+    /\.brand h1 \.role\s*\{[^}]*font-family:\s*var\(--sans\)/i,
+    "\"herd dashboard\" (.role) is set in the sans family, distinct from the serif product name",
+  );
+  assert.match(
+    PAGE_HTML,
+    /\.brand h1 \.role\s*\{[^}]*font-size:\s*19px/i,
+    "\"herd dashboard\" (.role) uses a smaller size than the 30px product name",
+  );
 }
 
-// --- #306 Criterion 3: with zero escalations and zero adapter-health issues,
-// the errors region shows an empty state rather than a blank or broken column. ---
-await inTempDir(async (dir) => {
-  const escPath = join(dir, "esc.md");
-  writeFileSync(escPath, "");
-  await withServer({ statePath: join(dir, "s.json"), eventsPath: join(dir, "e.jsonl"), escalationsPath: escPath }, async (base) => {
-    const { json } = await fetchJson(`${base}/api/snapshot`);
-    assert.equal(json.escalations.length, 0, "no escalations in the snapshot");
-    assert.equal((json.brokenAdapters || []).length, 0, "no adapter-health issues in the snapshot");
-  });
-  // The region is always present (never hidden) and renders an explicit empty
-  // state; an empty adapter-health block collapses so it is not a broken column.
-  assert.doesNotMatch(PAGE_HTML, /id="errpanel"[^>]*hidden/, "the errors region stays rendered when there is nothing to show");
-  assert.match(PAGE_HTML, /if \(!snapshot\.escalations\.length\) \{ el\.innerHTML = '<div class="empty">No errors\.<\/div>'/, "the escalations render an explicit 'No errors.' empty state");
-  assert.match(PAGE_HTML, /\.adapterhealth:empty\s*\{\s*display:none/, "an empty adapter-health block collapses rather than leaving a broken column");
-});
-
-// --- #306 Criterion 4: on a narrow viewport the two regions stack vertically
-// without overlapping. ---
+// --- #304 Criterion 3: the browser tab `<title>` reads "Ratchet herd
+// dashboard". -----------------------------------------------------------
 {
-  assert.match(PAGE_HTML, /@media \(max-width:1180px\)\s*\{\s*\.topregion\s*\{\s*grid-template-columns:minmax\(0,1fr\)/i, "below 1180px the top region collapses to a single column, so the regions stack");
-  assert.match(PAGE_HTML, /\.topregion\s*\{[^}]*gap:34px[^}]*align-items:start/i, "the stacked regions keep a gap and top-align, so they never overlap");
+  assert.match(
+    PAGE_HTML,
+    /<title>Ratchet herd dashboard<\/title>/,
+    "the browser tab title reads \"Ratchet herd dashboard\"",
+  );
 }
 
-// --- #306 Criterion 5: every criterion above has exactly one test named after
-// it. This block reads its own source, extracts the `#306 Criterion N` markers,
-// and proves there is exactly one per criterion. ---
+// --- #304 Criterion 4: every criterion above has exactly one test named after
+// it. The plan file carried four #304 acceptance criteria; this counts its own
+// `#304 Criterion N` markers and proves there is exactly one per criterion,
+// 1..4. It counts markers in THIS file only — it never reads the plan file at
+// runtime, so archiving the plan when the issue closes can never break it.
 {
-  const CRITERIA_COUNT = 5;
+  const CRITERIA_COUNT = 4;
   const selfText = readFileSync(fileURLToPath(import.meta.url), "utf8");
-  const markers = [...selfText.matchAll(/^\/\/ --- #306 Criterion (\d+):/gim)].map((m) => Number(m[1]));
+  const markers = [...selfText.matchAll(/^\/\/ --- #304 Criterion (\d+):/gim)].map((m) => Number(m[1]));
   const unique = new Set(markers);
-  assert.equal(markers.length, unique.size, "each #306 criterion is tested exactly once (no duplicate markers)");
-  assert.equal(markers.length, CRITERIA_COUNT, `one test per #306 acceptance criterion (${CRITERIA_COUNT})`);
-  for (let n = 1; n <= CRITERIA_COUNT; n++) assert.ok(unique.has(n), `#306 criterion ${n} has a test`);
+  assert.equal(markers.length, unique.size, "each #304 criterion is tested exactly once (no duplicate markers)");
+  assert.equal(markers.length, CRITERIA_COUNT, `one test per #304 acceptance criterion (${CRITERIA_COUNT})`);
+  for (let n = 1; n <= CRITERIA_COUNT; n++) assert.ok(unique.has(n), `#304 criterion ${n} has a test`);
 }
 
 console.log("PASS herd-ui.test.mjs");

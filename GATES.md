@@ -64,6 +64,7 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 | 4y    | test: herd-ui                   | `node scripts/herd-ui.test.mjs`                   | exit 0 |
 | 4y2   | test: herd-avatar               | `node scripts/herd-avatar.test.mjs`               | exit 0 |
 | 4y3   | test: herd-ui-log-search        | `node scripts/herd-ui-log-search.test.mjs`        | exit 0 |
+| 4y14  | test: herd-ui-supervisor-status | `node scripts/herd-ui-supervisor-status.test.mjs` | exit 0 |
 | 4y4   | test: herd-ui-escalation        | `node scripts/herd-ui-escalation.test.mjs`        | exit 0 |
 | 4y5   | test: herd-ui-acknowledge       | `node scripts/herd-ui-acknowledge.test.mjs`       | exit 0 |
 | 4y6   | test: herd-ui-adapter-failures  | `node scripts/herd-ui-adapter-failures.test.mjs`  | exit 0 |
@@ -78,6 +79,7 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 | 4z2   | test: state-instructions-symmetry | `node scripts/state-instructions-symmetry.test.mjs` | exit 0 |
 | 4z3   | test: version-consistency       | `node scripts/version-consistency.test.mjs`       | exit 0 |
 | 4z5   | test: manifest-check            | `node scripts/manifest-check.test.mjs`            | exit 0 |
+| 4z6   | test: workflow-checkout-permissions | `node scripts/workflow-checkout-permissions.test.mjs` | exit 0 |
 | 4z7   | test: bootstrap                 | `node scripts/bootstrap.test.mjs`                 | exit 0 |
 | 4z8   | test: ratchet-uninstall         | `node scripts/ratchet-uninstall.test.mjs`         | exit 0 |
 | 4z9   | test: install-lifecycle         | `node scripts/install-lifecycle.test.mjs`         | exit 0 |
