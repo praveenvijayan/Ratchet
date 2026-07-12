@@ -526,8 +526,25 @@ export function parseIssueTargets(argv) {
 
 const isMain =
   process.argv[1] && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1]);
+// The CLI entry runs inside an async function invoked *without* a top-level
+// await. herd.mjs therefore finishes evaluating synchronously, so the dynamic
+// profile `import()`s below — and every static import the profile modules make
+// back into this file, whether directly (the four adapter/substitute callers,
+// now repointed at herd-adapters.mjs) or transitively (herd-retention → herd-ui
+// → herd.mjs's config re-import) — resolve against a fully initialised module
+// instead of deadlocking the import cycle. A bare top-level `await import(...)`
+// here is exactly what Node reports as an unsettled top-level await and kills
+// with exit 13 (issue #390); the regression test guards that this block never
+// reintroduces one. A rejection rejects runCli and exits 1 rather than
+// crashing the module graph with an unhandled rejection.
 if (isMain) {
-  const argv = process.argv.slice(2);
+  runCli(process.argv.slice(2)).catch((e) => {
+    console.error(e?.stack ?? `herd: ${e}`);
+    process.exit(1);
+  });
+}
+
+async function runCli(argv) {
   const cmd = argv[0];
   // Validate run-mode issue targeting *before* loading the herd-profile modules:
   // parseIssueTargets is pure core arg parsing, so a malformed --issue/--issues

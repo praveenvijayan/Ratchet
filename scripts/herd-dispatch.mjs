@@ -14,7 +14,7 @@
 import { mkdirSync, openSync, closeSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { spawn } from "node:child_process";
-import { resolveAdapter, substitute, extractUsage } from "./herd.mjs";
+import { resolveAdapter, substitute, extractUsage } from "./herd-adapters.mjs";
 import {
   STATE_FILE,
   ESCALATIONS_FILE,

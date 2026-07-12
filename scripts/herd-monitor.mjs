@@ -18,7 +18,7 @@
 // is injectable, so the monitor runs offline in tests. Zero dependencies.
 
 import { readFileSync } from "node:fs";
-import { substitute } from "./herd.mjs";
+import { substitute } from "./herd-adapters.mjs";
 import { STATE_FILE, ESCALATIONS_FILE, EVENTS_FILE, STALE_CLAIM_STATUS, TERMINAL_STATUS, readState, writeState, appendEscalation, appendHerdEvent, isPidAlive } from "./herd-survey.mjs";
 import { spawnWorker, recordExit } from "./herd-dispatch.mjs";
 
