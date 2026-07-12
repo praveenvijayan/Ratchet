@@ -125,10 +125,10 @@ await inTempDir(async () => {
   assert.equal(r.transitions[0].action, "escalate-body");
 });
 
-// hasGatesSection accepts a heading, a bold label, or a bare label line —
-// AGENTS.md demands "the gate checklist" without mandating markdown, and a
-// plain "Gates" line (PR #207 regression) must not escalate. A mention of the
-// word inside a sentence is still not a section.
+// --- #319 criterion 13: hasGatesSection accepts a heading, a bold label, or a
+// bare label line — AGENTS.md demands "the gate checklist" without mandating
+// markdown, and a plain "Gates" line (PR #207 regression) must not escalate.
+// A mention of the word inside a sentence is still not a section. ---
 {
   assert.ok(hasGatesSection("Closes #7\n\n## Gates\n- test: pass"), "markdown heading");
   assert.ok(hasGatesSection("Closes #7\n\n**Gates**\n- test: pass"), "bold label");

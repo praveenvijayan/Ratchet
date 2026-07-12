@@ -253,10 +253,11 @@ await inTempDir(async (dir) => {
   for (let n = 1; n <= CRITERIA_COUNT; n++) assert.ok(unique.has(n), `#172 criterion ${n} has a test`);
 }
 
-// --- Superseded escalations: an unresolved group auto-resolves when its issue
-// moved on after the group's newest occurrence — a newer escalation with a
-// different reason, a newer dispatch/resume, or the issue closing. A recurring
-// problem keeps re-appending, stays the newest group, and is never superseded.
+// --- #319 criterion 9: superseded escalations — an unresolved group
+// auto-resolves when its issue moved on after the group's newest occurrence
+// (a newer escalation with a different reason, a newer dispatch/resume, or the
+// issue closing). A recurring problem keeps re-appending, stays the newest
+// group, and is never superseded. ---
 {
   const blocks = dedupEscalations(parseEscalations(escMd([
     // issue 7: old concern, then a newer different concern → old one superseded.
