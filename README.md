@@ -99,20 +99,25 @@ profile(s) need — it never touches `.env` or other local secrets (they aren't
 in the manifest, so they're never selected).
 
 Download it, inspect it, then run it — the safe default for anything you pipe
-into `bash`:
+into `bash`. `TAG` resolves to the latest published release (a ref that is
+guaranteed to exist), so the commands run verbatim with nothing to fill in:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/praveenvijayan/Ratchet/<tag>/scripts/bootstrap.sh -o bootstrap.sh
+TAG=$(curl -fsSL https://api.github.com/repos/praveenvijayan/Ratchet/releases/latest | grep -m1 '"tag_name":' | cut -d'"' -f4)
+curl -fsSL "https://raw.githubusercontent.com/praveenvijayan/Ratchet/${TAG}/scripts/bootstrap.sh" -o bootstrap.sh
 less bootstrap.sh          # read it before you run it
-bash bootstrap.sh --version <tag> --profile core
+bash bootstrap.sh --version "${TAG}" --profile core
 ```
 
-Or, once you trust the source, the one-line convenience form — **always pin a
-real release tag**; `--version main` installs but is not reproducible, so
-avoid piping an unpinned ref straight into `bash`:
+Or, once you trust the source, the one-line convenience form. It pins to that
+same resolved release tag, so the install stays reproducible — piping an
+unpinned `main` straight into `bash` is not reproducible, so always install
+from a resolved release tag (to install a specific older version instead,
+replace the `${TAG}` lookup with a tag from the [Releases](https://github.com/praveenvijayan/Ratchet/releases) page):
 
 ```
-curl -fsSL https://raw.githubusercontent.com/praveenvijayan/Ratchet/<tag>/scripts/bootstrap.sh | bash -s -- --version <tag>
+TAG=$(curl -fsSL https://api.github.com/repos/praveenvijayan/Ratchet/releases/latest | grep -m1 '"tag_name":' | cut -d'"' -f4) \
+  && curl -fsSL "https://raw.githubusercontent.com/praveenvijayan/Ratchet/${TAG}/scripts/bootstrap.sh" | bash -s -- --version "${TAG}"
 ```
 
 `--profile` adds optional profiles on top of the always-installed `core`

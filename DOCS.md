@@ -627,17 +627,21 @@ branch protection, and never touches `.env` or other local secrets (they
 aren't in the manifest, so they're never selected).
 
 1. **Download, inspect, then run it** — the safe default for anything piped
-   into `bash`:
+   into `bash`. `TAG` resolves to the latest published release (a ref that is
+   guaranteed to exist), so the commands run verbatim with no placeholder:
    ```
-   curl -fsSL https://raw.githubusercontent.com/praveenvijayan/Ratchet/<tag>/scripts/bootstrap.sh -o bootstrap.sh
+   TAG=$(curl -fsSL https://api.github.com/repos/praveenvijayan/Ratchet/releases/latest | grep -m1 '"tag_name":' | cut -d'"' -f4)
+   curl -fsSL "https://raw.githubusercontent.com/praveenvijayan/Ratchet/${TAG}/scripts/bootstrap.sh" -o bootstrap.sh
    less bootstrap.sh          # read it before you run it
-   bash bootstrap.sh --version <tag> --profile core
+   bash bootstrap.sh --version "${TAG}" --profile core
    ```
-   Or, once you trust the source, the one-line convenience form — **always
-   pin a real release tag**; `--version main` installs but warns it is not
-   reproducible, so avoid piping an unpinned ref straight into `bash`:
+   Or, once you trust the source, the one-line convenience form. It pins to
+   that same resolved release tag, so the install stays reproducible — piping
+   an unpinned `main` straight into `bash` is not reproducible, so always
+   install from a resolved release tag:
    ```
-   curl -fsSL https://raw.githubusercontent.com/praveenvijayan/Ratchet/<tag>/scripts/bootstrap.sh | bash -s -- --version <tag>
+   TAG=$(curl -fsSL https://api.github.com/repos/praveenvijayan/Ratchet/releases/latest | grep -m1 '"tag_name":' | cut -d'"' -f4) \
+     && curl -fsSL "https://raw.githubusercontent.com/praveenvijayan/Ratchet/${TAG}/scripts/bootstrap.sh" | bash -s -- --version "${TAG}"
    ```
    `--dry-run` reports what would change without writing anything; an
    existing file blocks the install until you pass `--force`.

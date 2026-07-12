@@ -407,7 +407,61 @@ try {
     "DOCS.md documents failed deploy semantics without rollback mutation",
   );
 
-  console.log("PASS release.test.mjs (39 assertions)");
+  // ==========================================================================
+  // Issue #324 — the documented install path, provably wired end to end.
+  // Exactly one test per acceptance criterion, named after it.
+  // ==========================================================================
+  const releaseYml = readFileSync(fileURLToPath(new URL("../.github/workflows/release.yml", import.meta.url)), "utf8");
+  const readme = readFileSync(fileURLToPath(new URL("../README.md", import.meta.url)), "utf8");
+  const docsMd = readFileSync(fileURLToPath(new URL("../DOCS.md", import.meta.url)), "utf8");
+  const thisTest = readFileSync(fileURLToPath(import.meta.url), "utf8");
+
+  // criterion 1: the released tag's version matches .ratchet-version. With no
+  // existing tags the first release seeds its version from the file, so the
+  // published tag is exactly `v` + its contents — never a guessed number.
+  process.env.RELEASE_BUMP = "patch";
+  setSeed("4.5.0\n");
+  created = mockGitHub({ latest: null, tags: [], pulls: [{ number: 90, title: "First ship", merged_at: "2026-02-01T00:00:00Z" }] });
+  resetOutput();
+  result = await main();
+  assert.equal(created.length, 1, "criterion 1: a first release is published");
+  assert.equal(created[0].tag_name, "v4.5.0", "criterion 1: the release tag matches .ratchet-version (v4.5.0)");
+  restoreSeed();
+
+  // criterion 2: a post-publish smoke check fetches bootstrap.sh at the new tag
+  // over HTTPS and dry-runs it, failing the workflow visibly on any error.
+  const smoke = releaseYml.match(/- name: Smoke-test the published install path[\s\S]*?(?=\n      - name:)/)?.[0] || "";
+  assert.ok(smoke, "criterion 2: a smoke-test step exists");
+  assert.ok(/steps\.publish\.outputs\.released == 'true'/.test(smoke), "criterion 2: the smoke test runs only after a release is published");
+  assert.ok(/raw\.githubusercontent\.com\/\$\{INSTALL_REPO\}\/\$\{RELEASE_TAG\}\/scripts\/bootstrap\.sh/.test(smoke), "criterion 2: it fetches bootstrap.sh from the new tag over HTTPS");
+  assert.ok(/--dry-run/.test(smoke), "criterion 2: it runs bootstrap in dry-run, writing nothing");
+  assert.ok(/set -euo pipefail/.test(smoke) && /curl -fsSL/.test(smoke), "criterion 2: a failed fetch or run fails the workflow visibly");
+
+  // criterion 3: the README/DOCS install command runs verbatim from a ref that is
+  // guaranteed to exist (the latest release), with no `<tag>` placeholder to fill.
+  for (const [name, doc] of [["README.md", readme], ["DOCS.md", docsMd]]) {
+    assert.ok(!doc.includes("Ratchet/<tag>/scripts/bootstrap.sh"), `criterion 3: ${name} bootstrap fetch URL has no <tag> placeholder`);
+    assert.ok(!/--version <tag>/.test(doc), `criterion 3: ${name} --version has no <tag> placeholder`);
+    assert.ok(/releases\/latest/.test(doc) && /tag_name/.test(doc), `criterion 3: ${name} resolves the ref from the latest release (a ref guaranteed to exist)`);
+  }
+
+  // criterion 4: when RATCHET_RELEASE is not "true", the run reports the skip and
+  // why, instead of silently doing nothing.
+  assert.ok(/report-skip:/.test(releaseYml), "criterion 4: a companion job reports the skip");
+  assert.ok(/if: \$\{\{ vars\.RATCHET_RELEASE != 'true' \}\}/.test(releaseYml), "criterion 4: it runs exactly when the release lane is off");
+  assert.ok(/Release skipped/.test(releaseYml), "criterion 4: it announces that the release was skipped and why");
+  assert.ok(/gh variable set RATCHET_RELEASE --body true/.test(releaseYml), "criterion 4: it names the fix to enable releases");
+
+  // criterion 5: every criterion above has exactly one test named after it. Each
+  // criterion's test is a single block introduced by one `// criterion N:`
+  // comment, so exactly one such marker per N is the machine-checkable form of
+  // "one test, named after the criterion".
+  for (let n = 1; n <= 5; n++) {
+    const named = (thisTest.match(new RegExp(`// criterion ${n}:`, "g")) || []).length;
+    assert.equal(named, 1, `criterion 5: criterion ${n} has exactly one test named after it (found ${named})`);
+  }
+
+  console.log("PASS release.test.mjs (61 assertions)");
 } finally {
   delete process.env.GITHUB_OUTPUT;
   rmSync(OUTPUT_FILE, { force: true });
