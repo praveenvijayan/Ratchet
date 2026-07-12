@@ -24,8 +24,15 @@ done
 INSTALL_FILE=".ratchet-install.json"
 die() { echo "ratchet-update: $*" >&2; exit 1; }
 
+VERSION_FILE=".ratchet-version"
+# The command a host runs to reinstall from scratch — named verbatim whenever
+# adoption can't proceed, so the user never has to reverse-engineer it.
+REINSTALL_CMD="bash scripts/bootstrap.sh --version <tag>"
+
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "not inside a git repo."
-[ -f "$INSTALL_FILE" ] || die "no $INSTALL_FILE found in this project — run scripts/bootstrap.sh first."
+# A missing $INSTALL_FILE is no longer fatal: if this repo carries a readable
+# $VERSION_FILE, the adoption step below reconstructs the record from that
+# pinned release before the manifest-aware update runs (issue #398).
 
 if git remote | grep -qx ratchet; then
   git remote set-url ratchet "$REMOTE_URL"
@@ -57,6 +64,71 @@ git show "${SRC}:ratchet-manifest.json" > "$MANIFEST_TMP"
 # Shared by the plan (below) and commit (post-checkout) steps: hashes a file,
 # or a directory as the sorted concatenation of its relative paths + bytes.
 HASH_FN='function hashPath(p){const fs=require("fs"),path=require("path"),crypto=require("crypto");if(!fs.existsSync(p))return null;const h=crypto.createHash("sha256");if(fs.statSync(p).isFile()){h.update(fs.readFileSync(p));return h.digest("hex");}const files=[];(function walk(d){for(const n of fs.readdirSync(d).sort()){const f=path.join(d,n);fs.statSync(f).isDirectory()?walk(f):files.push(f);}})(p);for(const f of files.sort()){h.update(f);h.update(fs.readFileSync(f));}return h.digest("hex");}'
+
+# Adoption — reconstruct a missing install record from the pinned release.
+# A repo that got Ratchet by direct copy (not scripts/bootstrap.sh) has the
+# framework files and a .ratchet-version but no .ratchet-install.json, so the
+# manifest-aware selection below has nothing to read. Rather than force a full
+# reinstall, rebuild the record from a clean checkout of the RECORDED version:
+# record each present framework path's pristine hash (so a later run still
+# detects local edits) and never touch the working tree. Requires a readable
+# .ratchet-version whose release is fetchable; otherwise name the reinstall
+# command and stop — never a stack trace. (issue #398)
+if [ ! -f "$INSTALL_FILE" ]; then
+  [ -r "$VERSION_FILE" ] \
+    || die "no $INSTALL_FILE and no readable $VERSION_FILE to adopt from — reinstall with: $REINSTALL_CMD"
+  RAWVER="$(head -n1 "$VERSION_FILE" | tr -d '[:space:]')"
+  RECVER="$(normalize_version "$RAWVER")"
+  [ -n "$RECVER" ] \
+    || die "no $INSTALL_FILE and $VERSION_FILE is empty — reinstall with: $REINSTALL_CMD"
+  echo "No $INSTALL_FILE found — adopting this install from recorded version $RECVER ..."
+  git fetch --quiet ratchet --tags 2>/dev/null || true
+  # .ratchet-version is stored normalized (no leading v) but release tags may
+  # carry one — try both forms when resolving the recorded release.
+  REC_SRC=""
+  for cand in "ratchet/$RECVER" "$RECVER" "ratchet/v$RECVER" "v$RECVER" "ratchet/$RAWVER" "$RAWVER"; do
+    if git rev-parse --verify --quiet "${cand}^{commit}" >/dev/null; then REC_SRC="$cand"; break; fi
+  done
+  [ -n "$REC_SRC" ] \
+    || die "cannot fetch recorded release '$RAWVER' to adopt from — reinstall with: $REINSTALL_CMD"
+  git cat-file -e "${REC_SRC}:ratchet-manifest.json" 2>/dev/null \
+    || die "recorded release '$RECVER' has no ratchet-manifest.json to adopt from — reinstall with: $REINSTALL_CMD"
+
+  ADOPT_DIR="$(mktemp -d)"
+  trap 'rm -f "$MANIFEST_TMP"; rm -rf "$ADOPT_DIR"' EXIT
+  git archive "$REC_SRC" | tar -x -C "$ADOPT_DIR"
+
+  # Compare each present framework path against its pristine release content:
+  # record the pristine hash for all of them (what a clean install would store),
+  # and report — but never overwrite — any the host has locally modified.
+  node -e "$HASH_FN"'
+    const fs = require("fs"), path = require("path");
+    const [pristineRoot, installFile, ver] = process.argv.slice(1);
+    const manifest = JSON.parse(fs.readFileSync(path.join(pristineRoot, "ratchet-manifest.json"), "utf8"));
+    const fw = (manifest.files || []).filter((e) => e.class === "framework");
+    // Profiles present on disk (core always). A profile counts as installed if
+    // at least one of its framework paths exists in this repo.
+    const present = new Set(["core"]);
+    for (const e of fw) if (fs.existsSync(e.path)) present.add(e.profile);
+    const hashes = {}, installed = [], modified = [];
+    for (const e of fw) {
+      if (!present.has(e.profile) || !fs.existsSync(e.path)) continue;  // not installed — leave for the update to add
+      const pristine = hashPath(path.join(pristineRoot, e.path));
+      if (pristine === null) continue;                                  // path not in this release
+      hashes[e.path] = pristine;                                        // what a clean install would have recorded
+      installed.push(e.path);
+      if (hashPath(e.path) !== pristine) modified.push(e.path);         // host edited it — report, never touch
+    }
+    const generated = (manifest.files || [])
+      .filter((e) => e.class === "generated" && fs.existsSync(e.path))
+      .map((e) => e.path);
+    const profiles = [...present].sort();
+    fs.writeFileSync(installFile, JSON.stringify({ version: ver, profiles, installed, generated, hashes }, null, 2) + "\n");
+    for (const m of modified) console.error(`  adopt: kept local edit (left untouched): ${m}`);
+    console.error(`  adopt: recorded ${installed.length} framework path(s) for profile(s): ${profiles.join(", ")}`);
+  ' "$ADOPT_DIR" "$INSTALL_FILE" "$RECVER"
+  echo "Adopted $INSTALL_FILE at version $RECVER — continuing update to $REF."
+fi
 
 # Framework paths for the profile(s) recorded in .ratchet-install.json (`core`
 # is always included, same convention as scripts/bootstrap.sh), each tagged
