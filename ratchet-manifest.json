@@ -171,6 +171,21 @@
       "profile": "core"
     },
     {
+      "path": "scripts/ratchet-requeue.mjs",
+      "class": "framework",
+      "profile": "core"
+    },
+    {
+      "path": "scripts/ratchet-heartbeat.mjs",
+      "class": "framework",
+      "profile": "core"
+    },
+    {
+      "path": "scripts/ratchet-submit.mjs",
+      "class": "framework",
+      "profile": "core"
+    },
+    {
       "path": "scripts/review-verdict.mjs",
       "class": "framework",
       "profile": "core"
@@ -535,6 +550,14 @@
     },
     {
       "path": "scripts/release.test.mjs",
+      "class": "excluded"
+    },
+    {
+      "path": "scripts/ratchet-requeue-heartbeat.test.mjs",
+      "class": "excluded"
+    },
+    {
+      "path": "scripts/ratchet-submit.test.mjs",
       "class": "excluded"
     },
     {

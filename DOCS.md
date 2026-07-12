@@ -243,6 +243,11 @@ scripts/
   pr-size-check.test.mjs        Regression test for the size gate
   ratchet-init-skill.test.mjs   Regression test for the init skill contract
   ratchet-hotfix-skill.test.mjs Regression test for the hotfix/revert fast-lane skill contract
+  ratchet-heartbeat.mjs         Post a lease heartbeat comment to renew a claim without pushing
+  ratchet-requeue.mjs           Return an issue to state:ready with an explaining comment
+  ratchet-requeue-heartbeat.test.mjs Regression test for the requeue and heartbeat scripts
+  ratchet-submit.mjs            Preflight the PR handoff: integrate/gate/push/PR/label, fail-fast
+  ratchet-submit.test.mjs       Regression test for the submit preflight
   ratchet-metrics.mjs           Read-only loop health metrics
   ratchet-metrics.test.mjs      Regression test for loop metrics
   ratchet-uninstall.sh          Remove exactly what bootstrap.sh installed, per .ratchet-install.json

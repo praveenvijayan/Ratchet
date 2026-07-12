@@ -20,15 +20,19 @@ import { execFileSync } from "node:child_process";
 export const API = "https://api.github.com";
 export const API_VERSION = "2022-11-28";
 
-// Build the request function used across the codebase. `gh(method, path, body)`
-// issues one authenticated request against the REST API and returns the parsed
-// JSON — or null for a 204 No Content. A non-2xx response throws an Error whose
-// message carries the method, path, status, and response text, and whose
-// `status` property is the numeric HTTP status so callers can branch on it
-// (e.g. 422 "already exists"). `fetchImpl` defaults to the global fetch; tests
-// pass a stub so no request ever leaves the process.
+// Build the request function used across the codebase.
+// `gh(method, path, body, { allow404 } = {})` issues one authenticated request
+// against the REST API and returns the parsed JSON — or null for a 204 No
+// Content. Pass `allow404: true` to treat a 404 as a normal, expected outcome
+// (e.g. a repo with no releases yet) and receive null instead of a throw. Any
+// other non-2xx response throws an Error whose message carries the method,
+// path, status, and response text, and whose `status` (numeric HTTP status) and
+// `body` (raw response text) properties let callers discriminate one failure
+// mode from another (e.g. a tag-collision 422 vs. an invalid-input 422) without
+// pattern-matching a flattened message. `fetchImpl` defaults to the global
+// fetch; tests pass a stub so no request ever leaves the process.
 export function ghClient(token, { fetchImpl = fetch } = {}) {
-  return async function gh(method, path, body) {
+  return async function gh(method, path, body, { allow404 = false } = {}) {
     const res = await fetchImpl(`${API}${path}`, {
       method,
       headers: {
@@ -39,8 +43,11 @@ export function ghClient(token, { fetchImpl = fetch } = {}) {
       body: body ? JSON.stringify(body) : undefined,
     });
     if (!res.ok) {
-      const err = new Error(`${method} ${path} -> ${res.status} ${await res.text()}`);
+      if (res.status === 404 && allow404) return null;
+      const text = await res.text();
+      const err = new Error(`${method} ${path} -> ${res.status} ${text}`);
       err.status = res.status;
+      err.body = text;
       throw err;
     }
     return res.status === 204 ? null : res.json();
@@ -51,16 +58,19 @@ export function ghClient(token, { fetchImpl = fetch } = {}) {
 // signals the last page, and return the concatenated results in page order.
 // `gh` is a client from ghClient (or any (method, path) => array). The first
 // `per_page`/`page` pair is appended with the correct separator whether or not
-// `path` already carries a query string.
-export async function paginate(gh, path) {
+// `path` already carries a query string. Pass `cap` to bound the scan: paging
+// stops once `cap` items are collected and the result is truncated to `cap`, so
+// a caller scanning "the 200 most recent" never walks the whole history. The
+// default (Infinity) follows every page, preserving the uncapped behaviour.
+export async function paginate(gh, path, { cap = Infinity } = {}) {
   const out = [];
   for (let page = 1; ; page++) {
     const sep = path.includes("?") ? "&" : "?";
     const batch = await gh("GET", `${path}${sep}per_page=100&page=${page}`);
     out.push(...batch);
-    if (batch.length < 100) break;
+    if (batch.length < 100 || out.length >= cap) break;
   }
-  return out;
+  return cap === Infinity ? out : out.slice(0, cap);
 }
 
 // Parse a KEY=VALUE `.env` file into a plain object, tolerating blank lines,

@@ -20,6 +20,7 @@
 //   Override the config file for testing with GATES_FILE=/path/to/GATES.md.
 
 import { existsSync, readFileSync, appendFileSync } from "node:fs";
+import { ghClient, paginate } from "./gh-api.mjs";
 
 const GATES_FILE = process.env.GATES_FILE || "GATES.md";
 // The pr-gates workflow extracts the base branch's GATES.md and points
@@ -196,21 +197,9 @@ async function fetchPrFiles() {
   const prNumber = process.env.PR_NUMBER;
   if (!token || !repo || !prNumber) return null;
 
-  const files = [];
-  for (let page = 1; ; page++) {
-    const res = await fetch(`https://api.github.com/repos/${repo}/pulls/${prNumber}/files?per_page=100&page=${page}`, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-      },
-    });
-    if (!res.ok) throw new Error(`GET PR files -> ${res.status} ${await res.text()}`);
-    const batch = await res.json();
-    files.push(...batch.map(parseFileEntry));
-    if (files.some((file) => !file)) throw new Error("GitHub PR file payload was missing filename/additions/deletions.");
-    if (batch.length < 100) break;
-  }
+  const gh = ghClient(token);
+  const files = (await paginate(gh, `/repos/${repo}/pulls/${prNumber}/files`)).map(parseFileEntry);
+  if (files.some((file) => !file)) throw new Error("GitHub PR file payload was missing filename/additions/deletions.");
   return files;
 }
 

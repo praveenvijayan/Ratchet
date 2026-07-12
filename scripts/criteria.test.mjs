@@ -5,7 +5,10 @@
 // Zero dependencies. Run:  node scripts/criteria.test.mjs
 
 import assert from "node:assert/strict";
-import { classifyUnblock, classifyRequeue } from "./criteria.mjs";
+import { readdirSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+import { classifyUnblock, classifyRequeue, planSlug, formatPlanMarker, isPlanMarkerLine } from "./criteria.mjs";
 
 const CLOSED = 42;
 const withCriteria = `Some body.
@@ -131,4 +134,36 @@ const readyDecision = {
   assert.equal(r.comment, blockedDecision.comment, "a non-ready target keeps its comment");
 }
 
-console.log("PASS criteria.test.mjs (16 assertions)");
+// #345 AC1: criteria.mjs exports read + write of the `<!-- plan-id: <slug> -->`
+// marker from one definition, tolerating optional whitespace around `plan-id:`
+// and the slug. Reading a marker written by formatPlanMarker round-trips.
+{
+  const slug = "0154-plan-id-marker-single-authority";
+  // Read tolerates spacing variants — the exact bug #345 fixes.
+  assert.equal(planSlug(`b\n\n<!-- plan-id: ${slug} -->`), slug, "normal spacing resolves");
+  assert.equal(planSlug(`<!--plan-id:${slug}-->`), slug, "no surrounding whitespace resolves");
+  assert.equal(planSlug(`<!--   plan-id:    ${slug}   -->`), slug, "extra internal whitespace resolves");
+  assert.equal(planSlug("body with no marker"), null, "a marker-less body yields null, not a throw");
+  // Write is canonical and round-trips through the reader.
+  assert.equal(formatPlanMarker(slug), `<!-- plan-id: ${slug} -->`, "formatPlanMarker renders the canonical marker");
+  assert.equal(planSlug(formatPlanMarker(slug)), slug, "what is written can be read back");
+  // isPlanMarkerLine matches a whole marker line (any spacing) and nothing else.
+  assert.equal(isPlanMarkerLine(`<!-- plan-id: ${slug} -->`), true, "a bare marker line matches");
+  assert.equal(isPlanMarkerLine(`   <!--plan-id:${slug}-->   `), true, "a spaced marker line matches");
+  assert.equal(isPlanMarkerLine(`text <!-- plan-id: ${slug} --> more`), false, "a marker mid-line is not a marker line");
+  assert.equal(isPlanMarkerLine("## Acceptance criteria"), false, "an ordinary line does not match");
+}
+
+// #345 AC2: every consumer obtains the slug via criteria.mjs — no other file
+// under scripts/ carries its own plan-id regex. Scan the source: only
+// criteria.mjs may contain a slash-delimited regex literal mentioning plan-id.
+{
+  const scriptsDir = dirname(fileURLToPath(import.meta.url));
+  const REGEX_LITERAL = /\/[^/\n]*plan-id[^/\n]*\//;
+  const offenders = readdirSync(scriptsDir)
+    .filter((f) => f.endsWith(".mjs") && !f.endsWith(".test.mjs") && f !== "criteria.mjs")
+    .filter((f) => REGEX_LITERAL.test(readFileSync(join(scriptsDir, f), "utf8")));
+  assert.deepEqual(offenders, [], `these files still define their own plan-id regex instead of importing from criteria.mjs: ${offenders.join(", ")}`);
+}
+
+console.log("PASS criteria.test.mjs (16 assertions + #345 AC1/AC2)");
