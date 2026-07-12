@@ -96,11 +96,13 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 | 4z13  | test: ratchet-start             | `node scripts/ratchet-start.test.mjs`             | exit 0 |
 | 4z15  | test: agents-kernel             | `node scripts/agents-kernel.test.mjs`             | exit 0 |
 | 4z14  | test: plan-authoring-rules      | `node scripts/plan-authoring-rules.test.mjs`      | exit 0 |
+| 4z16  | test: protocol-coverage         | `node scripts/protocol-coverage.test.mjs`         | exit 0 |
 | 4r    | test-coverage                   | `node scripts/gates-coverage.mjs`                 | exit 0 |
 | 4z    | skill-parity                    | `node scripts/skill-parity.mjs`                   | exit 0 |
 | 4z10  | skill-detail                    | `node scripts/skill-detail.mjs`                   | exit 0 |
 | 4z4   | version-consistency             | `node scripts/version-consistency.mjs`            | exit 0 |
 | 4z6   | manifest-check                  | `node scripts/manifest-check.mjs`                 | exit 0 |
+| 4z17  | protocol-coverage               | `node scripts/protocol-coverage.mjs`              | exit 0 |
 | 5     | build       | TODO: build command               | —              |
 | 6     | audit       | TODO: audit command               | —              |
 | 7     | secret-scan | TODO: secret-scan command         | —              |

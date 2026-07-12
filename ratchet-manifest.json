@@ -131,6 +131,11 @@
       "profile": "core"
     },
     {
+      "path": "scripts/protocol-coverage.mjs",
+      "class": "framework",
+      "profile": "core"
+    },
+    {
       "path": "scripts/run-gates.mjs",
       "class": "framework",
       "profile": "core"
@@ -543,6 +548,10 @@
     },
     {
       "path": "scripts/pr-size-check.test.mjs",
+      "class": "excluded"
+    },
+    {
+      "path": "scripts/protocol-coverage.test.mjs",
       "class": "excluded"
     },
     {
