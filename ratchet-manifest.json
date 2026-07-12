@@ -206,6 +206,10 @@
       "profile": "core"
     },
     {
+      "path": "scripts/agents-kernel.test.mjs",
+      "class": "excluded"
+    },
+    {
       "path": "scripts/archive-closed-plans.mjs",
       "class": "framework",
       "profile": "core"

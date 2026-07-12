@@ -94,6 +94,7 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 | 4z11  | test: ratchet-requeue-heartbeat | `node scripts/ratchet-requeue-heartbeat.test.mjs` | exit 0 |
 | 4z12  | test: ratchet-submit            | `node scripts/ratchet-submit.test.mjs`            | exit 0 |
 | 4z13  | test: ratchet-start             | `node scripts/ratchet-start.test.mjs`             | exit 0 |
+| 4z15  | test: agents-kernel             | `node scripts/agents-kernel.test.mjs`             | exit 0 |
 | 4z14  | test: plan-authoring-rules      | `node scripts/plan-authoring-rules.test.mjs`      | exit 0 |
 | 4r    | test-coverage                   | `node scripts/gates-coverage.mjs`                 | exit 0 |
 | 4z    | skill-parity                    | `node scripts/skill-parity.mjs`                   | exit 0 |

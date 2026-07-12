@@ -173,21 +173,25 @@ const openai = readFileSync(
   assert.match(res.stdout, /12 skill/i, "parity guard must report the ratchet-hotfix skill among those verified");
 }
 
-// --- Criterion 6: AGENTS.md is unchanged by this PR (the manual shrink happens
-// in 0143-slim-agent-manual).
+// --- Criterion 6: AGENTS.md defers the full hotfix procedure to this skill.
+// (This retires #338's original "AGENTS.md unchanged until 0143" guard: 0143 /
+// issue #334 has now shrunk the manual into the safety kernel, which routes the
+// hotfix procedure here rather than carrying it, while keeping the safety
+// prohibition normative in the kernel itself.)
 {
-  // The PR branch must not touch AGENTS.md. Compare the worktree's AGENTS.md
-  // against origin/main's copy: a clean diff is the only acceptable state.
-  const diff = spawnSync(
-    "git",
-    ["diff", "origin/main", "--", "AGENTS.md"],
-    { encoding: "utf8", cwd: repoRoot },
+  const agents = readFileSync(
+    fileURLToPath(new URL("../AGENTS.md", import.meta.url)),
+    "utf8",
   );
-  assert.equal(diff.status, 0, `git diff of AGENTS.md failed: ${diff.stderr}`);
-  assert.equal(
-    diff.stdout.trim(),
-    "",
-    "AGENTS.md must be unchanged by this PR — the manual shrink is a separate issue (0143)",
+  assert.match(
+    agents,
+    /\.agents\/skills\/ratchet-hotfix\/SKILL\.md/,
+    "AGENTS.md must route the hotfix procedure to this skill rather than carry it",
+  );
+  assert.match(
+    agents,
+    /explicit human trigger/i,
+    "AGENTS.md must retain the hotfix explicit-human-trigger prohibition as a kernel invariant",
   );
 }
 
