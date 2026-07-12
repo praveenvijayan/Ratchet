@@ -51,8 +51,11 @@ SRC="$TMP/src"
 # AC: download into a temp dir first; the host is untouched until every check
 # passes, so a failed download can never leave a partial install.
 echo "bootstrap: fetching $REF from $REMOTE_URL ..."
+# git's own 404/"remote branch not found" chatter is suppressed so the user
+# never sees a raw curl/git error; die emits a clear, actionable message that
+# names the ref and points at the releases page and the --version main escape.
 git clone --quiet --depth 1 --branch "$REF" "$REMOTE_URL" "$SRC" 2>/dev/null \
-  || die "could not resolve or fetch ref '$REF' from $REMOTE_URL — nothing was installed."
+  || die "could not resolve version ref '$REF' on $REMOTE_URL. Check the tag exists on the releases page (${REMOTE_URL%.git}/releases), or pass --version main to track the latest. Nothing was installed."
 [ -f "$SRC/ratchet-manifest.json" ] || die "downloaded ref '$REF' has no ratchet-manifest.json — cannot select files."
 
 # Framework paths for the selected profile(s) — `core` is always included.

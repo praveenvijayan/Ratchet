@@ -279,6 +279,43 @@ const STD = {
   assert.ok(!inst.installed.includes(".env.example"), ".env.example is not in installed (framework)");
 }
 
+// === Issue #325 — a missing --version ref fails clearly (plan 0138) ==========
+// One test per acceptance criterion of #325, each named after the criterion.
+// A bad ref is exercised against a real, valid fixture release so the failure
+// is genuinely "ref not found on the remote", not a broken remote.
+
+// --- #325 AC1: a nonexistent ref exits non-zero BEFORE writing any file ------
+{
+  const host = makeHost();
+  const before = readdirSync(host).sort();
+  const r = run(host, ["--version", "v3.2.1-nope"], makeRelease(STD));
+  assert.notEqual(r.status, 0, "a nonexistent ref must exit non-zero");
+  assert.deepEqual(readdirSync(host).sort(), before, "no file is written to the host on a missing ref");
+  assert.ok(!existsSync(join(host, ".ratchet-version")), "no version file written");
+  assert.ok(!existsSync(join(host, "AGENTS.md")), "no framework file written");
+}
+
+// --- #325 AC2: the message names the ref and points to releases / --version main, never a raw 404 ---
+{
+  const host = makeHost();
+  const r = run(host, ["--version", "v3.2.1-nope"], makeRelease(STD));
+  assert.notEqual(r.status, 0, "a nonexistent ref must fail");
+  assert.ok(r.out.includes("v3.2.1-nope"), "names the requested ref");
+  assert.ok(/releases/i.test(r.out), "points at the releases page to find valid versions");
+  assert.ok(/--version main/.test(r.out), "offers --version main to track latest");
+  assert.ok(!/\b404\b/.test(r.out), "never surfaces a raw curl/git 404 error");
+  noStack(r.out);
+}
+
+// --- #325 AC3: a ref that exists still installs exactly as before (regression) ---
+{
+  const host = makeHost();
+  const r = run(host, ["--version", "v9.9.9", "--profile", "core"], makeRelease(STD));
+  assert.equal(r.status, 0, `an existing ref must install: ${r.out}`);
+  assert.ok(existsSync(join(host, "AGENTS.md")), "installs the framework file");
+  assert.equal(readFileSync(join(host, ".ratchet-version"), "utf8").trim(), "9.9.9", "records the pinned version as before");
+}
+
 // --- Meta: exactly one test block per functional criterion ------------------
 {
   const src = readFileSync(SELF, "utf8");
@@ -286,7 +323,11 @@ const STD = {
     const hits = src.match(new RegExp(`--- Criterion ${n}:`, "g")) || [];
     assert.equal(hits.length, 1, `expected exactly one "Criterion ${n}" block, found ${hits.length}`);
   }
+  for (const ac of ["AC1", "AC2", "AC3"]) {
+    const hits = src.match(new RegExp(`--- #325 ${ac}:`, "g")) || [];
+    assert.equal(hits.length, 1, `expected exactly one "#325 ${ac}" block, found ${hits.length}`);
+  }
 }
 
 for (const d of dirs) rmSync(d, { recursive: true, force: true });
-console.log("PASS bootstrap.test.mjs (13 criteria, end-to-end)");
+console.log("PASS bootstrap.test.mjs (13 + #325×3 criteria, end-to-end)");
