@@ -631,6 +631,10 @@
       "class": "excluded"
     },
     {
+      "path": "scripts/static-autodeploy.test.mjs",
+      "class": "excluded"
+    },
+    {
       "path": "scripts/state-label-exclusivity.test.mjs",
       "class": "excluded"
     },
