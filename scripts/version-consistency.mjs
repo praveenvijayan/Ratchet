@@ -188,6 +188,26 @@ export function consistencyReport(root = ".") {
   };
 }
 
+// The version the most locations carry — the consensus a lone drifted file
+// should be aligned to. Ties keep the first-seen version, so the report is
+// deterministic. Errored entries have no version and are ignored here.
+function majorityVersion(entries) {
+  const counts = new Map();
+  for (const e of entries) {
+    if (!e.version) continue;
+    counts.set(e.version, (counts.get(e.version) || 0) + 1);
+  }
+  let best = null;
+  let bestCount = 0;
+  for (const [version, count] of counts) {
+    if (count > bestCount) {
+      best = version;
+      bestCount = count;
+    }
+  }
+  return best;
+}
+
 // Format the check outcome as (exitCode, lines). Pure, so a test can assert on
 // the exact message without spawning a process.
 export function reportLines(report) {
@@ -200,9 +220,17 @@ export function reportLines(report) {
   if (report.consistent) {
     return { code: 0, lines: [`All framework version strings agree: ${report.version}`] };
   }
-  const lines = ["Framework version strings disagree:"];
-  for (const e of report.entries) lines.push(`  ${e.file}: ${e.raw} (${e.version})`);
-  lines.push("Align every location to the same MAJOR.MINOR.PATCH before opening a PR.");
+  // The expected version is the one the most locations agree on (the majority);
+  // ties break toward the first-seen version. Each disagreeing location is then
+  // named with the version it carries next to that expected version, so a reader
+  // sees exactly which file drifted and to what it should be aligned.
+  const expected = majorityVersion(report.entries);
+  const lines = [`Framework version strings disagree (expected ${expected}):`];
+  for (const e of report.entries) {
+    const drift = e.version === expected ? "" : ` — expected ${expected}`;
+    lines.push(`  ${e.file}: ${e.raw} (${e.version})${drift}`);
+  }
+  lines.push(`Align every location to ${expected} (MAJOR.MINOR.PATCH) before opening a PR.`);
   return { code: 1, lines };
 }
 

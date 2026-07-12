@@ -56,6 +56,11 @@
       "profile": "core"
     },
     {
+      "path": ".github/workflows/release-pr-gates.yml",
+      "class": "framework",
+      "profile": "core"
+    },
+    {
       "path": ".github/workflows/state-label-exclusivity.yml",
       "class": "framework",
       "profile": "core"
@@ -652,6 +657,10 @@
     },
     {
       "path": "scripts/verify-issue-body.test.mjs",
+      "class": "excluded"
+    },
+    {
+      "path": "scripts/release-pr-gates.test.mjs",
       "class": "excluded"
     },
     {
