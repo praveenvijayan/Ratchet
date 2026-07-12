@@ -18,7 +18,7 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { main } from "./release.mjs";
+import { main, updateVersionFile } from "./release.mjs";
 
 const respond = (data, status = 200) => ({ ok: true, status, json: async () => data, text: async () => JSON.stringify(data) });
 const notFound = () => ({ ok: false, status: 404, json: async () => ({}), text: async () => "Not Found" });
@@ -61,6 +61,7 @@ function mockGitHub({
     "plugin/.claude-plugin/plugin.json": `${JSON.stringify({ name: "ratchet", version: "3.6.0" }, null, 2)}\n`,
     "README.md": "![framework version](https://img.shields.io/badge/framework-v3.6.0-ea8f3c)\n",
     "DOCS.md": "Version 3.6.0 · MIT\n",
+    "index.html": '<p class="eyebrow">v3.6.0</p><code>curl .../Ratchet/v3.6.0/bootstrap.sh --version v3.6.0</code>\n',
   };
   globalThis.fetch = async (url, opts = {}) => {
     const { pathname, searchParams } = new URL(url);
@@ -135,6 +136,10 @@ function assertVersionTree(created, version) {
   assert.equal(JSON.parse(entries.get("plugin/.claude-plugin/plugin.json")).version, version, "plugin manifest carries released version");
   assert.ok(entries.get("README.md").includes(`framework-v${version}`), "README badge carries released version");
   assert.ok(entries.get("DOCS.md").startsWith(`Version ${version}`), "DOCS header carries released version");
+  const html = entries.get("index.html");
+  assert.ok(html, "the static site is part of the bump tree");
+  assert.equal((html.match(/v3\.6\.0/g) || []).length, 0, "no stale version remains in index.html");
+  assert.equal((html.match(new RegExp(`v${version.replace(/\./g, "\\.")}`, "g")) || []).length, 3, "every index.html occurrence carries the released version");
 }
 
 // Capture console.log for message assertions; returns the collected lines.
@@ -459,6 +464,43 @@ try {
   for (let n = 1; n <= 5; n++) {
     const named = (thisTest.match(new RegExp(`// criterion ${n}:`, "g")) || []).length;
     assert.equal(named, 1, `criterion 5: criterion ${n} has exactly one test named after it (found ${named})`);
+  }
+
+  // --- issue #331: the static site (index.html) stays in sync with releases ---
+
+  // #331 criterion 1: the release bump write-back updates every version
+  // occurrence in index.html, alongside the existing four locations.
+  {
+    const site = '<p class="eyebrow">v3.6.0 · MIT</p><code>curl .../Ratchet/v3.6.0/bootstrap.sh -s -- --version v3.6.0</code><pre>bash bootstrap.sh --version v3.6.0</pre>';
+    const bumped = updateVersionFile("index.html", site, "v4.6.0");
+    assert.equal((bumped.match(/v3\.6\.0/g) || []).length, 0, "#331 criterion 1: no stale occurrence survives the write-back");
+    assert.equal((bumped.match(/v4\.6\.0/g) || []).length, 4, "#331 criterion 1: every occurrence is rewritten to the released version");
+  }
+
+  // #331 criterion 3: when index.html carries no recognizable version, the bump
+  // fails with a clear message naming the file and the expected pattern, and
+  // writes nothing partial (updateVersionFile throws before returning any text).
+  {
+    let returned = "SENTINEL";
+    assert.throws(
+      () => { returned = updateVersionFile("index.html", "<main><p>no version here</p></main>", "v4.6.0"); },
+      (e) => e.message.includes("index.html") && /vMAJOR\.MINOR\.PATCH/.test(e.message),
+      "#331 criterion 3: a version-less site fails, naming the file and the expected pattern",
+    );
+    assert.equal(returned, "SENTINEL", "#331 criterion 3: nothing partial is produced when the pattern is absent");
+  }
+
+  // #331 criterion 4: every criterion above has exactly one test named after it,
+  // across both test files that cover this issue (criterion 2 lives in the
+  // version-consistency suite). One `// #331 criterion N:` marker per N is the
+  // machine-checkable form of "one test, named after the criterion".
+  {
+    const vcTest = readFileSync(fileURLToPath(new URL("./version-consistency.test.mjs", import.meta.url)), "utf8");
+    const combined = `${thisTest}\n${vcTest}`;
+    for (let n = 1; n <= 4; n++) {
+      const named = (combined.match(new RegExp(`// #331 criterion ${n}:`, "g")) || []).length;
+      assert.equal(named, 1, `#331 criterion 4: criterion ${n} has exactly one test named after it (found ${named})`);
+    }
   }
 
   console.log("PASS release.test.mjs (61 assertions)");

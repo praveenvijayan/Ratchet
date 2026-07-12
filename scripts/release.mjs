@@ -102,7 +102,7 @@ function bareVersion(version) {
   return `${parts.major}.${parts.minor}.${parts.patch}`;
 }
 
-function updateVersionFile(file, text, version) {
+export function updateVersionFile(file, text, version) {
   const bare = bareVersion(version);
   if (file === ".ratchet-version") return `${bare}\n`;
   if (file === "plugin/.claude-plugin/plugin.json") {
@@ -126,6 +126,18 @@ function updateVersionFile(file, text, version) {
       throw new Error("Cannot update DOCS.md: no Version X.Y.Z header found.");
     }
     return text.replace(/^Version\s+v?\d+\.\d+\.\d+/m, `Version ${bare}`);
+  }
+  if (file === "index.html") {
+    // The static site pins the version in several places (hero eyebrow, install
+    // and bootstrap commands). Guard first so a site missing every recognizable
+    // occurrence aborts the whole bump — never a partial write — then rewrite
+    // every `vMAJOR.MINOR.PATCH` at once so no stale copy is left behind.
+    if (!/v\d+\.\d+\.\d+/.test(text)) {
+      throw new Error(
+        "Cannot update index.html: no vMAJOR.MINOR.PATCH version occurrence found.",
+      );
+    }
+    return text.replace(/v\d+\.\d+\.\d+/g, `v${bare}`);
   }
   throw new Error(`Cannot update unknown version location ${file}.`);
 }
