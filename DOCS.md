@@ -196,6 +196,7 @@ scripts/
   docs-refresh.test.mjs         Regression test for documentation inventory
   gh-api.mjs                    Shared GitHub REST client (ghClient, paginate, resolveAuth)
   gh-api.test.mjs               Regression test for the shared GitHub client
+  gh-api-migration.test.mjs     Guard: sweep/label/conflict scripts use the shared client
   gates-coverage.mjs            Guard: every *.test.mjs runs in a GATES.md row
   gates-coverage.test.mjs       Regression test for the coverage guard
   gates-table.mjs               Shared parser for the GATES.md markdown table

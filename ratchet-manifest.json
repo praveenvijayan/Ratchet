@@ -558,6 +558,10 @@
       "class": "excluded"
     },
     {
+      "path": "scripts/gh-api-migration.test.mjs",
+      "class": "excluded"
+    },
+    {
       "path": "scripts/run-gates.test.mjs",
       "class": "excluded"
     },
