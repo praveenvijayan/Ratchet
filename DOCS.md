@@ -241,6 +241,7 @@ scripts/
   pr-size-check.mjs             Enforce the agent PR size limit in CI
   pr-size-check.test.mjs        Regression test for the size gate
   ratchet-init-skill.test.mjs   Regression test for the init skill contract
+  ratchet-hotfix-skill.test.mjs Regression test for the hotfix/revert fast-lane skill contract
   ratchet-metrics.mjs           Read-only loop health metrics
   ratchet-metrics.test.mjs      Regression test for loop metrics
   ratchet-uninstall.sh          Remove exactly what bootstrap.sh installed, per .ratchet-install.json

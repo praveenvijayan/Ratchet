@@ -281,6 +281,11 @@
       "profile": "core"
     },
     {
+      "path": ".agents/skills/ratchet-hotfix",
+      "class": "framework",
+      "profile": "core"
+    },
+    {
       "path": ".agents/skills/ratchet-plan",
       "class": "framework",
       "profile": "core"
@@ -510,6 +515,10 @@
     },
     {
       "path": "scripts/ratchet-init-skill.test.mjs",
+      "class": "excluded"
+    },
+    {
+      "path": "scripts/ratchet-hotfix-skill.test.mjs",
       "class": "excluded"
     },
     {
