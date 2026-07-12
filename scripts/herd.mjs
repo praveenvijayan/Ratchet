@@ -616,9 +616,67 @@ export function main(argv, { root } = {}) {
   }
 }
 
+// Parse the optional issue-targeting flags for `herd run`. Two equivalent forms
+// combine into one deduplicated set: the comma list `--issues 12,34` (repeatable)
+// and the repeated single `--issue 12 --issue 34`. Targeting is a selection
+// *filter*, never a state bypass — the returned set is later intersected with the
+// state:ready survey (see dispatchOne), so naming an ineligible issue can never
+// dispatch it. This is pure argv parsing with no supervisor dependency, so it
+// lives in the core entrypoint and runs before the herd-profile modules load —
+// a malformed target list exits 2 even on a core-only install.
+//
+// Returns { targets, error }:
+//   - no targeting flag present -> { targets: null }  (dispatch the whole queue)
+//   - all entries valid         -> { targets: [n, …] } (deduplicated; order is
+//                                    irrelevant — pickNext re-orders downstream)
+//   - any non-integer entry     -> { error: "<usage message>", targets: null }
+// The caller turns a non-null error into exit code 2 and spawns nothing.
+export function parseIssueTargets(argv) {
+  const raw = [];
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === "--issues") {
+      for (const part of String(argv[i + 1] ?? "").split(",")) raw.push(part.trim());
+      i++;
+    } else if (argv[i] === "--issue") {
+      raw.push(String(argv[i + 1] ?? "").trim());
+      i++;
+    }
+  }
+  if (raw.length === 0) return { targets: null, error: null };
+  const targets = [];
+  for (const tok of raw) {
+    if (!/^\d+$/.test(tok)) {
+      return {
+        targets: null,
+        error:
+          `herd run: --issue/--issues expects positive integer issue numbers, got "${tok}". ` +
+          `Usage: herd run [--issues 12,34 | --issue 12 --issue 34] [--max N] [--dry-run] [--once]`,
+      };
+    }
+    const n = Number(tok);
+    if (!targets.includes(n)) targets.push(n);
+  }
+  return { targets, error: null };
+}
+
 const isMain =
   process.argv[1] && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1]);
 if (isMain) {
+  const argv = process.argv.slice(2);
+  const cmd = argv[0];
+  // Validate run-mode issue targeting *before* loading the herd-profile modules:
+  // parseIssueTargets is pure core arg parsing, so a malformed --issue/--issues
+  // exits 2 with a usage message even on a core-only install and never reaches
+  // the dispatch import. A valid (or absent) target set flows into the run block.
+  let targets = null;
+  if (cmd === undefined || cmd === "run") {
+    const parsed = parseIssueTargets(argv);
+    if (parsed.error) {
+      console.error(parsed.error);
+      process.exit(2);
+    }
+    targets = parsed.targets;
+  }
   // Guard: the supervisor implementation lives in the `herd` profile
   // (herd-survey.mjs + herd-{dispatch,monitor,verify,review,retention}.mjs).
   // A trimmed `--profile core` install, or an older core-only install, lacks
@@ -647,13 +705,13 @@ if (isMain) {
     }
     throw e;
   }
-  const argv = process.argv.slice(2);
-  const cmd = argv[0];
   if (cmd === undefined || cmd === "run") {
     // Supervisor: validate the config, then poll. Each pass surveys/reconciles
     // (pollOnce) and dispatches at most one worker. `--once` does a single pass;
     // `--dry-run` prints the plan without spawning (and implies a single pass);
-    // `--max <n>` overrides maxWorkers. Never merges, approves, closes, or
+    // `--max <n>` overrides maxWorkers; `--issues 12,34` / repeated `--issue 12`
+    // restrict dispatch to a named set (parsed above, intersected with the ready
+    // survey — a filter, never a bypass). Never merges, approves, closes, or
     // labels anything — it observes, dispatches, and escalates.
     let root, config;
     try {
@@ -750,7 +808,7 @@ if (isMain) {
         o.log(`herd: dispatch survey failed: ${e.message}; skipping dispatch this poll.`);
         return [];
       });
-      await dispatchOne({ ...o, config, ready, dryRun, maxWorkers, claimTimeoutMs: config.claimTimeoutSeconds * 1000 });
+      await dispatchOne({ ...o, config, ready, dryRun, targets, maxWorkers, claimTimeoutMs: config.claimTimeoutSeconds * 1000 });
     };
     runLoop({ gh: ghJson, log: console.log, ...paths, once: argv.includes("--once") || dryRun, pollSeconds: config.pollSeconds, step }).then(
       () => {

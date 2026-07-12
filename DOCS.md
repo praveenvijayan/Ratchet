@@ -821,6 +821,7 @@ gh secret set FACTORY_PAT          # enable workflow chaining
 # Fleet supervisor (optional, ratchet-herd)
 node scripts/herd.mjs init         # write a default .ratchet/herd.json
 node scripts/herd.mjs run          # survey → monitor → verify → review → retention → dispatch, one issue per worker
+node scripts/herd.mjs run --issues 12,34   # scope dispatch to a named set (also: repeated --issue 12 --issue 34)
 ```
 
 ---

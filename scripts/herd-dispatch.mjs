@@ -247,6 +247,11 @@ export async function dispatchOne(opts) {
     log = console.log,
     kill = defaultKill,
     dryRun = false,
+    // Optional issue-targeting filter (parsed by parseIssueTargets in herd.mjs):
+    // null dispatches the whole queue; an array restricts dispatch to those issue
+    // numbers — intersected with the ready survey below, so an issue outside the
+    // ready set is never dispatched even when named.
+    targets = null,
     maxWorkers = config.maxWorkers,
     claimTimeoutMs = (config.claimTimeoutSeconds ?? 300) * 1000,
     claimIntervalMs = 1000,
@@ -258,7 +263,14 @@ export async function dispatchOne(opts) {
   } = opts;
 
   const state = readState(statePath);
-  const issue = pickNext((ready || []).filter((i) => !(String(i.number) in state)));
+  // One worker per issue, ever (skip issues already in the state file); then, if
+  // a target set was given, intersect with it — targeting filters the ready
+  // queue, it never bypasses eligibility, so an issue outside the ready survey
+  // is unreachable even when explicitly named.
+  const untracked = (ready || []).filter((i) => !(String(i.number) in state));
+  const targetSet = targets == null ? null : new Set(targets);
+  const eligible = targetSet ? untracked.filter((i) => targetSet.has(i.number)) : untracked;
+  const issue = pickNext(eligible);
   if (!issue) return { dispatched: null, reason: "no-eligible-issue" };
 
   const cursors = readRouting(routingPath);

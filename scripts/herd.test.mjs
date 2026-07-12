@@ -9,8 +9,10 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
-import { main, loadConfig, normalizeConfig, substitute, resolveAdapter, adapterAvailability, executableOnPath, defaultConfig, headlessFlagWarnings, HEADLESS_PERMISSION_FLAGS, HerdConfigError, DEFAULTS, extractUsage, USAGE_FIELDS, CONFIG_PATH, acquireLock, releaseLock, pidIsAlive, PID_PATH } from "./herd.mjs";
+import { main, loadConfig, normalizeConfig, substitute, resolveAdapter, adapterAvailability, executableOnPath, defaultConfig, headlessFlagWarnings, HEADLESS_PERMISSION_FLAGS, HerdConfigError, DEFAULTS, extractUsage, USAGE_FIELDS, CONFIG_PATH, acquireLock, releaseLock, pidIsAlive, PID_PATH, parseIssueTargets } from "./herd.mjs";
 import { resolveRepoRoot, ratchetPaths, RepoRootError } from "./herd-survey.mjs";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 // Run `fn` with cwd set to a fresh temp dir, then clean up — lets CLI-level
 // tests exercise the cwd-relative default config path without side effects.
@@ -1090,4 +1092,37 @@ withLockDir((pidPath) => {
   }
 }
 
-console.log("PASS herd.test.mjs (45 criteria + issue #163: 4 criteria + issue #174: 3 criteria + issue #358: 5 criteria)");
+// ── issue #350: herd direct-issue targeting — parse --issues (core entrypoint) ──
+
+// Criterion 1: `run --issues 123,134,445` and the repeated form
+// `run --issue 123 --issue 134 --issue 445` parse to the same deduplicated
+// integer target set; a non-integer entry exits 2 with a usage message and
+// spawns nothing.
+{
+  const csv = parseIssueTargets(["run", "--issues", "123,134,445"]);
+  const repeated = parseIssueTargets(["run", "--issue", "123", "--issue", "134", "--issue", "445"]);
+  assert.deepEqual(csv.targets, [123, 134, 445], "comma list parses to the integer set");
+  assert.deepEqual(repeated.targets, csv.targets, "repeated --issue parses to the same set");
+  assert.equal(csv.error, null, "a valid target set carries no error");
+  // No targeting flag -> null (dispatch the whole queue), not an empty set.
+  assert.deepEqual(parseIssueTargets(["run", "--once"]).targets, null, "no flag means no targeting");
+  assert.notEqual(parseIssueTargets(["run", "--issue", "1.5"]).error, null, "a non-integer entry yields an error, not a target");
+  // A non-integer entry is a usage error at the CLI: the `run` subprocess exits
+  // 2 with the usage message on stderr and never reaches the dispatch loop
+  // (the parse runs ahead of the herd-profile import), so nothing is spawned.
+  const herd = fileURLToPath(new URL("./herd.mjs", import.meta.url));
+  const bad = spawnSync(process.execPath, [herd, "run", "--issues", "1,abc"], { encoding: "utf8" });
+  assert.equal(bad.status, 2, "a non-integer target entry exits 2");
+  assert.match(bad.stderr, /positive integer issue numbers/, "the exit-2 message explains the usage");
+  assert.equal(bad.stdout, "", "a rejected target list spawns nothing (no dispatch output)");
+}
+
+// Test note: duplicate issue numbers across both flag forms deduplicate — the
+// same number named twice (or via both forms) collapses to a single entry, so
+// downstream it maps to one worker.
+{
+  const { targets } = parseIssueTargets(["run", "--issues", "12,34,12", "--issue", "34"]);
+  assert.deepEqual(targets, [12, 34], "duplicates across both flag forms collapse to one set");
+}
+
+console.log("PASS herd.test.mjs (45 criteria + issue #163: 4 criteria + issue #174: 3 criteria + issue #358: 5 criteria + issue #350: parse + dedup)");
