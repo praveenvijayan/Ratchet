@@ -127,6 +127,31 @@ Body of 0083.
 - [ ] mixed-case reserved labels are ignored
 `);
 
+// AC5 fixture (#375): a plan file whose slug is already carried by a CLOSED
+// issue (the file-still-live-after-merge path) must not be re-created on sync.
+await writeFile(join(planDir, "0091-closed-live.md"), `---
+title: Slug already carried by a closed issue
+priority: high
+blocked_by: []
+---
+Body of 0091.
+
+## Acceptance criteria
+- [ ] never re-created because a closed issue already carries the slug
+`);
+// AC4 fixture (#375): a slug carried by more than one existing issue must not
+// gain a third — the sync creates nothing for it and warns, naming every dup.
+await writeFile(join(planDir, "0094-dup.md"), `---
+title: Slug carried by two issues already
+priority: high
+blocked_by: []
+---
+Body of 0094.
+
+## Acceptance criteria
+- [ ] no third issue is ever created for this slug
+`);
+
 // --- in-memory GitHub API ----------------------------------------------
 const label = (name) => ({ name });
 const issues = new Map([
@@ -136,8 +161,13 @@ const issues = new Map([
   [12, { number: 12, state: "closed", title: "Archived", labels: [], body: "Old body\n\n<!-- plan-id: 0002-archived-closed -->" }],
   // The editable issue that gains blockers on this sync.
   [68, { number: 68, state: "open", title: "Existing", labels: [label("state:ready"), label("priority:P1")], body: "Old body\n\n<!-- plan-id: 0036-existing -->" }],
+  // AC5 seed (#375): a CLOSED issue already carrying the 0091-closed-live slug.
+  [91, { number: 91, state: "closed", title: "Closed, slug still live", labels: [], body: "Merged body\n\n<!-- plan-id: 0091-closed-live -->" }],
+  // AC4 seed (#375): two OPEN issues both carrying the 0094-dup slug.
+  [92, { number: 92, state: "open", title: "Dup A", labels: [label("state:ready"), label("priority:P1")], body: "Body A\n\n<!-- plan-id: 0094-dup -->" }],
+  [93, { number: 93, state: "open", title: "Dup B", labels: [label("state:ready"), label("priority:P1")], body: "Body B\n\n<!-- plan-id: 0094-dup -->" }],
 ]);
-let nextNumber = 69;
+let nextNumber = 200;
 const respond = (data, status = 200) => ({ ok: true, status, json: async () => data, text: async () => JSON.stringify(data) });
 
 globalThis.fetch = async (url, opts = {}) => {
@@ -385,5 +415,89 @@ try {
 assert.ok(markerCycleExit !== 0, "marker-resolved blocked_by cycle must exit non-zero");
 assert.ok(/cycle/i.test(markerCycleErr), `marker-resolved cycle error must say so loudly, got: ${markerCycleErr}`);
 assert.ok(/0100-live-a/.test(markerCycleErr) && /0099-marker-b/.test(markerCycleErr), `marker-resolved cycle error must name every slug, got: ${markerCycleErr}`);
+
+// #375 AC5: the 0091-closed-live plan is already carried by CLOSED issue #91, so
+// the sync re-creates nothing for that slug — exactly one issue carries it, and
+// it is the pre-existing closed one.
+const closedLive = [...issues.values()].filter((i) => (i.body || "").includes("plan-id: 0091-closed-live"));
+assert.equal(closedLive.length, 1, `a closed issue's slug must suppress re-creation, found ${closedLive.length} issues`);
+assert.equal(closedLive[0].number, 91, "the sole issue for a closed-issue slug must be the pre-existing one, not a new one");
+
+// #375 AC4: the 0094-dup slug is already carried by #92 and #93. The sync must
+// create no third issue and must warn, naming every duplicate issue number.
+const dupIssues = [...issues.values()].filter((i) => (i.body || "").includes("plan-id: 0094-dup"));
+assert.equal(dupIssues.length, 2, `a slug carried by two issues must gain no third, found ${dupIssues.length}`);
+assert.ok(
+  logs.some((l) => l.includes("WARNING") && l.includes("0094-dup") && l.includes("#92") && l.includes("#93")),
+  "a duplicated slug must warn, naming every duplicate issue number",
+);
+
+// #375 AC3: running the sync twice against an unchanged plan tree and issue set
+// creates zero issues on the second run — including for a plan file whose body
+// quotes the marker syntax in prose (the #345/#349/#356 shape). Run in a
+// subprocess so the module body executes once and the exported main() drives the
+// second sync against the same in-memory issue store. Under the old first-match
+// parser the appended real marker was shadowed by the quoted placeholder, so
+// every run created a fresh issue; last-match makes the second run a no-op.
+const ac3Dir = await mkdtemp(join(tmpdir(), "plan-sync-idem-"));
+await writeFile(join(ac3Dir, "0095-quotes-marker.md"), `---
+title: Quotes the marker syntax in prose
+priority: high
+blocked_by: []
+---
+This plan mentions the \`<!-- plan-id: 0000-example-placeholder -->\` marker in prose.
+
+## Acceptance criteria
+- [ ] idempotent across two runs despite quoting the marker syntax
+`);
+const ac3Script = `
+  const issues = [];
+  let nextNumber = 1;
+  const label = (name) => ({ name });
+  const respond = (data, status = 200) => ({ ok: true, status, json: async () => data, text: async () => JSON.stringify(data) });
+  globalThis.fetch = async (url, opts = {}) => {
+    const { pathname, searchParams } = new URL(url);
+    const method = opts.method || "GET";
+    const body = opts.body ? JSON.parse(opts.body) : null;
+    if (method === "GET" && pathname === "/repos/o/r/issues") {
+      return respond(Number(searchParams.get("page")) === 1 ? issues.slice() : []);
+    }
+    if (method === "POST" && pathname === "/repos/o/r/issues") {
+      const issue = { number: nextNumber++, state: "open", title: body.title, body: body.body, labels: (body.labels || []).map(label) };
+      issues.push(issue);
+      return respond(issue, 201);
+    }
+    const patch = pathname.match(/^\\/repos\\/o\\/r\\/issues\\/(\\d+)$/);
+    if (method === "PATCH" && patch) {
+      const issue = issues.find((i) => i.number === Number(patch[1]));
+      Object.assign(issue, { title: body.title, body: body.body, labels: body.labels.map(label) });
+      return respond(issue);
+    }
+    throw new Error("unexpected request: " + method + " " + url);
+  };
+  process.env.GITHUB_TOKEN = "test-token";
+  process.env.GITHUB_REPOSITORY = "o/r";
+  process.env.PLAN_DIR = ${JSON.stringify(ac3Dir)};
+  const mod = await import(${JSON.stringify(new URL("./plan-sync.mjs", import.meta.url).href)});
+  const afterRun1 = issues.length;
+  if (afterRun1 !== 1) { console.error("run 1 must create exactly one issue, got " + afterRun1); process.exit(2); }
+  await mod.main();
+  if (issues.length !== afterRun1) { console.error("run 2 created " + (issues.length - afterRun1) + " issue(s); sync is not idempotent"); process.exit(3); }
+  console.log("AC3-OK");
+`;
+let ac3Exit = 0;
+let ac3Out = "";
+try {
+  ac3Out = execFileSync(process.execPath, ["--input-type=module", "-e", ac3Script], {
+    cwd: ac3Dir,
+    env: { PATH: process.env.PATH },
+    stdio: ["ignore", "pipe", "pipe"],
+  }).toString();
+} catch (e) {
+  ac3Exit = e.status ?? 1;
+  ac3Out = `${e.stdout || ""}${e.stderr || ""}`;
+}
+assert.equal(ac3Exit, 0, `a second sync run must create no issues; got exit ${ac3Exit}: ${ac3Out}`);
+assert.match(ac3Out, /AC3-OK/, "two-run idempotency check must reach its success marker");
 
 console.log("PASS plan-sync.test.mjs");

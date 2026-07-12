@@ -197,9 +197,23 @@ async function main() {
   // removed or skipped plans still resolve.
   const issues = await listAllIssues();
   const bySlug = new Map();
+  const slugToIssueNums = new Map();  // slug -> every issue number carrying it
   for (const issue of issues) {
     const slug = planSlug(issue.body || "");
-    if (slug) bySlug.set(slug, issue);
+    if (!slug) continue;
+    bySlug.set(slug, issue);
+    if (!slugToIssueNums.has(slug)) slugToIssueNums.set(slug, []);
+    slugToIssueNums.get(slug).push(issue.number);
+  }
+  // A slug carried by more than one issue is a duplicate the compiler must not
+  // extend: bySlug.has(slug) already suppresses re-creation in pass 2a, so warn
+  // loudly (naming every duplicate) rather than silently creating an Nth issue
+  // or clobbering one at random. Closing the surplus is a human action.
+  for (const [slug, nums] of slugToIssueNums) {
+    if (nums.length > 1) {
+      const named = nums.map((n) => `#${n}`).join(", ");
+      console.log(`WARNING: slug '${slug}' resolves to ${nums.length} issues (${named}); no new issue will be created for it — close the duplicate(s) so exactly one remains.`);
+    }
   }
   const slugToNumber = new Map();
   for (const [slug, issue] of bySlug) slugToNumber.set(slug, issue.number);
@@ -276,7 +290,10 @@ async function main() {
 }
 
 // Top-level await (not .catch()) so a test that dynamically imports this
-// module resumes only after the sync has fully finished.
+// module resumes only after the sync has fully finished. `main` is also
+// exported so an idempotency test can drive a second sync run against the same
+// in-memory issue store within one process (the module body runs only once).
+export { main };
 try {
   await main();
 } catch (e) {

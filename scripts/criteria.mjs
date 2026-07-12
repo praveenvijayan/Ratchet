@@ -27,12 +27,24 @@ export function hasAcceptanceCriteria(body = "") {
 // whitespace around `plan-id:` and the slug so an unusually-spaced marker still
 // resolves everywhere.
 const PLAN_ID_MARKER_RE = /<!--\s*plan-id:\s*(.+?)\s*-->/;
+// Global variant used to walk every marker occurrence — see planSlug.
+const PLAN_ID_MARKER_RE_G = new RegExp(PLAN_ID_MARKER_RE.source, "g");
 
 // The plan-file slug from the marker, or null when the body has no marker
-// (e.g. a hand-authored issue).
+// (e.g. a hand-authored issue). Resolves the LAST marker occurrence: plan-sync
+// always appends the real marker as the final line of a rendered body, so a
+// plan whose prose quotes the marker syntax earlier (a placeholder, or an
+// example slug) must not shadow its own appended marker. A first-match parser
+// captured the quoted string instead, keyed the dedup map on it, and re-created
+// the issue on every sync run — the #345/#349/#356 triplicate bug (#375).
 export function planSlug(body = "") {
-  const m = PLAN_ID_MARKER_RE.exec(String(body));
-  return m ? m[1] : null;
+  const text = String(body);
+  PLAN_ID_MARKER_RE_G.lastIndex = 0;
+  let last = null;
+  for (let m = PLAN_ID_MARKER_RE_G.exec(text); m; m = PLAN_ID_MARKER_RE_G.exec(text)) {
+    last = m[1];
+  }
+  return last;
 }
 
 // Render the canonical marker for a slug — the exact string plan-sync appends
