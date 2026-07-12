@@ -526,6 +526,10 @@
       "class": "excluded"
     },
     {
+      "path": "scripts/plan-authoring-rules.test.mjs",
+      "class": "excluded"
+    },
+    {
       "path": "scripts/plan-sync-concurrency.test.mjs",
       "class": "excluded"
     },

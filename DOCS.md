@@ -237,6 +237,7 @@ scripts/
   herd-mascots-install.test.mjs  Regression test for mascots/ install manifest delivery
   manifest-check.mjs            Gate: validate ratchet-manifest.json against the repo (no drift in/out)
   manifest-check.test.mjs       Regression test for the install-manifest gate
+  plan-authoring-rules.test.mjs Regression test for the plan ordering/invariant authoring rules
   plan-sync-concurrency.test.mjs Workflow concurrency regression test
   plan-sync.mjs                 Deterministic plan→issue compiler
   plan-sync.test.mjs            Regression test for the compiler
