@@ -1,0 +1,39 @@
+name: release-pr-gates
+
+# Backstops the one PR class pr-gates deliberately ignores: the release
+# version-bump PR. `pr-gates` only runs for `agent/issue-*` heads (it verifies
+# the agent's self-reported gate checklist), so a `release/vX.Y.Z` PR — opened
+# by scripts/release.mjs — merges with zero CI checks. A partial or malformed
+# bump (some version locations updated, others not) would land unverified;
+# PR #384 (v5.0.0) shipped with no checks at all.
+#
+# This workflow closes that gap without touching pr-gates: it runs the shared
+# version-consistency check on `release/*` PRs only, and fails the moment the
+# known version locations disagree — so a drifted bump is caught before merge.
+# It never fires on `agent/issue-*` PRs, so agent gates stay exactly as they
+# are today.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  version-consistency:
+    # Only the release version-bump PR carries the multi-file bump this checks;
+    # every other head (agent/issue-*, plan, etc.) is skipped.
+    if: startsWith(github.head_ref, 'release/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+      # Runs against the PR's own checked-out tree — exactly the version files
+      # the bump edited. Exits non-zero and names each disagreeing location if
+      # any known version string has drifted.
+      - name: Check version consistency
+        run: node scripts/version-consistency.mjs
