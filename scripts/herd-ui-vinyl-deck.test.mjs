@@ -175,12 +175,13 @@ function mockReqRes(pathname) {
   assert.match(PAGE_HTML, /\.mascot-card:hover\s*\{[^}]*transform:translateY\(-4px\)/, "the existing card lift is preserved");
 }
 
-// --- #289 Criterion 6: the deck grid gains the 52px top padding and 72px row
+// --- #289 Criterion 6: the card grid keeps the 52px top padding and 72px row
 // gap so overflowing figures never collide with the section header or the row
-// of cards above. ---
+// of cards above (revised by #319: the grid is the .rows grid inside each
+// lifecycle group — the separate .deck grid is gone). ---
 {
-  assert.match(PAGE_HTML, /\.deck\s*\{[^}]*padding-top:52px/, "the deck grid has 52px top padding for headroom");
-  assert.match(PAGE_HTML, /\.deck\s*\{[^}]*row-gap:72px/, "the deck grid has 72px row gap so rows don't collide");
+  assert.match(PAGE_HTML, /\.rows\s*\{[^}]*padding-top:52px/, "the card grid has 52px top padding for headroom");
+  assert.match(PAGE_HTML, /\.rows\s*\{[^}]*row-gap:72px/, "the card grid has 72px row gap so rows don't collide");
 }
 
 // --- #289 Criterion 7: a missing or failing image (deleted file, bad path,

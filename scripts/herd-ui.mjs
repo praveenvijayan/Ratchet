@@ -1635,7 +1635,6 @@ export const PAGE_HTML = `<!doctype html>
   .vitals .k { font-family:var(--mono); font-size:8.5px; letter-spacing:.18em; text-transform:uppercase; color:var(--ink-soft); }
   .vitals .v { font-family:var(--mono); font-size:14px; font-weight:700; }
   .vitals .v.zero { color:var(--ink-faint); font-weight:400; }
-  /* Empty docking bays — dashed placeholders for the fleet's spare capacity. */
   .gauge.warn { color:var(--warn); }
   .gauge.over { color:var(--terra); font-weight:700; }
   /* Work rows — design .row cards: bordered, offset shadow, dashed telemetry.

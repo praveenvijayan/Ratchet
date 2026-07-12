@@ -45,9 +45,9 @@ const workers = [
   // An adapter with no live worker carries no issue (never a partial "#undefined").
   assert.equal(byName.gemini.activeIssue, null, "an idle adapter carries no issue");
   assert.equal(byName["opencode-glm"].activeIssue, null, "an inactive worker is idle");
-  // The client renders that issue number on the card as "#<issue>" inside the
-  // duty chip, so the worked issue is legible at a glance.
-  assert.ok(PAGE_HTML.includes("dispatched · #' + String(c.activeIssue)"), "the card renders the worked issue number prefixed with #");
+  // The client renders the worked issue as a link in the card's slot position
+  // (#319: the combined card carries issueLink(w) where the bay number was).
+  assert.ok(PAGE_HTML.includes(`'<span class="slot-no">' + issueLink(w)`), "the card renders the worked issue link in the slot position");
   assert.ok(!PAGE_HTML.includes("#undefined"), "no #undefined is ever rendered on a card");
 }
 
@@ -62,14 +62,17 @@ const workers = [
   assert.equal(byName["claude-opus"].activeStatus, "in-review", "the card carries the live worker's current status");
   // An adapter with no live worker has no status to mirror.
   assert.equal(byName.gemini.activeStatus, null, "an idle adapter carries no status");
-  // The client renders that status in a chip styled via the same statusClass the
-  // worker row uses, so the card's status visually matches the row's.
-  assert.ok(PAGE_HTML.includes("statusClass(c.activeStatus)"), "the card applies the worker-row statusClass to the live status");
-  assert.ok(PAGE_HTML.includes("esc(c.activeStatus)"), "the card renders the live status text");
+  // The client renders the worker's status in the shared chip (#319: the
+  // combined card IS the worker row, so one statusChip serves both shapes),
+  // mapped to the GitHub state:* vocabulary with the raw status in the title.
+  assert.ok(PAGE_HTML.includes("statusClass(w.status)"), "the card applies the worker-row statusClass to the status");
+  assert.ok(PAGE_HTML.includes("esc(statusLabel(w.status))"), "the card renders the status mapped to the GitHub label vocabulary");
+  assert.ok(PAGE_HTML.includes(`title="' + esc(w.status)`), "the raw status is preserved in the chip's title attribute");
 }
 
-// --- #307 criterion 3: a card whose agent has no active issue shows an
-// idle/standing-by state rather than a blank value or "#undefined". ---
+// --- #307 criterion 3: an agent with no active issue renders no partial card
+// (revised by #319: idle adapters show in the summary-strip roster, not as
+// standing-by cards) — never a blank value or "#undefined". ---
 {
   // No live workers at all: every adapter is idle — activeIssue and activeStatus
   // are both null, never undefined or a partial "#undefined" string.
@@ -78,8 +81,10 @@ const workers = [
     assert.equal(c.activeIssue, null, `${c.name} with no live worker has no active issue`);
     assert.equal(c.activeStatus, null, `${c.name} with no live worker has no active status`);
   }
-  // The client renders "standing by" for the idle branch, never a blank.
-  assert.ok(PAGE_HTML.includes('class="duty idle"><span class="dot"></span>standing by'), "an idle card renders the standing-by state");
+  // The standing-by card is gone; the configured roster renders in the summary
+  // strip instead, so an idle adapter is visible without a phantom card.
+  assert.ok(!PAGE_HTML.includes("standing by"), "no standing-by cards render");
+  assert.ok(PAGE_HTML.includes('class="roster-agent'), "idle adapters appear in the summary-strip roster instead");
   assert.ok(!PAGE_HTML.includes("#undefined"), "no #undefined is ever rendered on a card");
   // A live worker that omits its status field still cards on its issue, and its
   // status reads null (omitted chip), never the literal string "undefined".

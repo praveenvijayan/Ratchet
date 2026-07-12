@@ -1,14 +1,18 @@
 #!/usr/bin/env node
 // herd-ui-mascot-deck.test.mjs — the acceptance criteria of issue #276 are the
-// test plan: exactly one test per criterion of the Active Agents mascot deck,
-// driven through herd-ui.mjs's public interface (the pure `buildDeck` projection
-// and the server-rendered `PAGE_HTML`). Offline, zero deps. Run:
+// test plan: exactly one test per criterion of the mascot cards, driven through
+// herd-ui.mjs's public interface (the pure `buildDeck` projection and the
+// server-rendered `PAGE_HTML`). #319 merged the mascot cards into the worker
+// cards (one combined character card per live worker, rendered inside the
+// lifecycle groups) and deleted the bay grid and its DECK_CAPACITY, so the
+// bay/duty-chip criteria track the revised design. Offline, zero deps. Run:
 //   node scripts/herd-ui-mascot-deck.test.mjs
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-import { buildDeck, adapterFamily, DECK_CAPACITY, PAGE_HTML } from "./herd-ui.mjs";
+import * as ui from "./herd-ui.mjs";
+import { buildDeck, adapterFamily, PAGE_HTML } from "./herd-ui.mjs";
 
 // A config with three adapters across two families, one with its own avatar and
 // one that has never dispatched — enough to exercise every card field.
@@ -28,31 +32,33 @@ const workers = [
   { adapter: "claude-opus", claimActive: false, issue: 5 },
 ];
 
-// --- #276 criterion 1: Active Agents section renders one mascot card per
-// configured adapter in an auto-fill grid (minmax(206px, 1fr)) that reflows from
-// 1 to 10 adapters without layout changes. ---
+// --- #276 criterion 1: the roster projection carries one entry per configured
+// adapter, and the combined cards render in an auto-fill grid that reflows from
+// 1 to 10 without layout changes (revised by #319: the grid is the .rows grid
+// inside each lifecycle group, minmax(250px, 1fr)). ---
 {
-  // One card per configured adapter, in config order, regardless of dispatch data.
+  // One entry per configured adapter, in config order, regardless of dispatch data.
   const deck = buildDeck({ config, adapters, workers });
-  assert.equal(deck.length, 3, "one card per configured adapter");
-  assert.deepEqual(deck.map((c) => c.name), ["claude-opus", "codex", "opencode-glm"], "cards follow config order");
+  assert.equal(deck.length, 3, "one roster entry per configured adapter");
+  assert.deepEqual(deck.map((c) => c.name), ["claude-opus", "codex", "opencode-glm"], "entries follow config order");
 
   // The shape is identical whether there is 1 adapter or the full 10 — the grid,
   // not the card count, does the reflowing.
   const mk = (n) => ({ adapters: Object.fromEntries(Array.from({ length: n }, (_, i) => [`a${i}`, { launch: ["x"] }])) });
   const one = buildDeck({ config: mk(1) });
   const ten = buildDeck({ config: mk(10) });
-  assert.equal(one.length, 1, "a single adapter yields a single card");
-  assert.equal(ten.length, 10, "ten adapters yield ten cards");
-  assert.deepEqual(Object.keys(one[0]).sort(), Object.keys(ten[0]).sort(), "card shape is identical at 1 and 10 adapters");
+  assert.equal(one.length, 1, "a single adapter yields a single entry");
+  assert.equal(ten.length, 10, "ten adapters yield ten entries");
+  assert.deepEqual(Object.keys(one[0]).sort(), Object.keys(ten[0]).sort(), "entry shape is identical at 1 and 10 adapters");
 
   // The grid uses the design's auto-fill track so reflow needs no layout change.
-  assert.ok(PAGE_HTML.includes("grid-template-columns:repeat(auto-fill, minmax(206px, 1fr))"), "deck grid is an auto-fill minmax(206px, 1fr) track");
+  assert.ok(PAGE_HTML.includes("grid-template-columns:repeat(auto-fill, minmax(250px, 1fr))"), "the card grid is an auto-fill minmax(250px, 1fr) track");
 }
 
-// --- #276 criterion 2: each mascot card shows the adapter family label, its bay
-// number, the mascot image, the adapter name, a duty chip, and a three-cell
-// vitals strip (dispatched / failed / succeeded counts). ---
+// --- #276 criterion 2: each mascot card shows the adapter family label, the
+// worked issue link (revised by #319: the slot carries the issue, not a bay
+// number), the mascot image, the adapter name, a status chip, and a three-cell
+// vitals strip (dispatched / failed / launched counts). ---
 {
   const deck = buildDeck({ config, adapters, workers });
   const opus = deck[0];
@@ -60,19 +66,20 @@ const workers = [
   assert.equal(opus.name, "claude-opus", "card carries the adapter name");
   assert.equal(opus.dispatches, 2, "vitals carry the dispatched count");
   assert.equal(opus.failures, 1, "vitals carry the failed count");
-  assert.equal(opus.successes, 1, "vitals carry the succeeded count");
+  assert.equal(opus.successes, 1, "vitals carry the launched count");
   assert.equal(adapterFamily("codex"), "codex", "a family-less name is its own family");
 
-  // The client renders each of the six card parts. Bay number is derived from the
-  // card's position (i + 1), the vitals strip has three labelled cells.
-  for (const marker of ['class="family"', 'class="slot-no">bay ', 'class="mascot"><img', 'class="name"', 'class="duty', 'class="vitals"', 'vital("Disp.", c.dispatches)', 'vital("Fail", c.failures)', 'vital("Launched", c.successes)']) {
+  // The client renders each card part in the combined character card (rowHtml's
+  // rostered-adapter branch); the vitals strip has three labelled cells.
+  for (const marker of ['class="family"', `'<span class="slot-no">' + issueLink(w)`, 'class="mascot"><img', 'class="name"', 'class="card-chips"', 'class="vitals"', 'vital("Disp.", d.dispatches)', 'vital("Fail", d.failures)', 'vital("Launched", d.successes)']) {
     assert.ok(PAGE_HTML.includes(marker), `card renders ${marker}`);
   }
 }
 
-// --- #276 criterion 3: duty chip shows active styling with "dispatched · #N"
-// (the claimed issue number) when the adapter has a live worker, and idle styling
-// with "standing by" otherwise. ---
+// --- #276 criterion 3: the projection marks which adapter has a live worker,
+// and the combined card wears the worker's own status chip (revised by #319:
+// the duty chip is gone — the card lives inside the worker's lifecycle group,
+// so liveness reads from the group and the chip shows the worker status). ---
 {
   const deck = buildDeck({ config, adapters, workers });
   const byName = Object.fromEntries(deck.map((c) => [c.name, c]));
@@ -80,9 +87,9 @@ const workers = [
   assert.equal(byName["claude-opus"].activeIssue, null, "an adapter whose worker is not live is idle");
   assert.equal(byName["opencode-glm"].activeIssue, null, "an adapter with no worker is idle");
 
-  // The client turns activeIssue into the active/idle chip variants.
-  assert.ok(PAGE_HTML.includes('class="duty on"><span class="dot"></span>dispatched · #') , "a live adapter renders the active duty chip with its issue number");
-  assert.ok(PAGE_HTML.includes('class="duty idle"><span class="dot"></span>standing by'), "an idle adapter renders the standing-by chip");
+  // The duty chip is gone; the card's chip row carries the worker status chip.
+  assert.ok(!PAGE_HTML.includes('class="duty'), "the duty chip no longer renders");
+  assert.ok(PAGE_HTML.includes(`'<div class="card-chips">' + statusChip`), "the card's chip row carries the worker's status chip");
 }
 
 // --- #276 criterion 4: vitals render zero counts in the faint zero treatment
@@ -101,19 +108,15 @@ const workers = [
   assert.ok(PAGE_HTML.includes(".vitals .v.zero {"), "the faint zero treatment is defined in CSS");
 }
 
-// --- #276 criterion 5: bays beyond the configured adapters render as dashed
-// empty-bay placeholders with bay number and "Bay open" label, up to the 10-bay
-// capacity. ---
+// --- #276 criterion 5: (revised by #319 — the decorative bays are deleted)
+// no "Bay open" placeholders and no DECK_CAPACITY: the header shows real
+// numbers only, and the hardcoded 10-bay capacity that contradicted
+// config.maxWorkers is gone from the module's public interface. ---
 {
-  assert.equal(DECK_CAPACITY, 10, "the deck capacity is 10 bays");
-  // The client fills bays from live.length + 1 up to the capacity, so L live
-  // workers leave (10 - L) open bays; a full 10 live workers leave none. (Since
-  // #300 the deck cards the live fleet, not the configured roster, so bays fill
-  // from the live count — see herd-ui-mascot-deck-live.test.mjs.)
-  assert.ok(PAGE_HTML.includes("for (let n = live.length + 1; n <= 10; n++)"), "empty bays fill the remaining capacity up to 10");
-  assert.ok(PAGE_HTML.includes('class="bay"><span class="ring">'), "an empty bay renders its bay number in a ring");
-  assert.ok(PAGE_HTML.includes('class="k">Bay open</span>'), "an empty bay is labelled Bay open");
-  assert.ok(PAGE_HTML.includes(".bay { border:1.5px dashed var(--ink-faint)"), "empty bays are dashed placeholders");
+  assert.ok(!("DECK_CAPACITY" in ui), "DECK_CAPACITY is no longer exported");
+  assert.ok(!PAGE_HTML.includes("Bay open"), "no decorative Bay open placeholders render");
+  assert.ok(!PAGE_HTML.includes('class="bay"'), "no empty-bay markup remains");
+  assert.ok(PAGE_HTML.includes('"max " + snapshot.maxWorkers + " live'), "the header note shows the real dispatch cap from config.maxWorkers");
 }
 
 // --- #276 criterion 6: when an adapter's own avatar image fails to load, the
@@ -135,13 +138,14 @@ const workers = [
   assert.ok(PAGE_HTML.includes('onerror="avatarFallback(this)"'), "a failed mascot load falls back via avatarFallback");
 }
 
-// --- #276 criterion 7: section heading shows the live adapter tally and the note
-// "10 bays · new agents dock automatically". ---
+// --- #276 criterion 7: section heading shows the live worker tally and the
+// docking note (revised by #319: headed "Live Workers", with the real
+// "max <maxWorkers> live" cap instead of the decorative bay count). ---
 {
-  assert.ok(PAGE_HTML.includes('<span class="tally" id="decktally">'), "the heading has a live adapter tally element");
+  assert.ok(PAGE_HTML.includes('<span class="tally" id="decktally">'), "the heading has a live worker tally element");
   assert.ok(PAGE_HTML.includes("cards.filter((c) => c.activeIssue != null)"), "the tally counts only adapters with a live worker");
-  assert.ok(PAGE_HTML.includes("10 bays · new agents dock automatically"), "the heading carries the capacity note");
-  assert.ok(PAGE_HTML.includes(">Active Agents<"), "the section is headed Active Agents");
+  assert.ok(PAGE_HTML.includes("new agents dock automatically"), "the heading carries the docking note");
+  assert.ok(PAGE_HTML.includes(">Live Workers<"), "the section is headed Live Workers");
 }
 
 // --- #276: every criterion above has exactly one test named after it. ---

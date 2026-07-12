@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 // herd-ui-dashboard-columns.test.mjs — the acceptance criteria of issue #316 are
 // the test plan: exactly one test per criterion of the flipped dashboard layout
-// (active agents / workers / logs in the left column, errors & escalations in
-// the right column, capped at 100vh with each column scrolling its own content).
-// Driven through herd-ui.mjs's public interface — the exported PAGE_HTML string
-// (markup + inline stylesheet). Offline, zero deps. Run:
+// (workers / logs in the left column, errors & escalations in the right column).
+// #319 revised the vertical behaviour: the 100vh cap is gone — the desktop page
+// scrolls as one document and only the errors panel scrolls internally — and
+// the log console became a modal <dialog>; criteria 2 and 3 track the revised
+// design. Driven through herd-ui.mjs's public interface — the exported
+// PAGE_HTML string (markup + inline stylesheet). Offline, zero deps. Run:
 //   node scripts/herd-ui-dashboard-columns.test.mjs
 
 import assert from "node:assert/strict";
@@ -30,32 +32,31 @@ import { PAGE_HTML } from "./herd-ui.mjs";
   );
 }
 
-// --- #316 criterion 2: the workers pane and the log console render in the left
-// column beneath the active agents deck, inside the same #deckwrap container,
-// so agents, workers, and logs form one left-side column. Source order inside
-// #deckwrap is deck, then #workers, then #logpane — all before #errpanel. ---
+// --- #316 criterion 2: the workers pane renders in the left column inside the
+// #deckwrap container, so agents and workers form one left-side column.
+// (Revised by #319: the separate #deck bay grid is gone — the combined
+// character cards render in the worker groups — and #logpane is a modal
+// <dialog> hosted inside #deckwrap rather than an inline pane beneath it.) ---
 {
   assert.match(
     PAGE_HTML,
-    /id="deckwrap"[\s\S]*id="deck"[\s\S]*id="workers"[\s\S]*id="logpane"[\s\S]*<\/section>\s*<aside class="errpanel"/,
-    "#deck, #workers, and #logpane all render inside #deckwrap (deck first, then workers, then logs) before the errors panel",
+    /id="deckwrap"[\s\S]*id="workers"[\s\S]*id="logpane"[\s\S]*<\/section>\s*<aside class="errpanel"/,
+    "#workers and the #logpane dialog render inside #deckwrap before the errors panel",
   );
+  assert.match(PAGE_HTML, /<dialog class="logpane" id="logpane">/, "the log console is a modal <dialog>, not an inline pane");
 }
 
-// --- #316 criterion 3: the page layout is capped at 100vh — the header/top
-// strip stays visible and each column scrolls its own overflowing content
-// instead of the whole page growing past the viewport. On a desktop-width
-// viewport the body is a fixed-height flex column that hides its own overflow,
-// the top region flexes to fill the remaining height, and each column
-// (#deckwrap, #errpanel) scrolls internally. ---
+// --- #316 criterion 3: (revised by #319 — supersedes the 100vh cap) on a
+// desktop-width viewport the page scrolls as one document: the desktop media
+// query applies no overflow:hidden viewport cap to body or main, and only the
+// errors panel keeps an internal scroll region. ---
 {
   const desktop = /@media \(min-width:\s*1181px\)\s*\{([\s\S]*?)\n  \}/.exec(PAGE_HTML);
-  assert.ok(desktop, "a desktop-width media query caps the layout height");
+  assert.ok(desktop, "the desktop-width media query is present");
   const cap = desktop[1];
-  assert.match(cap, /body\s*\{[^}]*overflow:\s*hidden[^}]*display:\s*flex[^}]*flex-direction:\s*column/i, "the body is a fixed flex column that hides its own overflow so the page cannot grow past the viewport");
-  assert.match(cap, /main\s*\{[^}]*min-height:\s*0[^}]*overflow:\s*hidden/i, "main fills the space below the header and clips its own overflow");
-  assert.match(cap, /\.topregion\s*\{[^}]*flex:\s*1[^}]*min-height:\s*0/i, "the top region flexes to fill the remaining height");
-  assert.match(cap, /\.deckwrap,\s*\.errpanel\s*\{[^}]*overflow-y:\s*auto/i, "each column scrolls its own overflowing content");
+  assert.doesNotMatch(cap, /overflow:\s*hidden/i, "the desktop query never hides overflow — the page scrolls as one document");
+  assert.doesNotMatch(cap, /html,\s*body\s*\{[^}]*height:\s*100%/i, "the desktop query no longer pins the page to the viewport height");
+  assert.match(cap, /\.errpanel\s*\{[^}]*overflow-y:\s*scroll/i, "only the errors panel keeps its own scrollable region");
 }
 
 // --- #316 criterion 4: on a narrow viewport the columns stack vertically

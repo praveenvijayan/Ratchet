@@ -11,7 +11,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-import { buildDeck, DECK_CAPACITY, PAGE_HTML } from "./herd-ui.mjs";
+import { buildDeck, PAGE_HTML } from "./herd-ui.mjs";
 
 // The render draws a mascot card only for deck entries with a live worker — the
 // same filter renderDeck applies. This mirrors the client's card set so the
@@ -57,25 +57,26 @@ const workers = [
   for (const idle of ["claude-sonnet", "codex-mini", "opencode-glm", "gemini"]) {
     assert.ok(!cards.some((c) => c.name === idle), `${idle} has no live worker, so renders no card`);
   }
-  // The client filters the roster to the live subset and maps only that to cards.
+  // The client derives the live subset for the header tally, and the combined
+  // card renders per worker whose adapter is on the roster (#319: the card
+  // lives in the lifecycle groups via rowHtml, not a separate deck grid).
   assert.ok(PAGE_HTML.includes("const live = cards.filter((c) => c.activeIssue != null)"), "renderDeck derives the live subset from the roster");
-  assert.ok(PAGE_HTML.includes("let html = live.map("), "renderDeck renders a card only for each live entry, not each configured adapter");
+  assert.ok(PAGE_HTML.includes("(snapshot.deck || []).find((x) => x.name === w.adapter)"), "a card renders per worker with a rostered adapter, not per configured adapter");
 }
 
-// --- #300 criterion 2: with zero live workers the deck renders zero mascot cards
-// and all bays as dashed "Bay open" placeholders — never a broken or empty
-// section. ---
+// --- #300 criterion 2: with zero live workers the deck renders zero mascot
+// cards and the friendly empty state — never a broken or empty section
+// (revised by #319: the decorative "Bay open" placeholders are gone; the
+// #deckempty block carries the message instead). ---
 {
   const deck = buildDeck({ config, adapters, workers: [] });
   assert.equal(liveCards(deck).length, 0, "zero live workers → zero mascot cards");
-  // Bays fill from the live count, so zero live workers leaves every bay open.
-  assert.ok(PAGE_HTML.includes("for (let n = live.length + 1; n <= " + DECK_CAPACITY + "; n++)"), "open bays fill from the live count up to capacity");
-  assert.ok(PAGE_HTML.includes('class="k">Bay open</span>'), "an open bay is labelled Bay open");
-  assert.ok(PAGE_HTML.includes(".bay { border:1.5px dashed var(--ink-faint)"), "open bays are dashed placeholders");
-  // The section hides only when nothing is configured — not merely when nothing
-  // is live — so a configured-but-idle fleet still renders (all bays open),
-  // never a broken or blank section.
-  assert.ok(PAGE_HTML.includes("if (!cards.length) { wrap.hidden = true"), "the deck hides only when no adapter is configured, so an idle fleet still renders");
+  // The section always shows once a snapshot arrives, and the empty-state
+  // block appears exactly when nothing is live.
+  assert.ok(PAGE_HTML.includes("wrap.hidden = false"), "the section always shows once a snapshot arrives");
+  assert.ok(PAGE_HTML.includes("emptyEl.hidden = live.length > 0"), "the empty state shows exactly when nothing is live");
+  assert.ok(PAGE_HTML.includes('id="deckempty"'), "the friendly empty-state block exists");
+  assert.ok(!PAGE_HTML.includes("Bay open"), "no decorative Bay open placeholders remain");
 }
 
 // --- #300 criterion 3: a card appears on the first dashboard refresh after an
@@ -105,26 +106,24 @@ const workers = [
   const deck = buildDeck({ config, adapters, workers });
   const cards = liveCards(deck);
   assert.equal(cards.length, 2, "two mascot cards are rendered for this snapshot");
-  // The tally is set from the same live subset the cards are mapped from, so it
-  // can never disagree with the number of cards on screen.
-  assert.ok(PAGE_HTML.includes("tallyEl.textContent = String(live.length)"), "the tally is the count of live cards");
-  assert.ok(PAGE_HTML.includes("let html = live.map("), "the cards are mapped from the same live subset the tally counts");
+  // The tally is set from the live subset of the same roster the combined
+  // cards consult, so it counts exactly the workers that render cards.
+  assert.ok(PAGE_HTML.includes("tallyEl.textContent = String(live.length)"), "the tally is the count of live entries");
+  assert.ok(PAGE_HTML.includes("const live = cards.filter((c) => c.activeIssue != null)"), "the tally counts the live subset of the roster");
 }
 
-// --- #300 criterion 5: the roster count (configured adapters out of bay
-// capacity, e.g. 6/10) remains visible in the deck header so fleet composition
-// is not lost. ---
+// --- #300 criterion 5: the configured-adapter count remains visible in the
+// deck header so fleet composition is not lost (revised by #319: it reads
+// "N agents" — the decorative bay capacity is gone). ---
 {
   // buildDeck's projection carries every configured adapter regardless of
   // liveness — it is the roster source, so its length is the configured count.
   const deck = buildDeck({ config, adapters, workers });
   assert.equal(deck.length, 6, "the roster projection counts all six configured adapters");
-  assert.equal(DECK_CAPACITY, 10, "the bay capacity is 10");
-  // The header renders configured-count / capacity (e.g. 6/10) into a stable
-  // roster element, independent of how many workers are live.
+  // The header renders the configured count into a stable roster element,
+  // independent of how many workers are live.
   assert.ok(PAGE_HTML.includes('id="deckroster"'), "the header has a stable roster element");
-  assert.ok(PAGE_HTML.includes('rosterEl.textContent = String(cards.length) + "/' + DECK_CAPACITY + '"'), "roster reads configured count over capacity");
-  assert.ok(PAGE_HTML.includes("String(cards.length)"), "the roster count is the configured (roster) adapter count, not the live count");
+  assert.ok(PAGE_HTML.includes('rosterEl.textContent = String(cards.length) + " agents"'), "the roster reads the configured count as 'N agents'");
 }
 
 // --- #300 criterion 6: an adapter entry with missing or malformed worker data is
