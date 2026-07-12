@@ -2,7 +2,7 @@
 title: Add deterministic handoff script scripts/ratchet-submit.mjs
 priority: medium
 labels: [scripts, agents]
-blocked_by: []
+blocked_by: [0150-gh-api-shared-client]
 ---
 
 PR handoff bundles the transitions most often fumbled from prose: verifying
@@ -19,6 +19,7 @@ preflight; the PR summary itself stays model-authored via `--body-file` (see
 - [ ] On success the script pushes the branch, creates the PR when none exists or updates the existing one (never opens a second), sets `state:in-review`, and removes `state:in-progress`
 - [ ] Re-running after success is idempotent: exit 0, still exactly one PR for the branch
 - [ ] Missing or invalid arguments exit 2 with a usage message; every outcome prints exactly one line of JSON to stdout with a stable `result` field
+- [ ] GitHub access goes through `scripts/gh-api.mjs` (`resolveAuth`/`ghClient`); the script defines no private fetch client or token resolution
 - [ ] Every criterion above has exactly one test named after it
 
 ## Test notes

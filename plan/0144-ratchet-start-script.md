@@ -2,7 +2,7 @@
 title: Add deterministic claim script scripts/ratchet-start.mjs
 priority: medium
 labels: [scripts, agents]
-blocked_by: []
+blocked_by: [0150-gh-api-shared-client]
 ---
 
 The claim sequence (server-side ref CAS, worktree attach, owner marker, label
@@ -19,6 +19,7 @@ to a single command (see 0143-slim-agent-manual).
 - [ ] The shared clone's checked-out branch is never changed; all attachment happens via the worktree
 - [ ] Missing or invalid arguments exit 2 with a usage message and no mutation
 - [ ] Every outcome (success, foreign, unsafe, usage error, API failure) prints exactly one line of JSON to stdout with a stable `result` field and never a raw stack trace
+- [ ] GitHub access goes through `scripts/gh-api.mjs` (`resolveAuth`/`ghClient`); the script defines no private fetch client or token resolution
 - [ ] Every criterion above has exactly one test named after it
 
 ## Test notes
