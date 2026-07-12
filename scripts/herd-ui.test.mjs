@@ -1391,8 +1391,8 @@ await inTempDir(async (dir) => {
 {
   assert.match(
     PAGE_HTML,
-    /<div class="brand">\s*<h1>Herd Dashboard<\/h1>/i,
-    "the brand block pairs the serif title with the Santorini ordinal",
+    /<div class="brand">\s*<h1>Ratchet<\/h1>\s*<p class="subhead">Herd Dashboard<\/p>/i,
+    "the brand block pairs the serif product title with the dashboard subheading",
   );
   assert.match(PAGE_HTML, /\.brand h1\s*\{[^}]*font-family:\s*var\(--serif\)/i, "the title is set in the display serif");
   assert.match(PAGE_HTML, /header \.heartbeat\s*\{[^}]*margin-left:\s*auto/i, "the heartbeat is pushed to the right of the header");
@@ -1658,14 +1658,15 @@ await inTempDir(async (dir) => {
   assert.match(PAGE_HTML, /data-default="' \+ esc\(c\.defaultAvatar\)/, "the deck card carries the bundled default the fallback swaps to");
 }
 
-// --- #304 Criterion 1: the header brand renders the dashboard name in the h1,
-// not uppercased by CSS. (The "Name updated" change on main set the visible
-// header to "Herd Dashboard"; this criterion tracks that intended name.) -----
+// --- #304 Criterion 1: the header brand renders the product name in the h1,
+// not uppercased by CSS. (#333 split the single "Herd Dashboard" line into a
+// "Ratchet" h1 title with a "Herd Dashboard" subheading; the h1 now carries the
+// product name and is still not uppercased.) -----
 {
   assert.match(
     PAGE_HTML,
-    /<div class="brand">\s*<h1>Herd Dashboard<\/h1>/,
-    "the header brand renders \"Herd Dashboard\" inside the h1",
+    /<div class="brand">\s*<h1>Ratchet<\/h1>/,
+    "the header brand renders \"Ratchet\" inside the h1",
   );
   // The .brand h1 rule must not uppercase the text (the old treatment did).
   assert.doesNotMatch(
@@ -1708,6 +1709,55 @@ await inTempDir(async (dir) => {
   assert.equal(markers.length, unique.size, "each #304 criterion is tested exactly once (no duplicate markers)");
   assert.equal(markers.length, CRITERIA_COUNT, `one test per #304 acceptance criterion (${CRITERIA_COUNT})`);
   for (let n = 1; n <= CRITERIA_COUNT; n++) assert.ok(unique.has(n), `#304 criterion ${n} has a test`);
+}
+
+// --- #333 Criterion 1: the header renders "Ratchet" as the main title element
+// (the brand h1). ------------------------------------------------------------
+{
+  assert.match(
+    PAGE_HTML,
+    /<div class="brand">\s*<h1>Ratchet<\/h1>/,
+    "the header's main title element (.brand h1) reads \"Ratchet\"",
+  );
+}
+
+// --- #333 Criterion 2: "Herd Dashboard" renders as a distinct subheading
+// element that is visually subordinate to the title — a separate node after the
+// h1, set smaller and in the soft ink so it does not compete with "Ratchet". --
+{
+  // Distinct element, sitting under the title inside the brand block.
+  assert.match(
+    PAGE_HTML,
+    /<h1>Ratchet<\/h1>\s*<p class="subhead">Herd Dashboard<\/p>/,
+    "\"Herd Dashboard\" is a distinct subheading element beneath the title",
+  );
+  // Subordinate: smaller than the 30px h1 and rendered in the muted ink.
+  const subheadRule = PAGE_HTML.match(/\.brand \.subhead\s*\{([^}]*)\}/i);
+  assert.ok(subheadRule, "the .brand .subhead rule exists");
+  const size = Number((subheadRule[1].match(/font-size:\s*(\d+)px/i) || [])[1]);
+  assert.ok(size > 0 && size < 30, `the subheading (${size}px) is smaller than the 30px title`);
+  assert.match(subheadRule[1], /color:\s*var\(--ink-soft\)/i, "the subheading uses the muted ink colour");
+}
+
+// --- #333 Criterion 3: the browser tab `<title>` still names both the product
+// and the dashboard. ---------------------------------------------------------
+{
+  const title = (PAGE_HTML.match(/<title>([^<]*)<\/title>/i) || [])[1] || "";
+  assert.match(title, /Ratchet/, "the tab title names the product (Ratchet)");
+  assert.match(title, /dashboard/i, "the tab title names the dashboard");
+}
+
+// --- #333 Criterion 4: every criterion above has exactly one test named after
+// it. Counts this file's own `#333 Criterion N` markers and proves there is
+// exactly one per criterion, 1..4 — it never reads the plan file at runtime. --
+{
+  const CRITERIA_COUNT = 4;
+  const selfText = readFileSync(fileURLToPath(import.meta.url), "utf8");
+  const markers = [...selfText.matchAll(/^\/\/ --- #333 Criterion (\d+):/gim)].map((m) => Number(m[1]));
+  const unique = new Set(markers);
+  assert.equal(markers.length, unique.size, "each #333 criterion is tested exactly once (no duplicate markers)");
+  assert.equal(markers.length, CRITERIA_COUNT, `one test per #333 acceptance criterion (${CRITERIA_COUNT})`);
+  for (let n = 1; n <= CRITERIA_COUNT; n++) assert.ok(unique.has(n), `#333 criterion ${n} has a test`);
 }
 
 console.log("PASS herd-ui.test.mjs");
