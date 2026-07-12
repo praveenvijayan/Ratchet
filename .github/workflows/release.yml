@@ -56,6 +56,23 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           RELEASE_BUMP: ${{ inputs.bump }}
+      # Prove the documented install path works against the tag we just cut:
+      # fetch bootstrap.sh from the new tag over HTTPS (the exact URL the README
+      # tells users to run) and dry-run it. `set -euo pipefail` + `curl -f` mean
+      # a 404 on the ref or any bootstrap failure fails this job loudly, so a
+      # broken install can never pass silently. Dry-run writes nothing.
+      - name: Smoke-test the published install path
+        if: ${{ steps.publish.outputs.released == 'true' }}
+        env:
+          RELEASE_TAG: ${{ steps.publish.outputs.version }}
+          INSTALL_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          url="https://raw.githubusercontent.com/${INSTALL_REPO}/${RELEASE_TAG}/scripts/bootstrap.sh"
+          echo "Smoke-testing install from ${url}"
+          curl -fsSL "$url" -o /tmp/ratchet-bootstrap.sh
+          bash /tmp/ratchet-bootstrap.sh --version "${RELEASE_TAG}" --dry-run
+          echo "Install smoke test passed for ${RELEASE_TAG}."
       - name: Deploy
         if: ${{ vars.RATCHET_DEPLOY == 'true' && steps.publish.outputs.released == 'true' }}
         run: |
@@ -68,3 +85,20 @@ jobs:
           RATCHET_DEPLOY_COMMAND: ${{ vars.RATCHET_DEPLOY_COMMAND }}
           RELEASE_VERSION: ${{ steps.publish.outputs.version }}
           RELEASE_URL: ${{ steps.publish.outputs.release_url }}
+
+  # When RATCHET_RELEASE is not "true" the release job's `if` skips it. A skipped
+  # job leaves the run silent about why nothing shipped, so this companion job
+  # runs in exactly that case and reports the reason and the fix — the dispatch
+  # succeeds visibly instead of no-opping without explanation.
+  report-skip:
+    if: ${{ vars.RATCHET_RELEASE != 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Explain why the release was skipped
+        env:
+          RATCHET_RELEASE: ${{ vars.RATCHET_RELEASE }}
+        run: |
+          echo "::notice title=Release skipped::RATCHET_RELEASE is '${RATCHET_RELEASE:-unset}', not 'true' — the release lane is off by default."
+          echo "No tag or release was published. To enable the release lane, run:"
+          echo "  gh variable set RATCHET_RELEASE --body true"
+          echo "then re-dispatch this workflow."
