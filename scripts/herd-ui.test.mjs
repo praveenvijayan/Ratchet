@@ -1471,7 +1471,7 @@ await inTempDir(async (dir) => {
 // variants), assignee avatar chip, title, and a dashed-rule telemetry strip. ---
 {
   assert.match(PAGE_HTML, /\.row\s*\{[^}]*border:1\.5px solid var\(--ink\)[^}]*box-shadow:5px 5px 0/i, "work rows are bordered cards with an offset shadow");
-  assert.match(PAGE_HTML, /'<article class="row' \+ \(w\.issue === selected \? " sel" : ""\) \+ '" data-issue="'/, "each row is an article card keyed by its issue");
+  assert.match(PAGE_HTML, /'<article class="row' \+ sel \+ '" data-issue="'/, "each row is an article card keyed by its issue");
   assert.match(PAGE_HTML, /'<a class="issue-no"/, "the card links the issue number");
   // Status chip with the three distinct variants.
   assert.match(PAGE_HTML, /'<span class="status' \+ statusClass\(w\.status\)/, "the card renders an uppercase status chip");

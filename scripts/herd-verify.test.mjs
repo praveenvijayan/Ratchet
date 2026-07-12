@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { readFileSync, writeFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { verifyOnce } from "./herd-verify.mjs";
+import { verifyOnce, hasGatesSection } from "./herd-verify.mjs";
 import { readState } from "./herd-survey.mjs";
 
 const NOW = Date.UTC(2026, 6, 9, 12, 0, 0);
@@ -124,6 +124,19 @@ await inTempDir(async () => {
   assert.match(esc, /gates section/, "escalation names the missing gates section");
   assert.equal(r.transitions[0].action, "escalate-body");
 });
+
+// --- #319 criterion 13: hasGatesSection accepts a heading, a bold label, or a
+// bare label line — AGENTS.md demands "the gate checklist" without mandating
+// markdown, and a plain "Gates" line (PR #207 regression) must not escalate.
+// A mention of the word inside a sentence is still not a section. ---
+{
+  assert.ok(hasGatesSection("Closes #7\n\n## Gates\n- test: pass"), "markdown heading");
+  assert.ok(hasGatesSection("Closes #7\n\n**Gates**\n- test: pass"), "bold label");
+  assert.ok(hasGatesSection("Closes #7\n\nSummary\n- x\n\nGates\n- [x] test"), "bare label line");
+  assert.ok(hasGatesSection("Closes #7\n\nGate results:\n- test: pass"), "bare label with results and colon");
+  assert.ok(!hasGatesSection("Re-run the gates before pushing."), "sentence mention is not a section");
+  assert.ok(!hasGatesSection("gates are green today\n- x"), "label line with trailing words is not a section");
+}
 
 // Criterion 4: a PR passing every deterministic check produces an escalation
 // entry telling the human "PR #X ready for review".

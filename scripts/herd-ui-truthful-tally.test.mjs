@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-import { buildDeck, DECK_CAPACITY, PAGE_HTML } from "./herd-ui.mjs";
+import { buildDeck, PAGE_HTML } from "./herd-ui.mjs";
 
 // A config with three adapters; one has a live worker, one has an inactive
 // worker, one has no worker at all — enough to exercise every tally path.
@@ -52,19 +52,19 @@ const workers = [
   assert.ok(PAGE_HTML.includes("cards.filter((c) => c.activeIssue != null)"), "the tally filters by activeIssue != null");
 }
 
-// --- #287 criterion 2: the roster/bay usage (configured adapters out of
-// capacity) remains visible in the deck header, labelled as roster or bays, so
-// fleet composition is not lost. ---
+// --- #287 criterion 2: the configured-adapter count remains visible in the
+// header, so fleet composition is not lost (revised by #319: the roster reads
+// "N agents" and the note shows the real "max <maxWorkers> live" cap — the
+// decorative bay capacity is gone). ---
 {
-  // The header carries a roster element showing configured/capacity.
+  // The header carries a roster element showing the configured count.
   assert.ok(PAGE_HTML.includes('class="roster"'), "the deck header has a roster element");
   assert.ok(PAGE_HTML.includes('id="deckroster"'), "the roster element has a stable id");
-  // The client updates it with configured count over capacity at render time.
-  assert.ok(PAGE_HTML.includes("deckroster"), "renderDeck touches the roster element");
-  // The roster label uses the word "roster" so fleet composition is named.
-  assert.ok(PAGE_HTML.includes(".roster"), "CSS styles the roster span");
-  // The capacity note still names bays so the fleet's spare capacity reads.
-  assert.ok(PAGE_HTML.includes("bays"), "the capacity note still mentions bays");
+  // The client updates it with the configured-adapter count at render time.
+  assert.ok(PAGE_HTML.includes('rosterEl.textContent = String(cards.length) + " agents"'), "the roster reads the configured count as 'N agents'");
+  // The note shows the real dispatch cap, never a decorative bay count.
+  assert.ok(PAGE_HTML.includes('"max " + snapshot.maxWorkers + " live'), "the note shows the real max-workers cap");
+  assert.ok(!PAGE_HTML.includes("bays"), "no decorative bay capacity is mentioned");
 }
 
 // --- #287 criterion 3: the third vitals cell is labelled so it reads as
@@ -72,7 +72,7 @@ const workers = [
 // appears as that cell's label. ---
 {
   // The vitals strip uses "Launched" (spawn/launch succeeded), not "OK".
-  assert.ok(PAGE_HTML.includes('vital("Launched", c.successes)'), 'the third vitals cell is labelled Launched');
+  assert.ok(PAGE_HTML.includes('vital("Launched", d.successes)'), 'the third vitals cell is labelled Launched');
   // The string "OK" must not appear as a vitals label in the deck cards.
   assert.ok(!PAGE_HTML.includes('vital("OK"'), 'the string "OK" no longer appears as a vitals cell label');
 }
@@ -92,9 +92,12 @@ const workers = [
   assert.deepEqual(deck.map((c) => c.name), ["claude-opus", "codex", "opencode-glm"], "roster order follows config, not liveness");
   assert.ok(deck.every((c) => c.activeIssue === null), "no entry has an active issue when no worker is live");
 
-  // The client only hides the deck when cards.length is zero (no configured
-  // adapters), not when no worker is live.
-  assert.ok(PAGE_HTML.includes("if (!cards.length) { wrap.hidden = true"), "the deck hides only when there are no configured adapters, not when no worker is live");
+  // The client always shows the section once a snapshot arrives (the worker
+  // groups live inside it), and paints the friendly empty state — never a
+  // blank grid — when nothing is live (revised by #319).
+  assert.ok(PAGE_HTML.includes("wrap.hidden = false"), "the section always shows once a snapshot arrives");
+  assert.ok(PAGE_HTML.includes("emptyEl.hidden = live.length > 0"), "the empty state shows exactly when nothing is live");
+  assert.ok(PAGE_HTML.includes('id="deckempty"'), "the friendly empty-state block exists");
 }
 
 // --- #287 criterion 5: every criterion above has exactly one test named after

@@ -19,7 +19,7 @@ import { fileURLToPath } from "node:url";
 import { realpathSync } from "node:fs";
 
 import { join, basename, extname, sep } from "node:path";
-import { readState, STATE_FILE, EVENTS_FILE, ESCALATIONS_FILE, STALE_CLAIM_STATUS, resolveRepoRoot, ratchetPaths } from "./herd-survey.mjs";
+import { readState, STATE_FILE, EVENTS_FILE, ESCALATIONS_FILE, ROUTING_FILE, STALE_CLAIM_STATUS, readRouting, resolveRepoRoot, ratchetPaths } from "./herd-survey.mjs";
 import { DEFAULTS, CONFIG_PATH, loadConfig, HerdConfigError } from "./herd.mjs";
 import { defaultAvatarFor } from "./herd-avatars.mjs";
 import { TERMINAL_STATUS } from "./herd-monitor.mjs";
@@ -139,24 +139,45 @@ export function dedupEscalations(blocks) {
 }
 
 // Mark each escalation as resolved or unresolved based on the current state
-// file, the set of closed issue numbers, and the set of acknowledged
-// (issue, reason) keys. Resolution is derived state — the append-only log is
-// never rewritten.
+// file, the set of closed issue numbers, the event stream, and the set of
+// acknowledged (issue, reason) keys. Resolution is derived state — the
+// append-only log is never rewritten.
 // - A stale-claim escalation is resolved when its ref no longer exists (the
 //   survey removes the sentinel from the state file when the ref is gone).
-// - A PR-concluded escalation is resolved when the issue has since closed.
+// - Any escalation is resolved when its issue has since closed — a closed
+//   issue has nothing pending for the operator.
+// - An escalation is *superseded* (resolved) when the issue moved on after the
+//   group's newest occurrence: a newer escalation for the same issue with a
+//   different reason, or a newer dispatch/resume of the issue. Per issue only
+//   the latest concern stays unresolved; a still-recurring problem keeps
+//   re-appending, which keeps its group the newest, so it is never superseded.
 // - An operator-acknowledged escalation is resolved when its (issue, reason)
 //   key appears in the `acknowledged` set (the acknowledge button wrote it).
-// - Other escalation types default to unresolved (the dashboard cannot derive
-//   their resolution from the state file alone).
-export function resolveEscalations(blocks, { state, closedIssues = new Set(), acknowledged = new Set() } = {}) {
+// - Anything else defaults to unresolved.
+export function resolveEscalations(blocks, { state, closedIssues = new Set(), acknowledged = new Set(), events = [] } = {}) {
+  // Newest escalation ts per issue (group ts is its newest occurrence; blocks
+  // may arrive in any order, so take the max).
+  const newestByIssue = new Map();
+  for (const b of blocks) {
+    const ts = String(b.ts || "");
+    const cur = newestByIssue.get(b.issue);
+    if (cur === undefined || ts > cur) newestByIssue.set(b.issue, ts);
+  }
   return blocks.map((b) => {
     const entry = state && state[String(b.issue)];
     let resolved = false;
     if (/stale claim ref/.test(b.what)) {
       resolved = !entry || entry.status !== STALE_CLAIM_STATUS;
-    } else if (/is no longer open/.test(b.what)) {
-      resolved = closedIssues.has(b.issue);
+    }
+    if (!resolved && closedIssues.has(b.issue)) resolved = true;
+    if (!resolved) {
+      const ts = String(b.ts || "");
+      // Superseded by a newer, different concern on the same issue.
+      if (ts < String(newestByIssue.get(b.issue) || "")) resolved = true;
+      // Superseded by a retry: the supervisor dispatched/resumed the issue
+      // after this concern was last raised, so the complaint refers to a
+      // previous attempt.
+      else if (latestClaimTs(events, b.issue) > ts) resolved = true;
     }
     if (!resolved && acknowledged.has(`${b.issue}\t${b.reason}`)) resolved = true;
     return { ...b, resolved };
@@ -271,11 +292,6 @@ export function brokenAdapters(stats, threshold = BROKEN_ADAPTER_THRESHOLD) {
 
 // --- Active Agents mascot deck (0120) ----------------------------------------
 
-// How many docking bays the deck shows. Configured adapters fill bays from the
-// front; the remainder render as empty "Bay open" placeholders up to this many,
-// so the fleet's spare capacity reads at a glance.
-export const DECK_CAPACITY = 10;
-
 // An adapter's "family" label: the segment before the first hyphen of its
 // configured name, or the whole name when it has none ("claude-opus" → "claude",
 // "codex" → "codex"). Pure string logic on the name the operator chose — the
@@ -385,12 +401,10 @@ export function serveMascotImage(req, res, mascotsDir, url) {
 
 // One deck *entry* per *configured* adapter, in config order — the fleet roster,
 // each joined with its dispatch counts and the issue any live worker currently
-// holds on it. This is a projection of config, not the rendered deck: the
-// browser draws a mascot card only for entries with a live worker (`activeIssue`
-// set) and renders the rest of the capacity as open bays, so the deck shows the
-// fleet that is actually running. The roster count (this array's length over
-// DECK_CAPACITY) keeps configured composition visible. Pure: given the same
-// config, dispatch stats, and workers it always returns the same entries.
+// holds on it. The browser renders these as the summary-strip agent roster and
+// as the mascot on each worker's character card (entries with `activeIssue`
+// set). Pure: given the same config, dispatch stats, and workers it always
+// returns the same entries.
 export function buildDeck({ config, adapters = [], workers = [] }) {
   const stats = new Map();
   for (const a of adapters || []) stats.set(a.adapter, a);
@@ -938,6 +952,30 @@ export function buildSummary({ workers = [], escalations = [], readyQueue } = {}
 // title, or null while pending/failed) and the title fetch is triggered at most
 // once per issue. Escalations are deduplicated (same issue + same reason → one
 // block with an occurrence count), resolved (stale-claim with no sentinel,
+// Adapter-selection activity on the default route: the route order, its
+// policy, the agent the next dispatch will try first, and the most recent
+// dispatch. Derived per call from the config, the persisted round-robin
+// cursor (.ratchet/herd-routing.json), and the event stream — config edits,
+// cursor advances, and new dispatches all reflect in the next snapshot. Under
+// failover the cursor is meaningless: the first adapter is always tried first.
+export function routingActivity(config, cursors = {}, events = []) {
+  const raw = config && config.routing ? config.routing.default : null;
+  const names = Array.isArray(raw) ? raw : raw && Array.isArray(raw.adapters) ? raw.adapters : raw ? [raw] : [];
+  if (!names.length) return null;
+  const policy =
+    (config.routing.policies && config.routing.policies["routing.default"]) ||
+    (raw && !Array.isArray(raw) && raw.policy) ||
+    "failover";
+  const cursor = (((Number(cursors["routing.default"]) || 0) % names.length) + names.length) % names.length;
+  const nextAdapter = policy === "round-robin" ? names[cursor] : names[0];
+  let lastDispatch = null;
+  for (const e of events || []) {
+    if (e.event !== "dispatch" || !e.adapter) continue;
+    if (!lastDispatch || String(e.ts) > String(lastDispatch.ts)) lastDispatch = { adapter: e.adapter, issue: e.issue, ts: e.ts };
+  }
+  return { policy, route: names, nextAdapter, lastDispatch };
+}
+
 // PR-concluded with a closed issue → visually de-emphasised), and capped (all
 // unresolved plus at most MAX_RESOLVED_SHOWN recent resolved ones).
 export function readSnapshot({
@@ -945,6 +983,7 @@ export function readSnapshot({
   eventsPath = EVENTS_FILE,
   escalationsPath = ESCALATIONS_FILE,
   resolutionsPath = RESOLUTIONS_FILE,
+  routingPath = ROUTING_FILE,
   config,
   now = Date.now(),
   repoSlug = null,
@@ -991,7 +1030,7 @@ export function readSnapshot({
   const escalations = limitEscalations(
     resolveEscalations(
       dedupEscalations(rawEscalations),
-      { state, closedIssues, acknowledged },
+      { state, closedIssues, acknowledged, events },
     ),
   );
   const hint = workers.length === 0 && escalations.length === 0 ? EMPTY_HINT : null;
@@ -1011,8 +1050,11 @@ export function readSnapshot({
 
   // Per-adapter failure visibility (0095): fold repeated dispatch failures on
   // one adapter into a single aggregate alert plus a breakdown, so a broken
-  // adapter reads as one problem rather than N unrelated escalations.
-  const adapters = adapterDispatchStats(events);
+  // adapter reads as one problem rather than N unrelated escalations. Only
+  // adapters still in herd.json are shown — events remember removed adapters
+  // forever, and a deleted adapter's history is stale noise, not health.
+  const configured = config && config.adapters ? config.adapters : {};
+  const adapters = adapterDispatchStats(events).filter((s) => s.adapter in configured);
   const broken = brokenAdapters(adapters);
 
   // One-glance summary strip (0087). The ready-queue count is fetched via `gh`
@@ -1027,7 +1069,8 @@ export function readSnapshot({
   // key entry to stream correctly.
   const deck = buildDeck({ config, adapters, workers });
 
-  return { workers, escalations, hint, totals, heartbeat, adapters, brokenAdapters: broken, summary, deck };
+  const routing = routingActivity(config, readRouting(routingPath), events);
+  return { workers, escalations, hint, totals, heartbeat, adapters, brokenAdapters: broken, summary, deck, maxWorkers: config.maxWorkers, routing };
 }
 
 // A change key that ignores the ever-advancing clock, so the live stream pushes
@@ -1116,6 +1159,7 @@ export function createDashboardServer({
   eventsPath = EVENTS_FILE,
   escalationsPath = ESCALATIONS_FILE,
   resolutionsPath = RESOLUTIONS_FILE,
+  routingPath = ROUTING_FILE,
   config = { ...DEFAULTS },
   configPath = null,
   repoSlug = null,
@@ -1139,16 +1183,24 @@ export function createDashboardServer({
   // the last good config and never crashes the request. With no configPath the
   // config stays fixed at the value passed in — the offline test path.
   let liveConfig = config;
+  // The current herd.json failure, surfaced on the dashboard as a banner. An
+  // invalid config must never silently degrade to an empty roster (mascots and
+  // routing vanish with no explanation — e.g. routing.default naming a removed
+  // adapter): the operator sees the exact parse/validation error until the file
+  // is fixed, while snapshots keep serving the last good config.
+  let configError = null;
   const resolveConfig = () => {
     if (!configPath) return liveConfig;
     try {
       liveConfig = loadConfig(configPath, { warn: false });
-    } catch {
+      configError = null;
+    } catch (e) {
+      configError = e && e.message ? e.message : String(e);
       // keep last good liveConfig
     }
     return liveConfig;
   };
-  const snap = () => readSnapshot({ statePath, eventsPath, escalationsPath, resolutionsPath, config: resolveConfig(), now: now(), repoSlug, checksCache, titleCache, readyQueueCache });
+  const snap = () => ({ ...readSnapshot({ statePath, eventsPath, escalationsPath, resolutionsPath, routingPath, config: resolveConfig(), now: now(), repoSlug, checksCache, titleCache, readyQueueCache }), configError });
 
   const server = httpCreateServer((req, res) => {
     const url = new URL(req.url, "http://localhost");
@@ -1352,13 +1404,13 @@ export async function run(argv, { log = console.log, cwd = process.cwd() } = {})
   // guard below into a non-zero exit) rather than an empty dashboard when run
   // from outside any checkout.
   const root = resolveRepoRoot(cwd);
-  const { statePath, eventsPath, escalationsPath } = ratchetPaths(root);
+  const { statePath, eventsPath, escalationsPath, routingPath } = ratchetPaths(root);
   const resolutionsPath = join(root, RESOLUTIONS_FILE);
   const configPath = join(root, CONFIG_PATH);
   const config = loadConfigOrDefaults(configPath);
   const repoSlug = resolveRepoSlug(gitOriginUrl(cwd));
   const mascotsDir = join(root, "mascots");
-  const server = createDashboardServer({ statePath, eventsPath, escalationsPath, resolutionsPath, config, repoSlug, notify: createNotifier(), mascotsDir });
+  const server = createDashboardServer({ statePath, eventsPath, escalationsPath, resolutionsPath, routingPath, config, configPath, repoSlug, notify: createNotifier(), mascotsDir });
   const bound = await listenOrFail(server, port);
   log(`Herd dashboard on http://localhost:${bound}  (Ctrl-C to stop)`);
   return { server, port: bound };
@@ -1401,15 +1453,17 @@ export const PAGE_HTML = `<!doctype html>
   }
   * { box-sizing: border-box; }
   body {
-    margin:0;
-    font-family:var(--sans); font-size:14px; line-height:1.5;
-    color:var(--ink);
-    background:
-      radial-gradient(circle at 84% -8%, rgba(124,104,196,.12), transparent 44%),
-      repeating-linear-gradient(0deg, transparent 0 47px, var(--ink-hair) 47px 48px),
-      repeating-linear-gradient(90deg, transparent 0 47px, var(--ink-hair) 47px 48px),
-      linear-gradient(168deg, var(--paper-hi) 0%, var(--paper) 46%, var(--paper-lo) 100%);
-    min-height:100vh;
+    margin: 0;
+    font-family: var(--sans);
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--ink);
+    min-height: 100vh; /* Lets the background grow as the page gets longer */
+    background: 
+      radial-gradient(circle at 84% -8%, rgba(124, 104, 196, .12), transparent 44%), 
+      repeating-linear-gradient(0deg, transparent 0 47px, var(--ink-hair) 47px 48px), 
+      repeating-linear-gradient(90deg, transparent 0 47px, var(--ink-hair) 47px 48px)
+      var(--paper);
   }
   header {
     display:flex; align-items:center; gap:22px;
@@ -1436,7 +1490,7 @@ export const PAGE_HTML = `<!doctype html>
   header .fleettotals { color:var(--ink-soft); font-variant-numeric:tabular-nums; font-family:var(--mono); font-size:12px; }
   header .fleettotals.empty { display:none; }
   td.usage { text-align:right; font-variant-numeric:tabular-nums; }
-  main { padding:34px 36px 70px; max-width:1480px; margin:0 auto; }
+  main { padding:34px 36px 70px; max-width:98%; /*margin:0 auto;*/ }
   .hint { color:var(--muted); padding:40px 0; text-align:center; }
   .hbbanner { border-radius:6px; padding:12px 16px; margin-bottom:16px; font-weight:600; border:1px solid; border-left-width:4px; }
   .hbbanner.silent { color:var(--over); border-color:var(--over); background:color-mix(in srgb, var(--over) 10%, transparent); }
@@ -1448,17 +1502,14 @@ export const PAGE_HTML = `<!doctype html>
      column so the two regions stack vertically without overlapping. */
   .topregion { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,420px); gap:34px; align-items:start; margin:0 0 36px; }
   @media (max-width:1180px) { .topregion { grid-template-columns:minmax(0,1fr); } }
-  /* 0135: cap the page at 100vh on a desktop-width viewport so it never grows
-     unbounded. The header/top strip stay fixed at the top of a flex-column
-     body, and each top-region column scrolls its own overflowing content
-     rather than the whole page. Scoped to >=1181px only: below 1180px the
-     columns stack and the page scrolls normally, so the cap never clips. */
+  /* Desktop (>=1181px): the page scrolls as one document (supersedes the 0135
+     100vh cap) — only the errors panel keeps its own scrollable region. */
   @media (min-width:1181px) {
-    html, body { height:100%; }
-    body { overflow:hidden; display:flex; flex-direction:column; }
-    main { flex:1 1 auto; min-height:0; display:flex; flex-direction:column; overflow:hidden; }
+    body { display:flex; flex-direction:column; }
+    main { flex:1 1 auto; min-height:0; display:flex; flex-direction:column; }
     .topregion { flex:1 1 auto; min-height:0; align-items:stretch; }
-    .deckwrap, .errpanel { min-height:0; overflow-y:auto; }
+    .deckwrap, .errpanel { min-height:0; }
+    .errpanel { overflow-y: scroll; }
   }
   /* Inside #deckwrap the workers pane and log console span the column width,
      separated from the deck above by a matching gap. */
@@ -1496,6 +1547,19 @@ export const PAGE_HTML = `<!doctype html>
   .sumcell.unavailable { border-color:var(--terra); cursor:help; }
   .sumcell.unavailable .sumnum { color:var(--terra); }
   .sumcell.pending .sumnum { color:var(--ink-soft); }
+  /* Adapter roster tile: every agent configured in herd.json, image + name,
+     sitting in the summary strip next to the escalations count. */
+  .sumroster { display:flex; align-items:center; gap:18px; padding:12px 22px; border:1.5px solid var(--ink); background:var(--paper-hi); box-shadow:5px 5px 0 var(--ink-faint); }
+  .sumroster .roster-head { display:flex; flex-direction:column; gap:4px; max-width:120px; }
+  .sumroster .sumlabel { font-family:var(--mono); font-size:9.5px; text-transform:uppercase; letter-spacing:.22em; color:var(--ink-soft); line-height:1.5; }
+  .sumroster .roster-meta { font-family:var(--mono); font-size:9px; color:var(--ink-soft); }
+  .sumroster .roster-agents { display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
+  .roster-agent { display:flex; flex-direction:column; align-items:center; gap:5px; padding:4px 6px; border:1.5px solid transparent; }
+  .roster-agent img { width:44px; height:44px; object-fit:contain; }
+  .roster-agent .roster-name { font-family:var(--mono); font-size:9px; letter-spacing:.06em; color:var(--ink); }
+  /* Selection indicator: the agent the next dispatch tries first. */
+  .roster-agent.next { border:1.5px dashed var(--terra); background:rgba(124,104,196,.07); }
+  .roster-agent .next-chip { font-family:var(--mono); font-size:8px; letter-spacing:.18em; text-transform:uppercase; color:var(--terra); border:1px solid var(--terra); padding:1px 6px; }
   /* Incident cards (design .incident/.incident.flag). An unresolved incident is
      the flagged card: terra border, offset shadow, terra action buttons. A
      resolved one is de-emphasised to a faint ink outline (the esc-resolved
@@ -1515,6 +1579,9 @@ export const PAGE_HTML = `<!doctype html>
   .esc .act-btn:hover { background:var(--terra); color:var(--paper-hi); }
   .esc .act-btn.ack { background:var(--terra); color:var(--paper-hi); }
   .esc .act-btn.ack:hover { background:#5b4aa4; color:var(--paper-hi); }
+  /* "Show N older" toggle at the foot of the escalations inbox. */
+  .esc-toggle { display:block; width:100%; margin-top:2px; font-family:var(--mono); font-size:10px; letter-spacing:.12em; text-transform:uppercase; padding:9px 13px; border:1.5px dashed var(--ink-faint); background:transparent; color:var(--ink-soft); cursor:pointer; }
+  .esc-toggle:hover { border-color:var(--ink); color:var(--ink); }
   .esc .act-btn.copied { background:var(--ink); border-color:var(--ink); color:var(--paper-hi); }
   .esc .esc-error { font-family:var(--mono); font-size:11px; color:var(--terra); font-weight:700; }
   .esc.resolved .actions { display:none; }
@@ -1533,14 +1600,19 @@ export const PAGE_HTML = `<!doctype html>
   .sec .rule::after { content:""; position:absolute; right:0; top:-3px; width:7px; height:7px; background:var(--ink); transform:rotate(45deg); }
   .sec .note { font-family:var(--mono); font-size:9.5px; letter-spacing:.18em; text-transform:uppercase; color:var(--ink-soft); }
   .sec .roster { font-family:var(--mono); font-size:10px; letter-spacing:.12em; text-transform:uppercase; color:var(--ink-soft); }
-  /* Active Agents mascot deck (0120; 0135: the left column, above the workers
-     pane and log console). */
+  /* Active Agents deck: full column width — the log console is a modal now, so
+     the character-card groups get all the space left of the errors panel. */
   .deckwrap { margin:0; }
-  /* auto-fill grid flexes from 1 to 10 mascots without any layout change.
-     padding-top:52px and row-gap:72px give the overflowing figures headroom
-     so they never collide with the section header or the row of cards above. */
-  .deck { display:grid; grid-template-columns:repeat(auto-fill, minmax(206px, 1fr)); gap:20px; padding-top:52px; row-gap:72px; }
-  .mascot-card { position:relative; border:1.5px solid var(--ink); background:var(--paper-hi); box-shadow:6px 6px 0 var(--ink-faint); padding:26px 18px 18px; display:flex; flex-direction:column; align-items:center; gap:14px; transition:transform .18s ease, box-shadow .18s ease; }
+  /* Friendly empty state under the Live Workers header when nothing is live. */
+  .deckempty { margin-top:22px; padding:18px 22px; border:1.5px dashed var(--ink-faint); background:var(--paper-hi); font-family:var(--mono); font-size:12px; color:var(--ink-soft); }
+  .mascot-card { position:relative; border:1.5px solid var(--ink); background:var(--paper-hi); box-shadow:6px 6px 0 var(--ink-faint); padding:26px 18px 18px; display:flex; flex-direction:column; align-items:center; gap:14px; transition:transform .18s ease, box-shadow .18s ease; cursor:pointer; }
+  .mascot-card.sel { border-color:var(--terra); box-shadow:5px 5px 0 rgba(124,104,196,.35); }
+  /* Issue details carried onto the character card: full-width, left-aligned.
+     Telemetry becomes a fixed two-column grid there — the row layout's dashed
+     dividers and flex-wrap break at card width. */
+  .mascot-card .row-title, .mascot-card .telemetry { align-self:stretch; text-align:left; }
+  .mascot-card .telemetry { display:grid; grid-template-columns:1fr 1fr; gap:10px 12px; }
+  .mascot-card .tm { border-right:0; margin-right:0; padding-right:0; }
   .mascot-card:hover { transform:translateY(-4px); box-shadow:8px 10px 0 var(--ink-faint); }
   .mascot-card::before { content:""; position:absolute; inset:6px; border:1px dashed var(--ink-faint); pointer-events:none; z-index:1; }
   .mascot-card .family { position:absolute; top:12px; left:14px; font-family:var(--mono); font-size:8.5px; letter-spacing:.2em; text-transform:uppercase; color:var(--ink-soft); z-index:4; }
@@ -1557,26 +1629,20 @@ export const PAGE_HTML = `<!doctype html>
   .mascot-card:hover .mascot img { transform:translateX(-50%) translateY(-7px) scale(1.05); filter:drop-shadow(0 20px 16px rgba(31,41,51,.32)) drop-shadow(0 4px 4px rgba(31,41,51,.16)); }
   .mascot-card .name { font-family:var(--mono); font-weight:700; font-size:13px; text-align:center; overflow-wrap:anywhere; }
   .mascot-card .card-chips { display:flex; align-items:center; justify-content:center; flex-wrap:wrap; gap:8px; }
-  .mascot-card .duty { display:inline-flex; align-items:center; gap:7px; font-family:var(--mono); font-size:9px; letter-spacing:.16em; text-transform:uppercase; padding:4px 10px; border:1px solid currentColor; }
-  .duty.on { color:var(--ink-deep); background:rgba(63,62,120,.08); }
-  .duty.idle { color:var(--ink-soft); }
-  .duty .dot { width:6px; height:6px; border-radius:50%; background:currentColor; }
-  .duty.on .dot { animation:deckpulse 2.2s ease-in-out infinite; }
-  @keyframes deckpulse { 0%,100% { opacity:1; } 50% { opacity:.25; } }
   .mascot-card .vitals { width:100%; display:grid; grid-template-columns:1fr 1fr 1fr; border-top:1px dashed var(--ink-faint); padding-top:12px; }
   .vitals .cell { display:flex; flex-direction:column; align-items:center; gap:3px; }
   .vitals .cell + .cell { border-left:1px solid var(--ink-hair); }
   .vitals .k { font-family:var(--mono); font-size:8.5px; letter-spacing:.18em; text-transform:uppercase; color:var(--ink-soft); }
   .vitals .v { font-family:var(--mono); font-size:14px; font-weight:700; }
   .vitals .v.zero { color:var(--ink-faint); font-weight:400; }
-  /* Empty docking bays — dashed placeholders for the fleet's spare capacity. */
-  .bay { border:1.5px dashed var(--ink-faint); display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px; min-height:262px; color:var(--ink-soft); }
-  .bay .ring { width:64px; height:64px; border-radius:50%; border:1.5px dashed var(--ink-faint); display:grid; place-items:center; font-family:var(--serif); font-size:24px; color:var(--ink-faint); }
-  .bay .k { font-family:var(--mono); font-size:9px; letter-spacing:.22em; text-transform:uppercase; color:var(--ink-faint); }
   .gauge.warn { color:var(--warn); }
   .gauge.over { color:var(--terra); font-weight:700; }
-  /* Work rows — design .row cards: bordered, offset shadow, dashed telemetry. */
-  .rows { display:flex; flex-direction:column; gap:14px; }
+  /* Work rows — design .row cards: bordered, offset shadow, dashed telemetry.
+     Grid, not a column: a worker whose adapter is on the deck renders as a
+     mascot-card here (the combined character card), and the figure overflows
+     ~60px above the card, so each group keeps the deck's 52px headroom and
+     72px row gap. Plain rows (no adapter on deck) share the same cells. */
+  .rows { display:grid; grid-template-columns:repeat(auto-fill, minmax(250px, 1fr)); gap:20px; row-gap:72px; padding-top:52px; }
   .row { border:1.5px solid var(--ink); background:var(--paper-hi); box-shadow:5px 5px 0 var(--ink-faint); padding:16px 20px; display:flex; flex-direction:column; gap:11px; cursor:pointer; }
   .row.sel { border-color:var(--terra); box-shadow:5px 5px 0 rgba(124,104,196,.35); }
   .row-head { display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
@@ -1599,11 +1665,16 @@ export const PAGE_HTML = `<!doctype html>
   .tm .v { font-family:var(--mono); font-size:12.5px; font-weight:700; }
   .tm .v .empty { color:var(--ink-faint); font-weight:400; }
   a { color:var(--accent); }
-  /* Log console (design .log-shell/.log-filter/.log-raw). Bordered shell with a
-     serif head; the filter input carries the design's offset shadow and the raw
-     log tail is an ink-inverted block. #logsearch/#lognomatch/pre#log unchanged. */
-  .logpane { margin-top:34px; border:1.5px solid var(--ink); background:var(--paper-hi); box-shadow:5px 5px 0 var(--ink-faint); padding:20px 24px; }
-  .logpane h2 { font-family:var(--serif); font-size:16px; font-weight:400; letter-spacing:.14em; text-transform:uppercase; margin:0 0 14px; }
+  /* Log console (design .log-shell/.log-filter/.log-raw), now a modal <dialog>
+     opened by clicking a card: bordered shell with a serif head, centered over
+     a dimmed backdrop. Esc or the × closes it (native dialog behaviour);
+     clicking the backdrop closes too. #logsearch/#lognomatch/pre#log unchanged. */
+  .logpane { width:min(940px, 92vw); max-height:86vh; overflow:auto; border:1.5px solid var(--ink); background:var(--paper-hi); box-shadow:8px 8px 0 var(--ink-faint); padding:20px 24px; color:var(--ink); }
+  .logpane::backdrop { background:rgba(43,42,88,.45); }
+  .logpane-head { display:flex; align-items:center; gap:14px; margin:0 0 14px; }
+  .logpane h2 { font-family:var(--serif); font-size:16px; font-weight:400; letter-spacing:.14em; text-transform:uppercase; margin:0; }
+  .logclose { margin-left:auto; border:1.5px solid var(--ink); background:var(--paper-hi); color:var(--ink); font-family:var(--mono); font-size:14px; line-height:1; padding:6px 10px; cursor:pointer; box-shadow:3px 3px 0 var(--ink-faint); }
+  .logclose:hover { border-color:var(--terra); color:var(--terra); }
   .logsearch { display:block; width:100%; margin:0 0 16px; font-family:var(--mono); font-size:12px; color:var(--ink); padding:10px 14px; border:1.5px solid var(--ink); background:var(--paper-hi); box-shadow:4px 4px 0 var(--ink-faint); outline:none; }
   .logsearch::placeholder { color:var(--ink-soft); }
   .logsearch:focus { border-color:var(--terra); }
@@ -1641,28 +1712,32 @@ export const PAGE_HTML = `<!doctype html>
 <main>
   <div class="summarystrip" id="summarystrip" aria-label="Fleet summary"></div>
   <div id="hbbanner" class="hbbanner" role="status" hidden></div>
+  <div id="configbanner" class="hbbanner silent" role="status" hidden></div>
   <div class="topregion" id="topregion">
-    <section class="deckwrap" id="deckwrap" aria-label="Active agents" hidden>
+    <section class="deckwrap" id="deckwrap" aria-label="Live workers" hidden>
       <div class="sec">
-        <h2 class="group-head">Active Agents</h2>
+        <h2 class="group-head">Live Workers</h2>
         <span class="tally" id="decktally">0</span>
-        <span class="roster" id="deckroster">0/${DECK_CAPACITY}</span>
+        <span class="roster" id="deckroster"></span>
         <span class="rule"></span>
-        <span class="note">${DECK_CAPACITY} bays · new agents dock automatically</span>
+        <span class="note" id="decknote">new agents dock automatically</span>
       </div>
-      <div class="deck" id="deck"></div>
+      <div class="deckempty" id="deckempty" hidden>No live workers right now — agents dock here automatically when the next ready issue is dispatched.</div>
       <div class="layout" id="layout">
         <div class="fleet" id="fleet">
           <div id="workers"></div>
         </div>
       </div>
-      <div class="logpane" id="logpane" hidden>
-        <h2 id="logtitle"></h2>
+      <dialog class="logpane" id="logpane">
+        <div class="logpane-head">
+          <h2 id="logtitle"></h2>
+          <button class="logclose" id="logclose" aria-label="Close log">✕</button>
+        </div>
         <div id="timeline" class="timeline"></div>
         <input type="search" id="logsearch" class="logsearch" placeholder="Filter log lines…" autocomplete="off">
         <div id="lognomatch" class="lognomatch" hidden>No matches.</div>
         <pre class="log" id="log"></pre>
-      </div>
+      </dialog>
     </section>
     <aside class="errpanel" id="errpanel" aria-label="Errors and escalations">
       <div class="errpanel-head">
@@ -1732,6 +1807,7 @@ export const PAGE_HTML = `<!doctype html>
   }
   function checksAgo(ts) {
     const secs = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+    if (secs >= 3600) return Math.floor(secs / 3600) + "h" + Math.floor((secs % 3600) / 60) + "m ago";
     return secs >= 60 ? Math.floor(secs / 60) + "m ago" : secs + "s ago";
   }
 
@@ -1757,11 +1833,37 @@ export const PAGE_HTML = `<!doctype html>
     if (s === "ready-for-review" || s === "in-review") return " review";
     return "";
   }
+  // The chip shows the same state:* label the issue carries on GitHub
+  // (AGENTS.md), so the dashboard and the repo read as one vocabulary. Only
+  // unambiguous correspondences are mapped: a claim means the agent set
+  // state:in-progress; an open PR means state:in-review. Herd-internal statuses
+  // (reworking, escalations, terminal) have no GitHub label and stay verbatim.
+  const STATUS_LABEL = {
+    working: "state:in-progress",
+    dispatched: "state:in-progress",
+    resumed: "state:in-progress",
+    "awaiting-verification": "state:in-review",
+    "ready-for-review": "state:in-review",
+    "in-review": "state:in-review",
+  };
+  const statusLabel = (s) => STATUS_LABEL[s] || s;
 
+  // Escalations render newest-first, capped at the newest few so the panel
+  // reads as an inbox; "Show N older" reveals the rest (older unresolved plus
+  // the recent-resolved tail the server kept).
+  const MAX_ESC_SHOWN = 10;
+  let showAllEsc = false;
+  window.toggleEsc = function () { showAllEsc = !showAllEsc; renderEscalations(); };
   function renderEscalations() {
     const el = $("escalations");
     if (!snapshot.escalations.length) { el.innerHTML = '<div class="empty">No errors.</div>'; return; }
-    el.innerHTML = snapshot.escalations.map((e) => {
+    const blocks = showAllEsc ? snapshot.escalations : snapshot.escalations.slice(0, MAX_ESC_SHOWN);
+    const hidden = snapshot.escalations.length - blocks.length;
+    const toggle = snapshot.escalations.length > MAX_ESC_SHOWN
+      ? '<button class="act-btn esc-toggle" onclick="toggleEsc()">' +
+        (showAllEsc ? "Show fewer" : "Show " + hidden + " older") + "</button>"
+      : "";
+    el.innerHTML = blocks.map((e) => {
       const cls = e.resolved ? "esc resolved" : "esc";
       const count = e.occurrences > 1 ? ' <span class="occurrences">' + e.occurrences + "×</span>" : "";
       // Extract a backtick-quoted command from the action text for the copy
@@ -1777,69 +1879,32 @@ export const PAGE_HTML = `<!doctype html>
         '<div class="what">' + esc(e.what) + "</div>" +
         '<div class="meta">' + esc(e.ts) + (e.action ? " · " + esc(e.action) : "") + "</div>" +
         actions + "</div>";
-    }).join("");
+    }).join("") + toggle;
   }
 
   // Aggregate per-adapter failure view (0095): the broken-adapter alerts sit
   // above the individual escalations, and a breakdown table shows dispatches /
   // failures / successes per adapter so the worst one reads at a glance.
-  // Active Agents deck (0129): one mascot card per adapter with a *live worker*,
-  // then dashed empty bays out to the fleet's capacity. A configured adapter with
-  // no live worker renders no card — the deck shows the fleet that is actually
-  // running, not the configured roster (that count stays in the header). The
-  // card's avatar tries the adapter's own image first (now a served URL for
-  // repo-local photographic art, or a remote URL / data URI) and falls back to
-  // the bundled data-URI mascot via avatarFallback — a broken image is never
-  // shown. Zero vital counts keep their cell (faint treatment) so a fresh adapter
-  // still reads all three.
+  // Live Workers header (0129; combined cards): the per-agent mascot cards live
+  // inside the lifecycle groups (rowHtml), so this only maintains the header
+  // numbers — live tally, configured-agent roster, and the real dispatch cap
+  // (config.maxWorkers, not a decorative bay count).
   function renderDeck() {
     const wrap = $("deckwrap");
     if (!wrap) return;
-    // The full configured roster (buildDeck's projection). 'live' is the subset
-    // with a live worker — only these become mascot cards; the tally counts them.
+    // The section always shows once a snapshot arrives — the worker groups live
+    // inside it now, so hiding the wrap would hide the work list too.
+    wrap.hidden = false;
     const cards = (snapshot.deck || []);
     const live = cards.filter((c) => c.activeIssue != null);
+    const emptyEl = $("deckempty");
+    if (emptyEl) emptyEl.hidden = live.length > 0;
     const tallyEl = $("decktally");
     if (tallyEl) tallyEl.textContent = String(live.length);
-    // Roster keeps configured composition visible (configured / capacity), so the
-    // fleet's makeup is not lost even when zero workers are live.
     const rosterEl = $("deckroster");
-    if (rosterEl) rosterEl.textContent = String(cards.length) + "/${DECK_CAPACITY}";
-    const host = $("deck");
-    // Hide only when nothing is configured at all. With adapters configured but
-    // none live, the section still renders — zero cards, all bays open.
-    if (!cards.length) { wrap.hidden = true; if (host) host.innerHTML = ""; return; }
-    wrap.hidden = false;
-    const bay = (n) => String(n).padStart(2, "0");
-    const vital = (label, n) =>
-      '<div class="cell"><span class="k">' + label + '</span><span class="v' +
-      (n === 0 ? " zero" : "") + '">' + String(n) + "</span></div>";
-    let html = live.map((c, i) => {
-      const src = c.avatar || c.defaultAvatar;
-      const duty = c.activeIssue != null
-        ? '<span class="duty on"><span class="dot"></span>dispatched · #' + String(c.activeIssue) + "</span>"
-        : '<span class="duty idle"><span class="dot"></span>standing by</span>';
-      // The card mirrors the worker row's status chip (#307): the live worker's
-      // current status (dispatched / reworking / ready-for-review / in-review /
-      // stale-claim), styled via the same statusClass so the card matches the row.
-      const statusChip = c.activeStatus
-        ? '<span class="status' + statusClass(c.activeStatus) + '">' + esc(c.activeStatus) + "</span>"
-        : "";
-      return '<article class="mascot-card">' +
-        '<span class="family">' + esc(c.family) + "</span>" +
-        '<span class="slot-no">bay ' + bay(i + 1) + "</span>" +
-        '<div class="mascot"><img alt="' + esc(c.name) + ' mascot" src="' + esc(src) +
-        '" data-default="' + esc(c.defaultAvatar) + '" onerror="avatarFallback(this)"></div>' +
-        '<div class="name">' + esc(c.name) + "</div>" +
-        '<div class="card-chips">' + duty + statusChip + "</div>" +
-        '<div class="vitals">' + vital("Disp.", c.dispatches) + vital("Fail", c.failures) +
-        vital("Launched", c.successes) + "</div>" +
-        "</article>";
-    }).join("");
-    for (let n = live.length + 1; n <= ${DECK_CAPACITY}; n++) {
-      html += '<div class="bay"><span class="ring">' + bay(n) + '</span><span class="k">Bay open</span></div>';
-    }
-    host.innerHTML = html;
+    if (rosterEl) rosterEl.textContent = String(cards.length) + " agents";
+    const noteEl = $("decknote");
+    if (noteEl && snapshot.maxWorkers) noteEl.textContent = "max " + snapshot.maxWorkers + " live · new agents dock automatically";
   }
 
   function renderAdapterHealth() {
@@ -1851,7 +1916,10 @@ export const PAGE_HTML = `<!doctype html>
       .map((b) => '<div class="adapter-alert">adapter <strong>' + esc(b.adapter) + "</strong> failed " + esc(b.ratio) + " dispatches</div>")
       .join("");
     if (stats.length) {
-      html += '<table class="adapter-breakdown"><thead><tr><th>Adapter</th><th>Disp.</th><th>Fail</th><th>OK</th></tr></thead><tbody>' +
+      // Columns mirror the character-card vitals: dispatches, spawns that
+      // never started, spawns that launched. "Launched" is spawn success, not
+      // work outcome — outcomes live in the lifecycle groups and escalations.
+      html += '<table class="adapter-breakdown"><thead><tr><th>Adapter</th><th>Disp.</th><th>Fail</th><th>Launched</th></tr></thead><tbody>' +
         stats
           .map((s) => {
             const cls = s.successes === 0 && s.failures > 0 ? ' class="broken"' : "";
@@ -1923,6 +1991,12 @@ export const PAGE_HTML = `<!doctype html>
   // shown, never dropped.
   const GROUP_ORDER = [["live", "Live"], ["awaiting-review", "Awaiting review"], ["escalated", "Escalated"], ["terminal", "Terminal"], ["other", "Other"]];
 
+  // One vitals cell (adapter lifetime counts on the character card). Zero keeps
+  // its cell with the faint treatment so a fresh adapter still reads all three.
+  const vital = (label, n) =>
+    '<div class="cell"><span class="k">' + label + '</span><span class="v' +
+    (n === 0 ? " zero" : "") + '">' + String(n) + "</span></div>";
+
   function rowHtml(w) {
     const prInner = w.prUrl ? '<a class="pr-link" href="' + esc(w.prUrl) + '" target="_blank" rel="noopener">#' + esc(w.pr) + "</a>"
       : (w.pr != null ? "#" + esc(w.pr) : '<span class="empty">—</span>');
@@ -1930,23 +2004,46 @@ export const PAGE_HTML = `<!doctype html>
       ? '<span class="checks ' + checksClass(w.checksStatus) + '" title="' + checksTitle(w) + '">' + esc(w.checksStatus) + "</span>" +
         (w.checksFetchedAt ? '<span class="checks-time">' + esc(checksAgo(w.checksFetchedAt)) + "</span>" : "")
       : "";
+    const tm = (k, v) => '<div class="tm"><span class="k">' + k + '</span><span class="v">' + v + "</span></div>";
+    const telemetry = '<div class="telemetry">' +
+      tm("Attempts", attemptsText(w)) +
+      tm("Age", ageText(w)) +
+      tm("PR", prInner + checks) +
+      tm("Cost", usdCell(w.costUsd)) +
+      tm("Tokens In", tokCell(w.tokensIn)) +
+      tm("Tokens Out", tokCell(w.tokensOut)) +
+      "</div>";
+    const sel = w.issue === selected ? " sel" : "";
+    const statusChip = '<span class="status' + statusClass(w.status) + '" title="' + esc(w.status) + '">' + esc(statusLabel(w.status)) + "</span>";
+    // The combined character card: a worker whose adapter is on the deck roster
+    // renders as the mascot card carrying the issue's full details — one card
+    // instead of a deck card plus a duplicate work row. It lives inside the
+    // lifecycle groups, so the same card moves Live → Escalated → Terminal as
+    // the issue's group changes. A worker with no rostered adapter keeps the
+    // plain row below.
+    const d = (snapshot.deck || []).find((x) => x.name === w.adapter);
+    if (d) {
+      const src = d.avatar || d.defaultAvatar;
+      return '<article class="mascot-card' + sel + '" data-issue="' + w.issue + '">' +
+        '<span class="family">' + esc(d.family) + "</span>" +
+        '<span class="slot-no">' + issueLink(w) + "</span>" +
+        '<div class="mascot"><img alt="' + esc(d.name) + ' mascot" src="' + esc(src) +
+        '" data-default="' + esc(d.defaultAvatar) + '" onerror="avatarFallback(this)"></div>' +
+        '<div class="name">' + esc(d.name) + "</div>" +
+        '<div class="card-chips">' + statusChip + "</div>" +
+        issueCell(w) +
+        telemetry +
+        '<div class="vitals">' + vital("Disp.", d.dispatches) + vital("Fail", d.failures) +
+        vital("Launched", d.successes) + "</div>" +
+        "</article>";
+    }
     // Assignee with avatar chip; an unassigned worker shows the faint em dash.
     const who = w.adapter
       ? '<span class="who">' + avatarImg(w) + "<span>" + esc(w.adapter) + "</span></span>"
       : '<span class="who"><span class="empty">—</span></span>';
-    const tm = (k, v) => '<div class="tm"><span class="k">' + k + '</span><span class="v">' + v + "</span></div>";
-    return '<article class="row' + (w.issue === selected ? " sel" : "") + '" data-issue="' + w.issue + '">' +
-      '<div class="row-head">' + issueLink(w) +
-        '<span class="status' + statusClass(w.status) + '">' + esc(w.status) + "</span>" + who + "</div>" +
-      issueCell(w) +
-      '<div class="telemetry">' +
-        tm("Attempts", attemptsText(w)) +
-        tm("Age", ageText(w)) +
-        tm("PR", prInner + checks) +
-        tm("Cost", usdCell(w.costUsd)) +
-        tm("Tokens In", tokCell(w.tokensIn)) +
-        tm("Tokens Out", tokCell(w.tokensOut)) +
-      "</div></article>";
+    return '<article class="row' + sel + '" data-issue="' + w.issue + '">' +
+      '<div class="row-head">' + issueLink(w) + statusChip + who + "</div>" +
+      issueCell(w) + telemetry + "</article>";
   }
 
   function renderWorkers() {
@@ -1978,7 +2075,7 @@ export const PAGE_HTML = `<!doctype html>
         '<div class="rows">' + rows.map(rowHtml).join("") + "</div></section>";
     }
     host.innerHTML = html;
-    host.querySelectorAll(".row").forEach((row) => row.addEventListener("click", () => select(Number(row.dataset.issue))));
+    host.querySelectorAll("[data-issue]").forEach((row) => row.addEventListener("click", () => select(Number(row.dataset.issue))));
   }
 
   function select(issue) {
@@ -1987,7 +2084,7 @@ export const PAGE_HTML = `<!doctype html>
     if (logSource) { logSource.close(); logSource = null; }
     if (timelineSource) { timelineSource.close(); timelineSource = null; }
     const pane = $("logpane");
-    pane.hidden = false;
+    if (!pane.open) pane.showModal();
     $("logtitle").textContent = "Log — issue #" + issue;
     $("logsearch").value = "";
     logBuffer = "";
@@ -2001,6 +2098,25 @@ export const PAGE_HTML = `<!doctype html>
     timelineSource = new EventSource("/api/timeline?issue=" + issue);
     timelineSource.addEventListener("timeline", (ev) => { timelineBuffer = timelineBuffer.concat(JSON.parse(ev.data)); renderTimeline(); });
   }
+
+  // Closing the log modal (×, backdrop click, or Esc) drops the selection and
+  // stops both live streams — no hidden EventSource keeps polling behind a
+  // closed dialog. Cleanup is idempotent and wired to every close path
+  // directly ('cancel' covers Esc; 'close' is kept as a belt-and-braces
+  // fallback rather than the sole path).
+  function closeLog() {
+    const pane = $("logpane");
+    if (pane.open) pane.close();
+    if (selected == null) return;
+    selected = null;
+    if (logSource) { logSource.close(); logSource = null; }
+    if (timelineSource) { timelineSource.close(); timelineSource = null; }
+    renderWorkers();
+  }
+  $("logclose").addEventListener("click", closeLog);
+  $("logpane").addEventListener("click", (e) => { if (e.target === $("logpane")) closeLog(); });
+  $("logpane").addEventListener("cancel", closeLog);
+  $("logpane").addEventListener("close", closeLog);
 
   // Render the per-issue activity timeline from timelineBuffer — each event
   // shows its timestamp, event type, and any adapter/attempt/PR/pid fields it
@@ -2136,6 +2252,32 @@ export const PAGE_HTML = `<!doctype html>
     const attr = title ? ' title="' + esc(title) + '"' : "";
     return '<span class="' + cls + '"' + attr + '><span class="sumnum">' + esc(text) + '</span><span class="sumlabel">' + esc(label) + "</span></span>";
   }
+  // The full agent roster from herd.json (snapshot.deck carries every
+  // configured adapter, live or idle): image + name, next to the escalations
+  // count. Selection activity rides on it: the agent the next dispatch will
+  // try first wears a NEXT chip, the label names the routing policy, and the
+  // meta line shows the most recent dispatch. No adapters configured renders
+  // no tile.
+  function rosterCell() {
+    const cards = snapshot.deck || [];
+    if (!cards.length) return "";
+    const r = snapshot.routing || null;
+    const agents = cards.map((c) => {
+      const src = c.avatar || c.defaultAvatar;
+      const isNext = r && r.nextAdapter === c.name;
+      const title = isNext ? ' title="next dispatch tries ' + esc(c.name) + ' first (' + esc(r.policy) + ')"' : "";
+      return '<span class="roster-agent' + (isNext ? " next" : "") + '"' + title + '><img alt="" src="' + esc(src) +
+        '" data-default="' + esc(c.defaultAvatar) + '" onerror="avatarFallback(this)">' +
+        '<span class="roster-name">' + esc(c.name) + "</span>" +
+        (isNext ? '<span class="next-chip">next</span>' : "") + "</span>";
+    }).join("");
+    const label = '<span class="sumlabel">agents' + (r ? " · " + esc(r.policy) : "") + "</span>" +
+      (r && r.lastDispatch
+        ? '<span class="roster-meta">last: ' + esc(r.lastDispatch.adapter) + " → #" + esc(r.lastDispatch.issue) +
+          " · " + esc(checksAgo(Date.parse(r.lastDispatch.ts))) + "</span>"
+        : "");
+    return '<span class="sumroster"><span class="roster-head">' + label + '</span><span class="roster-agents">' + agents + "</span></span>";
+  }
   function renderSummaryStrip() {
     const el = $("summarystrip");
     if (!el) return;
@@ -2146,10 +2288,20 @@ export const PAGE_HTML = `<!doctype html>
       summaryCell("ready", s.ready) +
       summaryCell("live workers", s.liveWorkers) +
       summaryCell("awaiting review", s.awaitingReview) +
-      summaryCell("escalations", s.unresolvedEscalations, true);
+      summaryCell("escalations", s.unresolvedEscalations, true) +
+      rosterCell();
   }
 
-  function render() { renderSummaryStrip(); renderDeck(); renderErrCount(); renderAdapterHealth(); renderEscalations(); renderWorkers(); renderTotals(); renderHeartbeat(); }
+  // herd.json failure banner: shows the exact config error while snapshots run
+  // on the last good config, so a vanished roster is never a silent mystery.
+  function renderConfigBanner() {
+    const el = $("configbanner");
+    if (!el) return;
+    if (!snapshot.configError) { el.hidden = true; return; }
+    el.hidden = false;
+    el.textContent = "herd.json is invalid — running on the last good config. " + snapshot.configError;
+  }
+  function render() { renderConfigBanner(); renderSummaryStrip(); renderDeck(); renderErrCount(); renderAdapterHealth(); renderEscalations(); renderWorkers(); renderTotals(); renderHeartbeat(); }
 
   const stream = new EventSource("/api/stream");
   stream.addEventListener("snapshot", (ev) => {

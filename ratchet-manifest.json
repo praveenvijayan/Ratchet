@@ -431,6 +431,10 @@
       "class": "excluded"
     },
     {
+      "path": "scripts/herd-ui-combined-cards.test.mjs",
+      "class": "excluded"
+    },
+    {
       "path": "scripts/herd-ui-mascot-deck.test.mjs",
       "class": "excluded"
     },
