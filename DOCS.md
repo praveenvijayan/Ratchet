@@ -86,7 +86,20 @@ an opt-in, post-merge "ship" stage that tags a version, publishes a changelog
 from the merged PR titles, and can run a repo-owned deploy command after the
 tag/release exists. It is off by default and never blocks the loop.
 
-The seven steps, as defined in `AGENTS.md`:
+`AGENTS.md` is the **always-loaded safety kernel**: it carries every invariant an
+agent must know *before* deciding what to load next, and defers the procedures and
+longer explanations to the skills, scripts, `DOCS.md`, and `plan/README.md` named in
+its **routing table** — the rule is *read the routed file, never guess*. Authority,
+ownership, scope, and safety are never deferred; they live in the kernel itself. The
+fragile state transitions (claim, requeue, heartbeat, hand-off) are deterministic
+one-command scripts with exit-code contracts (§13), not multi-step shell an agent
+could get subtly wrong. Each hard rule carries a stable `<!-- ratchet:invariant:<id> -->`
+marker, and the `protocol-coverage` gate (`scripts/protocol-coverage.mjs`, run under
+`pr-gates`) fails the build if a routing-table path, an invariant marker, or a
+kernel-named script drifts away from the artifact it points at — so the kernel can
+never quietly fall out of sync with the skills and scripts it routes to.
+
+The seven steps, as defined in the `AGENTS.md` kernel:
 
 1. **Pick** — one deterministic query: open issues, `state:ready`, no open
    blockers, sorted by priority then age. Take the top one. Rework outranks new
@@ -166,7 +179,7 @@ identically everywhere.
 ## 4. Repository layout
 
 ```
-AGENTS.md                       Operating manual — the 7-step loop (100% framework)
+AGENTS.md                       Always-loaded safety kernel: invariants + routing table to skills/scripts/DOCS (100% framework)
 GATES.md                        Project config you hand-author: verification gates
 CLAUDE.md / GEMINI.md           One-line pointers to AGENTS.md
 DOCS.md                         This document
@@ -324,6 +337,7 @@ side effects. Invoke as `/name` in Claude Code or Antigravity, or `/skills` /
 | `/ratchet-sync` | Only without the PR flow | Local/no-PR escape hatch: compiles working-tree `plan/*.md` into issues now. Normally unused — merging the planning PR does this. |
 | `/ratchet-next` | After a merge or review | Advances (sync main + next issue) on approval, or reworks the same PR on rejection. The heart of the continuous local loop. |
 | `/ratchet-status` | When nothing seems ready | Read-only diagnosis of the queue: why nothing is pickable (drafts without criteria, blocked chains, unmerged planning PR) and the next action to unblock. |
+| `/ratchet-hotfix` | Production breakage only (explicit human trigger) | The one sanctioned exception to plan-first: on an explicit "hotfix" / "revert PR #M", branches `hotfix/<slug>` off `main`, makes a revert (default) or a minimal forward fix, runs the `GATES.md` gates, and opens a human-reviewed PR — skipping only the plan → planning-PR round trip, never the gates or the merge gate. Never self-invoked. |
 | `/ratchet-metrics` | To inspect loop health | Read-only report from GitHub data: cycle time, rework rate, stale-claim sweeps, and queue depth by state. |
 | `/ratchet-memory` | Periodically (e.g. quarterly) | Prunes and dedupes `memory/MEMORY.md`, verifies issue/PR links, stops for review. |
 | `/ratchet-map` | When structure drifts | Regenerates the coarse codebase map `memory/ARCHITECTURE.md` (language-agnostic), stops for review. |
@@ -376,6 +390,14 @@ See §8 — this is the routine that responds to a human's PR decision.
 The GitHub-mutating workflows read `${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN }}`
 so they work with the default token and upgrade automatically when the PAT is
 set (see §10).
+
+Beyond these event- and schedule-driven workflows, the `pr-gates` `gates` job runs
+the full `GATES.md` suite — including the `protocol-coverage` gate
+(`scripts/protocol-coverage.mjs`). That gate enforces the kernel-plus-routing shape
+of `AGENTS.md`: every routing-table file path, every `<!-- ratchet:invariant:<id> -->`
+marker, and every kernel-named `ratchet-*.mjs` script must still resolve to a real
+artifact, or the build fails. It is how the always-loaded kernel is kept from
+drifting out of sync with the skills, references, and scripts it defers to.
 
 ### Security: the unattended runner's trust boundary
 
@@ -826,6 +848,55 @@ node scripts/herd.mjs init         # write a default .ratchet/herd.json
 node scripts/herd.mjs run          # survey → monitor → verify → review → retention → dispatch, one issue per worker
 node scripts/herd.mjs run --issues 12,34   # scope dispatch to a named set (also: repeated --issue 12 --issue 34)
 ```
+
+### Deterministic loop scripts
+
+The fragile loop transitions are one-command Node scripts with stable exit-code
+contracts — run one, read its exit code, and act on it (each also prints a single
+JSON line to stdout). The `AGENTS.md` kernel calls these directly instead of
+spelling out multi-step shell an agent could get subtly wrong.
+
+| Script | Invocation | Exit codes |
+|--------|------------|------------|
+| `ratchet-start.mjs` | `node scripts/ratchet-start.mjs --issue <N> --owner "<id>"` | `0` claimed/resumed · `2` invalid args · `3` foreign (ref exists — another owner) · `4` unsafe (worktree owner mismatch) · `1` API/other failure |
+| `ratchet-requeue.mjs` | `node scripts/ratchet-requeue.mjs --issue <N> --reason "<text>"` | `0` success · `2` invalid args · `1` API failure |
+| `ratchet-heartbeat.mjs` | `node scripts/ratchet-heartbeat.mjs --issue <N>` | `0` success · `2` invalid args · `1` API failure |
+| `ratchet-submit.mjs` | `node scripts/ratchet-submit.mjs --issue <N> --body-file <path>` | `0` success/idempotent · `2` invalid args or bad body first line · `4` not integrated / would conflict · `5` red gate · `1` API/other failure |
+
+`ratchet-start.mjs` performs the whole claim atomically — server-side
+`agent/issue-<N>` ref off fresh `main`, worktree, `.ratchet-owner` marker, label flip
+to `state:in-progress`, self-assign. `ratchet-submit.mjs` performs the whole hand-off
+— it integrates `main`, runs the gates fail-fast, refuses red or conflicted work,
+pushes, keeps a single PR whose first line must be `Closes #<N>`, and flips the issue
+to `state:in-review`. `ratchet-heartbeat.mjs` renews a claim's lease during a long
+build without pushing code; `ratchet-requeue.mjs` returns an issue to `state:ready`
+with an explaining comment when work is abandoned or over-scoped.
+
+Both `--flag value` and `--flag=value` forms are accepted. Every argument is
+validated before any API call, so a bad invocation exits `2` without mutating
+GitHub.
+
+### The shared GitHub client (`scripts/gh-api.mjs`)
+
+Every Ratchet script that touches the GitHub REST API goes through one shared
+client, `scripts/gh-api.mjs`; no script constructs its own `fetch` wrapper or
+resolves its own credentials. It exports `ghClient(token)` (an authenticated request
+function), `paginate(gh, path)` (follows `per_page=100` pagination), and
+`resolveAuth()` (resolves the token and the repo). The `gh-api-migration` gate
+(`scripts/gh-api-migration.test.mjs`) guards this — a script that builds its own
+client instead of importing the shared one fails CI.
+
+`resolveAuth()` resolves the **token** in a fixed precedence order, reading from the
+process environment or a local `.env` file and falling back to the `gh` CLI:
+
+1. `GITHUB_TOKEN` (environment or `.env`)
+2. `GITHUB_PAT` (environment or `.env`)
+3. `gh auth token` (the authenticated `gh` CLI)
+
+The **repository** is resolved the same way: `GITHUB_REPOSITORY` first, then
+`gh repo view --json nameWithOwner`. This is why the local loop needs no CI secret —
+it runs under your own `gh` auth — while CI supplies `FACTORY_PAT` / `GITHUB_TOKEN`
+through the environment.
 
 ---
 
