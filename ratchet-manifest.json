@@ -146,6 +146,11 @@
       "profile": "core"
     },
     {
+      "path": "scripts/skill-detail.mjs",
+      "class": "framework",
+      "profile": "core"
+    },
+    {
       "path": "scripts/skill-parity.mjs",
       "class": "framework",
       "profile": "core"
@@ -536,6 +541,10 @@
     },
     {
       "path": "scripts/run-gates.test.mjs",
+      "class": "excluded"
+    },
+    {
+      "path": "scripts/skill-detail.test.mjs",
       "class": "excluded"
     },
     {
