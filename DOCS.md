@@ -244,6 +244,8 @@ scripts/
   plan-sync.test.mjs            Regression test for the compiler
   pr-size-check.mjs             Enforce the agent PR size limit in CI
   pr-size-check.test.mjs        Regression test for the size gate
+  protocol-coverage.mjs         Guard: kernel routes/invariants/scripts match the deferred artifacts
+  protocol-coverage.test.mjs    Regression test for the protocol-coverage gate
   ratchet-init-skill.test.mjs   Regression test for the init skill contract
   ratchet-hotfix-skill.test.mjs Regression test for the hotfix/revert fast-lane skill contract
   ratchet-heartbeat.mjs         Post a lease heartbeat comment to renew a claim without pushing
