@@ -25,6 +25,10 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+// The real herd config loader — used to prove the seeded .ratchet/herd.json is
+// valid without starting the supervisor poll loop (importing is side-effect-free
+// under the isMain guard in herd.mjs).
+import { loadConfig } from "./herd.mjs";
 
 const BOOTSTRAP = fileURLToPath(new URL("./bootstrap.sh", import.meta.url));
 const SELF = fileURLToPath(import.meta.url);
@@ -331,7 +335,7 @@ function runNode(host, scriptRel, args) {
   const res = spawnSync("node", [scriptRel, ...args], { cwd: host, encoding: "utf8" });
   return { status: res.status, out: `${res.stdout || ""}${res.stderr || ""}` };
 }
-function herdRelease({ includeHerdImpl = true } = {}) {
+function herdRelease({ includeHerdImpl = true, tag = "v9.9.9" } = {}) {
   const files = {
     "AGENTS.md": "MANUAL\n",
     "scripts/herd.mjs": REAL_HERD_MJS,
@@ -371,6 +375,7 @@ function herdRelease({ includeHerdImpl = true } = {}) {
       ],
     },
     files,
+    tag,
   });
 }
 
@@ -491,6 +496,77 @@ function herdRelease({ includeHerdImpl = true } = {}) {
 // --- #330 AC6: every criterion above has exactly one test named after it ---
 // (asserted by the Meta block below, which counts the #330 AC1..AC6 blocks).
 
+// --- #399 AC1: a fresh install that includes the herd profile leaves
+// .ratchet/herd.json seeded with the default config, so the herd starts
+// without any manual config step ---
+{
+  const host = makeHost();
+  const r = run(host, ["--version", "v9.9.9"], herdRelease());
+  assert.equal(r.status, 0, `default (herd) install must succeed: ${r.out}`);
+  const cfgPath = join(host, ".ratchet/herd.json");
+  assert.ok(existsSync(cfgPath), "seeds .ratchet/herd.json on a herd-profile install");
+  // The real herd loader accepts the seeded file as-is: the herd starts with no
+  // manual `node scripts/herd.mjs init` step (the exact gap this issue closed).
+  const cfg = loadConfig(cfgPath);
+  assert.ok(Object.keys(cfg.adapters).length > 0, "the seeded config carries the herd's default adapters");
+}
+
+// --- #399 AC2: an existing .ratchet/herd.json is never overwritten by install
+// or update — its content survives both byte-for-byte ---
+{
+  const host = makeHost();
+  assert.equal(run(host, ["--version", "v9.9.9"], herdRelease()).status, 0, "initial herd install must succeed");
+  const cfgPath = join(host, ".ratchet/herd.json");
+  // Stand in for a user who has edited their runtime config.
+  const custom = JSON.stringify({ maxWorkers: 9, adapters: { claude: { launch: ["claude"] } } }, null, 2) + "\n";
+  writeFileSync(cfgPath, custom);
+
+  // Re-running install (with --force to clear the framework-file conflicts) must
+  // leave the runtime config untouched.
+  const reinstall = run(host, ["--version", "v9.9.9", "--force"], herdRelease());
+  assert.equal(reinstall.status, 0, `--force reinstall must succeed: ${reinstall.out}`);
+  assert.ok(/skipped \(already exists\): \.ratchet\/herd\.json/.test(reinstall.out), "reinstall reports the config skipped, not rewritten");
+  assert.equal(readFileSync(cfgPath, "utf8"), custom, "install never overwrites an existing .ratchet/herd.json");
+
+  // ratchet-update to a newer version must also leave it byte-for-byte. --force
+  // only bears on framework files (it clears the installer/updater directory-hash
+  // difference on the skill dir); .ratchet/herd.json is not a framework path, so
+  // this still proves update never touches the runtime config.
+  const UPDATE = fileURLToPath(new URL("./ratchet-update.sh", import.meta.url));
+  const up = spawnSync("bash", [UPDATE, "v2.0.0", "--force"], {
+    cwd: host,
+    env: { ...process.env, RATCHET_REMOTE: herdRelease({ tag: "v2.0.0" }) },
+    encoding: "utf8",
+  });
+  assert.equal(up.status, 0, `update must succeed: ${up.stdout || ""}${up.stderr || ""}`);
+  assert.equal(readFileSync(cfgPath, "utf8"), custom, "update never overwrites .ratchet/herd.json");
+}
+
+// --- #399 AC3: an explicit core-only install (--profile core) creates nothing
+// under .ratchet/ ---
+{
+  const host = makeHost();
+  const r = run(host, ["--version", "v9.9.9", "--profile", "core"], herdRelease());
+  assert.equal(r.status, 0, `core-only install must succeed: ${r.out}`);
+  // scripts/herd.mjs ships in `core`, so the loader is present — but no herd
+  // profile means no runtime state is seeded.
+  assert.ok(existsSync(join(host, "scripts/herd.mjs")), "the core herd loader is still installed");
+  assert.ok(!existsSync(join(host, ".ratchet")), "a core-only install creates nothing under .ratchet/");
+}
+
+// --- #399 AC4: install output for a herd-profile install names
+// .ratchet/herd.json and the command that starts the herd ---
+{
+  const host = makeHost();
+  const r = run(host, ["--version", "v9.9.9"], herdRelease());
+  assert.equal(r.status, 0, `herd install must succeed: ${r.out}`);
+  assert.ok(r.out.includes(".ratchet/herd.json"), "install output names the seeded config path");
+  assert.ok(/node scripts\/herd\.mjs run/.test(r.out), "install output names the command that starts the herd");
+}
+
+// --- #399 AC5: every criterion above has exactly one test named after it ---
+// (asserted by the Meta block below, which counts the #399 AC1..AC4 blocks.)
+
 // --- Meta: exactly one test block per functional criterion ------------------
 {
   const src = readFileSync(SELF, "utf8");
@@ -506,7 +582,11 @@ function herdRelease({ includeHerdImpl = true } = {}) {
     const hits = src.match(new RegExp(`--- #330 AC${n}:`, "g")) || [];
     assert.equal(hits.length, 1, `expected exactly one "#330 AC${n}" block, found ${hits.length}`);
   }
+  for (let n = 1; n <= 5; n++) {
+    const hits = src.match(new RegExp(`--- #399 AC${n}:`, "g")) || [];
+    assert.equal(hits.length, 1, `expected exactly one "#399 AC${n}" block, found ${hits.length}`);
+  }
 }
 
 for (const d of dirs) rmSync(d, { recursive: true, force: true });
-console.log("PASS bootstrap.test.mjs (13 + #325×3 + #330×6 criteria, end-to-end)");
+console.log("PASS bootstrap.test.mjs (13 + #325×3 + #330×6 + #399×5 criteria, end-to-end)");
