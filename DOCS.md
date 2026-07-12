@@ -216,6 +216,8 @@ scripts/
   gates-table.mjs               Shared parser for the GATES.md markdown table
   herd.mjs                      ratchet-herd config loader, validator, init
   herd.test.mjs                 Regression test for herd config
+  herd-adapters.mjs             Leaf module: adapter resolution (resolveAdapter/substitute/extractUsage), imports nothing from herd.mjs
+  herd-adapters.test.mjs        Regression test for the herd-adapters leaf extraction
   herd-survey.mjs               ratchet-herd survey/reconcile poll loop
   herd-survey.test.mjs          Regression test for herd survey loop
   herd-dispatch.mjs             ratchet-herd worker dispatcher

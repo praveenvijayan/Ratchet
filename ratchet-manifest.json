@@ -265,6 +265,11 @@
       "profile": "core"
     },
     {
+      "path": "scripts/herd-adapters.mjs",
+      "class": "framework",
+      "profile": "core"
+    },
+    {
       "path": "scripts/herd-survey.mjs",
       "class": "framework",
       "profile": "herd"
@@ -529,6 +534,10 @@
     },
     {
       "path": "scripts/herd.test.mjs",
+      "class": "excluded"
+    },
+    {
+      "path": "scripts/herd-adapters.test.mjs",
       "class": "excluded"
     },
     {

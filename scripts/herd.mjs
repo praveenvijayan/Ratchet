@@ -13,9 +13,25 @@
 // Zero dependencies. Requires Node 20+. Run:  node scripts/herd.mjs init
 //                                             node scripts/herd.mjs run
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync, realpathSync, accessSync, constants as fsConstants } from "node:fs";
-import { dirname, join, isAbsolute, resolve, delimiter as pathDelimiter } from "node:path";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync, realpathSync } from "node:fs";
+import { dirname, join, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+
+// Adapter resolution lives in the herd-adapters leaf (issue #393): the profile
+// modules import it there, outside the herd.mjs ⇄ profile cycle. herd.mjs core
+// still uses DEFAULT_POLICY/USAGE_FIELDS in normalizeConfig and re-exports every
+// public name, so existing importers of `./herd.mjs` are unchanged. Allowed
+// direction only — herd.mjs → herd-adapters, never the reverse.
+export {
+  DEFAULT_POLICY,
+  USAGE_FIELDS,
+  executableOnPath,
+  adapterAvailability,
+  substitute,
+  extractUsage,
+  resolveAdapter,
+} from "./herd-adapters.mjs";
+import { DEFAULT_POLICY, USAGE_FIELDS } from "./herd-adapters.mjs";
 
 // The herd supervisor's implementation modules (herd-survey, -dispatch, -monitor,
 // -verify, -review, -retention) ship in the `herd` profile. This file is the
@@ -58,13 +74,6 @@ export const CONFIG_PATH = ".ratchet/herd.json";
 // of piling onto the first. Both are generic policy names — no CLI or model is
 // named here, so the purity test stays green.
 export const SELECTION_POLICIES = Object.freeze(["failover", "round-robin"]);
-export const DEFAULT_POLICY = "failover";
-
-// The usage numbers a herd worker can report on its worker-exit event. An
-// adapter declares how to read each of these from its own log via a `usage`
-// mapping (see normalizeConfig / extractUsage); the framework never knows any
-// CLI's log format — the mapping is config, like {model}.
-export const USAGE_FIELDS = Object.freeze(["costUsd", "tokensIn", "tokensOut"]);
 
 // Optional top-level fields and the defaults applied when they are omitted.
 export const DEFAULTS = Object.freeze({
@@ -128,49 +137,6 @@ export function defaultConfig() {
     },
     routing: { default: "claude", labels: {} },
   };
-}
-
-// Substitute ONLY {prompt}, {issue}, and {model}. Every other brace token —
-// {other}, ${bar} — passes through byte-for-byte. Accepts a string or a command
-// array (each element rendered); a key not supplied (or supplied as undefined,
-// e.g. a model-free adapter) is left verbatim.
-export function substitute(template, vars = {}) {
-  const render = (s) =>
-    String(s).replace(/\{(prompt|issue|model)\}/g, (whole, key) =>
-      Object.prototype.hasOwnProperty.call(vars, key) && vars[key] !== undefined ? String(vars[key]) : whole,
-    );
-  return Array.isArray(template) ? template.map(render) : render(template);
-}
-
-// Extract an adapter's usage numbers from its log text using its config-driven
-// `usage` mapping — each field a regex whose first capture group is the number.
-// Pure and total: a field whose pattern is invalid, does not match, or captures
-// a non-number resolves to null and is named in `unresolved`, so the caller can
-// warn without extraction ever throwing (the worker-exit path must never crash).
-// Returns { values: { costUsd, tokensIn, tokensOut }, unresolved: [field, ...] }.
-export function extractUsage(usage, logText) {
-  const text = typeof logText === "string" ? logText : "";
-  const values = {};
-  const unresolved = [];
-  for (const field of USAGE_FIELDS) {
-    const pattern = usage && usage[field];
-    let value = null;
-    if (typeof pattern === "string" && pattern !== "") {
-      try {
-        const m = new RegExp(pattern).exec(text);
-        if (m && m[1] !== undefined) {
-          const n = Number(m[1]);
-          if (Number.isFinite(n)) value = n;
-        }
-      } catch {
-        // An invalid regex slipped past config validation — treat as unresolved
-        // rather than throw; a bad mapping must not crash the supervisor.
-      }
-    }
-    values[field] = value;
-    if (value === null) unresolved.push(field);
-  }
-  return { values, unresolved };
 }
 
 const isPlainObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
@@ -387,107 +353,6 @@ export function initConfig(path = CONFIG_PATH) {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, JSON.stringify(defaultConfig(), null, 2) + "\n");
   return path;
-}
-
-// Default availability probe: does `exe` resolve to an executable file? An exe
-// containing a path separator is checked at that path directly; a bare name is
-// searched across every PATH entry. Injectable everywhere it is used so tests
-// decide availability offline without a real fleet installed.
-export function executableOnPath(exe, env = process.env) {
-  if (typeof exe !== "string" || exe === "") return false;
-  const isExec = (p) => {
-    try {
-      accessSync(p, fsConstants.X_OK);
-      return true;
-    } catch {
-      return false;
-    }
-  };
-  if (exe.includes("/") || exe.includes("\\")) return isExec(exe);
-  const dirs = String(env.PATH || "").split(pathDelimiter).filter(Boolean);
-  return dirs.some((dir) => isExec(join(dir, exe)));
-}
-
-// Decide whether a single adapter can actually run right now, deterministically
-// and offline-testably: its launch executable must resolve on PATH AND every
-// variable it declares in `requiresEnv` must be set and non-empty. The launch
-// binary is checked first so the reason distinguishes a missing binary from an
-// unset env var. Returns { available, reason }; reason is null when available.
-export function adapterAvailability(adapter, { env = process.env, onPath = executableOnPath } = {}) {
-  const exe = adapter.launch[0];
-  if (!onPath(exe, env))
-    return { available: false, reason: `its launch binary "${exe}" was not found on PATH` };
-  for (const name of adapter.requiresEnv || []) {
-    const value = env[name];
-    if (value === undefined || value === "")
-      return { available: false, reason: `its required environment variable ${name} is unset or empty` };
-  }
-  return { available: true, reason: null };
-}
-
-// Resolve which adapter handles an issue given its labels, honoring availability
-// and the route's selection policy. The first label (in the order supplied) with
-// a routing entry selects that entry's route; if none match, the default route
-// is used. A route is an ordered list of adapter names (a bare name normalized to
-// a one-element list). Under the default `failover` policy the first available
-// adapter wins — so a config whose preferred binary is present dispatches exactly
-// as before. Under `round-robin` the scan starts at `deps.cursors[source]` and
-// takes the first available adapter at or after it (wrapping), spreading
-// successive dispatches across the available adapters; `nextCursor` is where the
-// next dispatch to this route should resume. Returns
-// { name, adapter, source, route, tried, policy, cursorKey, nextCursor }: on
-// success name/adapter are the winner; when no adapter in the route is available
-// both are null and `tried` lists every adapter with why it was unavailable.
-export function resolveAdapter(config, labels = [], deps = {}) {
-  const { env = process.env, onPath = executableOnPath, cursors = {} } = deps;
-  // A route may be a list, a bare adapter name, or an object `{ adapters, policy }`
-  // (an un-normalized config). Coerce here too so it resolves identically to a
-  // normalized one.
-  const isRouteObject = (r) => r && typeof r === "object" && !Array.isArray(r) && Array.isArray(r.adapters);
-  const asList = (route) =>
-    Array.isArray(route) ? route : isRouteObject(route) ? route.adapters : [route];
-
-  let source = "routing.default";
-  let raw = config.routing.default;
-  for (const label of labels) {
-    if (config.routing.labels[label]) {
-      raw = config.routing.labels[label];
-      source = `routing.labels["${label}"]`;
-      break;
-    }
-  }
-  const route = asList(raw);
-  // Policy comes from the normalized routing.policies map, or from an object
-  // route on an un-normalized config, defaulting to failover.
-  const policy =
-    (config.routing.policies && config.routing.policies[source]) ||
-    (isRouteObject(raw) ? raw.policy : undefined) ||
-    DEFAULT_POLICY;
-
-  const tried = [];
-  const start = ((Number(cursors[source]) || 0) % route.length + route.length) % route.length;
-  const order =
-    policy === "round-robin"
-      ? Array.from({ length: route.length }, (_, i) => (start + i) % route.length)
-      : route.map((_, i) => i);
-  for (const idx of order) {
-    const name = route[idx];
-    const adapter = config.adapters[name];
-    const { available, reason } = adapterAvailability(adapter, { env, onPath });
-    if (available)
-      return {
-        name,
-        adapter,
-        source,
-        route: route.slice(),
-        tried,
-        policy,
-        cursorKey: source,
-        nextCursor: (idx + 1) % route.length,
-      };
-    tried.push({ name, reason });
-  }
-  return { name: null, adapter: null, source, route: route.slice(), tried, policy, cursorKey: source, nextCursor: start };
 }
 
 // --- Single-supervisor lock -------------------------------------------------

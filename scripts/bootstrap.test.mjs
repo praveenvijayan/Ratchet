@@ -323,6 +323,10 @@ const STD = {
 // guard is exercised), herd-profile supervisor stubs, the ratchet-herd skill,
 // and the mascots/ generated directory.
 const REAL_HERD_MJS = readFileSync(fileURLToPath(new URL("./herd.mjs", import.meta.url)), "utf8");
+// herd.mjs statically imports its adapter leaf (issue #393); both are `core`, so
+// the fixture ships the real leaf too — otherwise herd.mjs can't even load and
+// the missing-herd-*profile* guard below would never be reached.
+const REAL_HERD_ADAPTERS_MJS = readFileSync(fileURLToPath(new URL("./herd-adapters.mjs", import.meta.url)), "utf8");
 function runNode(host, scriptRel, args) {
   const res = spawnSync("node", [scriptRel, ...args], { cwd: host, encoding: "utf8" });
   return { status: res.status, out: `${res.stdout || ""}${res.stderr || ""}` };
@@ -331,6 +335,7 @@ function herdRelease({ includeHerdImpl = true } = {}) {
   const files = {
     "AGENTS.md": "MANUAL\n",
     "scripts/herd.mjs": REAL_HERD_MJS,
+    "scripts/herd-adapters.mjs": REAL_HERD_ADAPTERS_MJS,
     "plan/README.md": "# plan/README.md\n",
     ".agents/skills/ratchet-herd/SKILL.md": "---\nname: ratchet-herd\n---\n# herd skill\n",
     "mascots/fig-goggles.png": Buffer.from("fake-goggles"),
@@ -347,6 +352,7 @@ function herdRelease({ includeHerdImpl = true } = {}) {
       files: [
         { path: "AGENTS.md", class: "framework", profile: "core" },
         { path: "scripts/herd.mjs", class: "framework", profile: "core" },
+        { path: "scripts/herd-adapters.mjs", class: "framework", profile: "core" },
         { path: "plan/README.md", class: "framework", profile: "core" },
         { path: "scripts/herd-survey.mjs", class: "framework", profile: "herd" },
         { path: "scripts/herd-dispatch.mjs", class: "framework", profile: "herd" },
