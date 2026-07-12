@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, dirname } from "node:path";
+import { execFileSync } from "node:child_process";
 
 import { ghClient, paginate, resolveAuth, API, API_VERSION } from "./gh-api.mjs";
 
@@ -204,3 +205,100 @@ function stubResponse({ ok = true, status = 200, json = null, text = "" }) {
 }
 
 console.log("PASS gh-api.test.mjs");
+
+// ===========================================================================
+// Issue #342 (plan 0151-migrate-gh-api-verdict-scripts): the first three
+// consumers — unblock-dependents.mjs, review-verdict.mjs, and
+// review-verdict-sweep.mjs — drop their byte-identical private clients and
+// adopt this module. Its acceptance criteria live here, beside the client they
+// migrate onto, one test per criterion and self-counted. `#342` markers are
+// distinct from the `#341` markers counted above, so the two never collide.
+// ===========================================================================
+
+// The three scripts this migration touches, with the shared symbols each uses.
+// review-verdict.mjs issues single reads only, so it needs no paginate.
+const MIGRATED = [
+  { file: "unblock-dependents.mjs", uses: ["ghClient", "paginate", "resolveAuth"] },
+  { file: "review-verdict.mjs", uses: ["ghClient", "resolveAuth"] },
+  { file: "review-verdict-sweep.mjs", uses: ["ghClient", "paginate", "resolveAuth"] },
+];
+const scriptsDir = dirname(fileURLToPath(import.meta.url));
+const readScript = (name) => readFileSync(join(scriptsDir, name), "utf8");
+
+// --- #342 Criterion 1: all three scripts import the shared client from
+// scripts/gh-api.mjs and define no private fetch client, token resolution, or
+// pagination loop of their own. ---------------------------------------------
+{
+  for (const { file, uses } of MIGRATED) {
+    const src = readScript(file);
+    const importMatch = src.match(/import\s*\{([^}]*)\}\s*from\s*["']\.\/gh-api\.mjs["']/);
+    assert.ok(importMatch, `${file} imports from ./gh-api.mjs`);
+    const imported = importMatch[1].split(",").map((s) => s.trim());
+    for (const sym of uses) {
+      assert.ok(imported.includes(sym), `${file} imports ${sym} from the shared client`);
+    }
+    assert.doesNotMatch(src, /https:\/\/api\.github\.com/, `${file} no longer hard-codes the API base`);
+    assert.doesNotMatch(src, /function\s+ghClient\b/, `${file} defines no private ghClient`);
+    assert.doesNotMatch(src, /function\s+paginate\b/, `${file} defines no private pagination loop`);
+    assert.doesNotMatch(
+      src,
+      /process\.env\.GITHUB_TOKEN\s*\|\|\s*process\.env\.GITHUB_PAT/,
+      `${file} does no private token resolution`,
+    );
+  }
+}
+
+// --- #342 Criterion 2: each script's existing behaviour suite passes unchanged
+// in what it asserts — run all three as subprocesses and require exit 0. This
+// file is not one of the three, so no suite re-runs itself. ------------------
+{
+  for (const { file } of MIGRATED) {
+    const testFile = file.replace(/\.mjs$/, ".test.mjs");
+    let status = 0;
+    let out = "";
+    try {
+      out = execFileSync(process.execPath, [join(scriptsDir, testFile)], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (e) {
+      status = e.status ?? 1;
+      out = `${e.stdout || ""}${e.stderr || ""}`;
+    }
+    assert.equal(status, 0, `${testFile} must still pass after the migration:\n${out}`);
+  }
+}
+
+// --- #342 Criterion 3: a missing token or repository surfaces the shared
+// client's single clear error message from every migrated script's main(). ---
+{
+  const noToken = { env: {}, readEnv: () => ({}), runCommand: () => undefined };
+  const noRepo = { env: { GITHUB_TOKEN: "t" }, readEnv: () => ({}), runCommand: () => undefined };
+  for (const { file } of MIGRATED) {
+    const { main } = await import(`./${file}`);
+    await assert.rejects(
+      () => main({ auth: () => resolveAuth(noToken) }),
+      /Missing GitHub token/,
+      `${file} surfaces the shared client's missing-token error`,
+    );
+    await assert.rejects(
+      () => main({ auth: () => resolveAuth(noRepo) }),
+      /Missing GitHub repository/,
+      `${file} surfaces the shared client's missing-repository error`,
+    );
+  }
+}
+
+// --- #342 Criterion 4: every criterion above has exactly one test named after
+// it — count this file's own `#342 Criterion N` markers, 1..4. ---------------
+{
+  const CRITERIA_342 = 4;
+  const selfText = readFileSync(fileURLToPath(import.meta.url), "utf8");
+  const markers = [...selfText.matchAll(/^\/\/ --- #342 Criterion (\d+):/gim)].map((m) => Number(m[1]));
+  const unique = new Set(markers);
+  assert.equal(markers.length, unique.size, "each #342 criterion tested exactly once (no duplicate markers)");
+  assert.equal(markers.length, CRITERIA_342, `exactly ${CRITERIA_342} #342 criterion markers are present`);
+  for (let n = 1; n <= CRITERIA_342; n++) assert.ok(unique.has(n), `#342 criterion ${n} has a test`);
+}
+
+console.log("PASS gh-api.test.mjs #342 verdict-script migration (4 criteria)");
