@@ -266,4 +266,93 @@ const memory = read("memory/MEMORY.md");
   }
 }
 
-console.log("PASS docs-refresh.test.mjs (6 #60 criteria + 4 #191 criteria + 4 #91 criteria + 3 #233 criteria + 2 #268 criteria)");
+// --- #347 Criterion 1: DOCS.md §2 (loop), §4 (repository layout), and §6
+// (workflows) describe the kernel-plus-routing manual: AGENTS.md stays
+// always-loaded, defers to skills/references via a routing table, and its
+// invariant-marker scheme is guarded by the protocol-coverage gate. ---
+{
+  const s2 = docs.slice(docs.indexOf("## 2. How the loop works"), docs.indexOf("## 3. Cross-tool design"));
+  const s4 = docs.slice(docs.indexOf("## 4. Repository layout"), docs.indexOf("## 5. Skills"));
+  const s6 = docs.slice(docs.indexOf("## 6. Workflows"), docs.indexOf("### Security: the unattended runner"));
+  assert.ok(s2.length > 0 && s4.length > 0 && s6.length > 0, "DOCS must have §2, §4, §6 to slice");
+  assert.match(s2, /always-loaded safety kernel/i, "DOCS §2 must call AGENTS.md an always-loaded safety kernel");
+  assert.match(s2, /routing table/i, "DOCS §2 must describe the routing table (defers to skills/references)");
+  assert.match(s2, /protocol-coverage/, "DOCS §2 must name the protocol-coverage gate");
+  assert.match(s2, /ratchet:invariant:/, "DOCS §2 must describe the invariant-marker scheme");
+  assert.match(s4, /safety kernel/i, "DOCS §4 layout must describe AGENTS.md as the safety kernel");
+  assert.match(s4, /routing/i, "DOCS §4 layout must mention routing to skills/scripts");
+  assert.match(s6, /protocol-coverage/, "DOCS §6 must name the protocol-coverage gate check");
+  assert.match(s6, /ratchet:invariant:/, "DOCS §6 must reference the invariant-marker scheme");
+}
+
+// --- #347 Criterion 2: DOCS.md §13 (command reference) lists ratchet-start.mjs,
+// ratchet-requeue.mjs, ratchet-heartbeat.mjs, and ratchet-submit.mjs with their
+// arguments and exit-code meanings. ---
+{
+  const s13 = docs.slice(docs.indexOf("## 13. Command reference"), docs.indexOf("## 14. The herd supervisor"));
+  assert.ok(s13.length > 0, "DOCS must have a §13 Command reference to slice");
+  for (const script of ["ratchet-start.mjs", "ratchet-requeue.mjs", "ratchet-heartbeat.mjs", "ratchet-submit.mjs"]) {
+    assert.ok(s13.includes(script), `DOCS §13 must document ${script}`);
+  }
+  for (const arg of ["--issue", "--owner", "--reason", "--body-file"]) {
+    assert.ok(s13.includes(arg), `DOCS §13 must show the ${arg} argument`);
+  }
+  assert.match(s13, /Exit codes/i, "DOCS §13 must document exit codes");
+  assert.match(s13, /`3` foreign/, "DOCS §13 must give ratchet-start's exit-code meanings");
+  assert.match(s13, /`5` red gate/, "DOCS §13 must give ratchet-submit's exit-code meanings");
+}
+
+// --- #347 Criterion 3: DOCS.md §5 (skills) includes ratchet-hotfix alongside the
+// existing skills. ---
+{
+  const s5 = docs.slice(docs.indexOf("## 5. Skills"), docs.indexOf("## 6. Workflows"));
+  assert.ok(s5.length > 0, "DOCS must have a §5 Skills section to slice");
+  assert.ok(s5.includes("ratchet-hotfix"), "DOCS §5 skills must include ratchet-hotfix");
+}
+
+// --- #347 Criterion 4: DOCS.md documents scripts/gh-api.mjs as the single GitHub
+// API client, including the token resolution order and that no other script
+// constructs its own client. ---
+{
+  const ghSec = docs.slice(docs.indexOf("### The shared GitHub client"));
+  assert.ok(ghSec.length > 0 && ghSec.includes("scripts/gh-api.mjs"), "DOCS must document the shared scripts/gh-api.mjs client");
+  const t = ghSec.indexOf("GITHUB_TOKEN"), p = ghSec.indexOf("GITHUB_PAT"), g = ghSec.indexOf("gh auth token");
+  assert.ok(t >= 0 && p > t && g > p, "DOCS must document token resolution order: GITHUB_TOKEN, then GITHUB_PAT, then gh auth token");
+  assert.match(ghSec, /no script constructs its own/i, "DOCS must state that no other script builds its own client");
+}
+
+// --- #347 Criterion 5: README.md's loop section shows one-command script
+// invocations rather than raw multi-step shell. ---
+{
+  const loop = readme.slice(readme.indexOf("## The loop"), readme.indexOf("## Memory"));
+  assert.ok(loop.length > 0, "README must have a loop section to slice");
+  for (const inv of ["scripts/ratchet-start.mjs", "scripts/ratchet-submit.mjs"]) {
+    assert.ok(loop.includes(inv), `README loop must show the ${inv} one-command invocation`);
+  }
+  assert.match(loop, /one-command/i, "README loop must present the loop as one-command scripts");
+}
+
+// --- #347 Criterion 6: the docs-refresh gate passes with the updated documents —
+// every script the reference documents still exists on disk, so the docs describe
+// shipped reality (the gate's purpose). ---
+{
+  const s13 = docs.slice(docs.indexOf("## 13. Command reference"), docs.indexOf("## 14. The herd supervisor"));
+  const scriptsDir = readdirSync(`${root}scripts`);
+  for (const script of ["ratchet-start.mjs", "ratchet-requeue.mjs", "ratchet-heartbeat.mjs", "ratchet-submit.mjs", "gh-api.mjs"]) {
+    assert.ok(scriptsDir.includes(script), `documented script ${script} must exist on disk`);
+    assert.ok(docs.includes(script), `${script} must be documented in DOCS.md`);
+  }
+  assert.ok(s13.includes("gh-api.mjs"), "DOCS §13 must document gh-api.mjs");
+}
+
+// --- #347 Criterion 7: every #347 criterion above has exactly one test named
+// after it. ---
+{
+  const self = read("scripts/docs-refresh.test.mjs");
+  for (let n = 1; n <= 7; n++) {
+    const hits = (self.match(new RegExp(`#347 Criterion ${n}:`, "g")) || []).length;
+    assert.equal(hits, 1, `#347 Criterion ${n} must have exactly one named test`);
+  }
+}
+
+console.log("PASS docs-refresh.test.mjs (6 #60 criteria + 4 #191 criteria + 4 #91 criteria + 3 #233 criteria + 2 #268 criteria + 7 #347 criteria)");

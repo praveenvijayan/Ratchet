@@ -178,11 +178,19 @@ With pure human merges the fallback works; the PAT makes it bulletproof.
 2. **`/ratchet-plan`** → writes `plan/*.md` (one for a report, many for a plan)
    onto the rolling planning branch and opens/updates the planning PR.
 3. **Review and merge the planning PR**; `plan-sync` creates the issues on `main`.
-4. Issues appear (`state:ready`). The agent **picks** the top unblocked one,
-   **claims** it with an atomic server-side branch ref (`agent/issue-N`, created
-   off fresh `main` — a 422 means another agent already holds it), **builds** to
-   the acceptance criteria, **verifies** the gates fail-fast, and opens a **PR**
-   with `Closes #N` — then stops.
+4. Issues appear (`state:ready`). The agent runs the loop as **one-command
+   scripts**, not hand-typed multi-step shell — each returns a stable exit code:
+   - **claim** — `node scripts/ratchet-start.mjs --issue <N> --owner "<id>"`
+     (atomic server-side `agent/issue-<N>` ref off fresh `main`, worktree, owner
+     marker, label flip; exit `3` means another agent already holds it),
+   - **build** to the acceptance criteria — renew the lease on long builds with
+     `node scripts/ratchet-heartbeat.mjs --issue <N>`, or return the issue to the
+     queue with `node scripts/ratchet-requeue.mjs --issue <N> --reason "…"`,
+   - **verify** the gates fail-fast, then
+   - **hand off** — `node scripts/ratchet-submit.mjs --issue <N> --body-file <path>`
+     integrates `main`, runs the gates, and opens a single PR with `Closes #N`.
+
+   Then it stops. (See DOCS.md §13 for every argument and exit code.)
 5. A **human reviews and merges**. GitHub closes the issue.
 6. `unblock-dependents` flips newly-unblocked issues to `state:ready`;
    `sweep-stale-claims` returns abandoned work to the queue.
