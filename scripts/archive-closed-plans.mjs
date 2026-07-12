@@ -19,49 +19,20 @@
 // GITHUB_REPOSITORY = "owner/repo".
 
 import { readdir, mkdir, rename } from "node:fs/promises";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { ghClient, paginate, resolveAuth } from "./gh-api.mjs";
 
-// Local convenience: load .env if present (Actions sets env vars directly).
-// Never overrides an already-set variable. .env must be gitignored.
-if (existsSync(".env")) {
-  for (const line of readFileSync(".env", "utf8").split("\n")) {
-    const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*?)\s*$/);
-    if (m && !process.env[m[1]]) process.env[m[1]] = m[2].replace(/^["']|["']$/g, "");
-  }
-}
-
-const TOKEN = process.env.GITHUB_TOKEN || process.env.GITHUB_PAT;
-const REPO = process.env.GITHUB_REPOSITORY;
+// Token/repo (from GITHUB_TOKEN | GITHUB_PAT and GITHUB_REPOSITORY, environment
+// or .env) and the shared REST client. Resolved at load so a missing credential
+// fails before any file is moved, exactly as before.
+const { token, repo: REPO } = resolveAuth();
+const gh = ghClient(token);
 const PLAN_DIR = process.env.PLAN_DIR || "plan";
-const API = "https://api.github.com";
-
-if (!TOKEN || !REPO) {
-  console.error("Missing token or repo. Set GITHUB_PAT in .env (local) or GITHUB_TOKEN/GITHUB_REPOSITORY in the environment.");
-  process.exit(1);
-}
-
-async function gh(method, path) {
-  const res = await fetch(`${API}${path}`, {
-    method,
-    headers: {
-      Authorization: `Bearer ${TOKEN}`,
-      Accept: "application/vnd.github+json",
-      "X-GitHub-Api-Version": "2022-11-28",
-    },
-  });
-  if (!res.ok) throw new Error(`${method} ${path} -> ${res.status} ${await res.text()}`);
-  return res.json();
-}
 
 async function listAllIssues() {
-  const out = [];
-  for (let page = 1; ; page++) {
-    const batch = await gh("GET", `/repos/${REPO}/issues?state=all&per_page=100&page=${page}`);
-    out.push(...batch.filter((i) => !i.pull_request));
-    if (batch.length < 100) break;
-  }
-  return out;
+  const all = await paginate(gh, `/repos/${REPO}/issues?state=all`);
+  return all.filter((i) => !i.pull_request);
 }
 
 async function main() {

@@ -302,3 +302,80 @@ const readScript = (name) => readFileSync(join(scriptsDir, name), "utf8");
 }
 
 console.log("PASS gh-api.test.mjs #342 verdict-script migration (4 criteria)");
+
+// ===========================================================================
+// Issue #344 (plan 0153-migrate-gh-api-sync-scripts): plan-sync.mjs,
+// archive-closed-plans.mjs, and release.mjs adopt this module. release relied
+// on a private client that tolerates 404, so `ghClient` gains an `allow404`
+// option — exercised here so it is covered by the shared module's own suite.
+// `#344` markers are distinct from the `#341`/`#342` markers counted above.
+// ===========================================================================
+
+const MIGRATED_344 = ["plan-sync.mjs", "archive-closed-plans.mjs", "release.mjs"];
+const readScript344 = (name) => readFileSync(join(dirname(fileURLToPath(import.meta.url)), name), "utf8");
+
+// --- #344 Criterion 1: all three scripts import ghClient/paginate/resolveAuth
+// from scripts/gh-api.mjs and keep no private client, token resolution, or
+// pagination loop. -----------------------------------------------------------
+{
+  for (const file of MIGRATED_344) {
+    const src = readScript344(file);
+    const m = src.match(/import\s*\{([^}]*)\}\s*from\s*["']\.\/gh-api\.mjs["']/);
+    assert.ok(m, `${file} imports from ./gh-api.mjs`);
+    const imported = m[1].split(",").map((s) => s.trim());
+    for (const sym of ["ghClient", "paginate", "resolveAuth"]) {
+      assert.ok(imported.includes(sym), `${file} imports ${sym} from the shared client`);
+    }
+    assert.doesNotMatch(src, /https:\/\/api\.github\.com/, `${file} no longer hard-codes the API base`);
+    assert.doesNotMatch(src, /function\s+gh\b/, `${file} defines no private gh client`);
+    assert.doesNotMatch(src, /per_page=100&page=/, `${file} runs no private pagination loop`);
+    assert.doesNotMatch(src, /GITHUB_TOKEN\s*\|\|\s*process\.env\.GITHUB_PAT/, `${file} does no private token resolution`);
+  }
+}
+
+// --- #344 Criterion 2: the shared client provides the `allow404` option
+// release.mjs relies on — a 404 with allow404 resolves to null; without it a
+// 404 throws, carrying `status` and the raw `body`. --------------------------
+{
+  const ghFor = (status, text) => ghClient("tok", { fetchImpl: async () => stubResponse({ ok: status < 400, status, text }) });
+  assert.equal(
+    await ghFor(404, "Not Found")("GET", "/repos/o/r/releases/latest", undefined, { allow404: true }),
+    null,
+    "a 404 with allow404 resolves to null instead of throwing",
+  );
+  await assert.rejects(
+    () => ghFor(404, "Not Found")("GET", "/repos/o/r/releases/latest"),
+    (err) => err.status === 404 && err.body === "Not Found",
+    "a 404 without allow404 throws, carrying status 404 and the raw body",
+  );
+}
+
+// --- #344 Criterion 3: each script's existing behaviour suite passes unchanged
+// in what it asserts — run all three as subprocesses and require exit 0. ------
+{
+  const here = dirname(fileURLToPath(import.meta.url));
+  for (const file of MIGRATED_344) {
+    const testFile = file.replace(/\.mjs$/, ".test.mjs");
+    let status = 0;
+    let out = "";
+    try {
+      out = execFileSync(process.execPath, [join(here, testFile)], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    } catch (e) {
+      status = e.status ?? 1;
+      out = `${e.stdout || ""}${e.stderr || ""}`;
+    }
+    assert.equal(status, 0, `${testFile} must still pass after the migration:\n${out}`);
+  }
+}
+
+// --- #344 Criterion 4: every criterion above has exactly one test named after
+// it — count this file's own `#344 Criterion N` markers, 1..4. ---------------
+{
+  const markers = [...readScript344("gh-api.test.mjs").matchAll(/^\/\/ --- #344 Criterion (\d+):/gim)].map((m) => Number(m[1]));
+  const unique = new Set(markers);
+  assert.equal(markers.length, unique.size, "each #344 criterion tested exactly once");
+  assert.equal(markers.length, 4, "exactly 4 #344 criterion markers are present");
+  for (let n = 1; n <= 4; n++) assert.ok(unique.has(n), `#344 criterion ${n} has a test`);
+}
+
+console.log("PASS gh-api.test.mjs #344 sync-script migration (4 criteria)");
