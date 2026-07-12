@@ -57,6 +57,7 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 | 4p2   | test: ratchet-hotfix-skill      | `node scripts/ratchet-hotfix-skill.test.mjs`      | exit 0 |
 | 4q    | test: gates-coverage            | `node scripts/gates-coverage.test.mjs`            | exit 0 |
 | 4s    | test: herd                      | `node scripts/herd.test.mjs`                      | exit 0 |
+| 4s2   | test: herd-adapters             | `node scripts/herd-adapters.test.mjs`             | exit 0 |
 | 4t    | test: herd-survey               | `node scripts/herd-survey.test.mjs`               | exit 0 |
 | 4u    | test: herd-dispatch             | `node scripts/herd-dispatch.test.mjs`             | exit 0 |
 | 4v    | test: herd-monitor              | `node scripts/herd-monitor.test.mjs`              | exit 0 |
