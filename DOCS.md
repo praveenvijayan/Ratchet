@@ -882,6 +882,18 @@ Malformed JSON, an empty `adapters` object, or `routing` without a valid
 `default` each exit non-zero with a one-line error naming the file and the
 problem — no stack trace ever reaches the operator.
 
+### Scoped runs: `--issue` / `--issues`
+
+`herd run --issues 12,34` (or repeated `--issue 12 --issue 34`) scopes the run to
+a named set — a `state:ready` selection filter, never a state bypass — and, unlike
+the open loop, is observable and finite. Each requested issue that is closed,
+`state:blocked`, not `state:ready`, or already tracked in `herd-state.json` is
+escalated with its reason and never spawned (`--dry-run` logs without writing). If
+*every* target is ineligible the run spawns nothing and exits non-zero (code 3,
+distinct from config error 1 / argv error 2). Otherwise it stops polling once
+every eligible target has finished — its issue closed (a merge or manual close
+mid-run counts) or its state-file entry terminal — rather than polling forever.
+
 ### The adapter contract
 
 An adapter tells the supervisor how to start and restart one worker CLI:
