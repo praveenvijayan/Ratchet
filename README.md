@@ -106,9 +106,12 @@ guaranteed to exist), so the commands run verbatim with nothing to fill in:
 TAG=$(curl -fsSL https://api.github.com/repos/praveenvijayan/Ratchet/releases/latest | grep -m1 '"tag_name":' | cut -d'"' -f4)
 curl -fsSL "https://raw.githubusercontent.com/praveenvijayan/Ratchet/${TAG}/scripts/bootstrap.sh" -o bootstrap.sh
 less bootstrap.sh          # read it before you run it
-bash bootstrap.sh --version "${TAG}" --profile core
+bash bootstrap.sh --version "${TAG}"
 ```
 
+A default install ships the **core** delivery loop plus the **herd** fleet
+supervisor (`scripts/herd*.mjs`, the `ratchet-herd` skill, and the `mascots/`
+assets), so `node scripts/herd.mjs run` and `/ratchet-herd` work out of the box.
 Or, once you trust the source, the one-line convenience form. It pins to that
 same resolved release tag, so the install stays reproducible — piping an
 unpinned `main` straight into `bash` is not reproducible, so always install
@@ -120,10 +123,26 @@ TAG=$(curl -fsSL https://api.github.com/repos/praveenvijayan/Ratchet/releases/la
   && curl -fsSL "https://raw.githubusercontent.com/praveenvijayan/Ratchet/${TAG}/scripts/bootstrap.sh" | bash -s -- --version "${TAG}"
 ```
 
-`--profile` adds optional profiles on top of the always-installed `core`
-(comma-separated, e.g. `--profile watcher,herd`) — see DOCS.md §9 for what
-each one installs. `--dry-run` reports what would change without writing
-anything; `--force` is required to overwrite a conflicting existing file.
+`--profile` selects profiles on top of the always-included `core`
+(comma-separated). The default is `--profile herd`; pass `--profile core` for a
+core-only install with no supervisor, or extend it (e.g.
+`--profile herd,watcher` to add the local real-time watcher). The available
+profiles:
+
+| Profile | Installs |
+|---------|----------|
+| `core` | The base delivery loop — always installed. Plan sync, claim/verify gates, PR-size and issue-body checks, the skills, and the agent manuals. |
+| `herd` | Headless fleet supervisor (`scripts/herd*.mjs` + the `ratchet-herd` skill + `mascots/`). **On by default.** |
+| `watcher` | Local real-time watcher (`scripts/ratchet-watch.*`) that turns a merge/review into a `/ratchet-next` trigger. |
+| `release` | Versioned-release tooling for teams that cut tagged Ratchet releases. |
+| `unattended-ci` | Optional CI-based runner for unattended execution. Off by default. |
+| `claude-plugin` | Claude Code plugin marketplace packaging. |
+
+See DOCS.md §9 for the full file list per profile. `--dry-run` reports what
+would change without writing anything; `--force` is required to overwrite a
+conflicting existing file. If you later install into a core-only project and
+try the herd, `node scripts/herd.mjs` prints the exact `bootstrap.sh --profile
+herd` command to add the supervisor files — never a raw module-not-found error.
 
 Then:
 

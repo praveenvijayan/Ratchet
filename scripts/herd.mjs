@@ -14,14 +14,39 @@
 //                                             node scripts/herd.mjs run
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync, realpathSync, accessSync, constants as fsConstants } from "node:fs";
-import { dirname, join, isAbsolute, delimiter as pathDelimiter } from "node:path";
+import { dirname, join, isAbsolute, resolve, delimiter as pathDelimiter } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runLoop, pollOnce, ghJson, resolveRepoRoot, ratchetPaths, RepoRootError } from "./herd-survey.mjs";
-import { dispatchOne, surveyReady } from "./herd-dispatch.mjs";
-import { monitorOnce } from "./herd-monitor.mjs";
-import { verifyOnce } from "./herd-verify.mjs";
-import { reviewOnce } from "./herd-review.mjs";
-import { retentionOnce } from "./herd-retention.mjs";
+
+// The herd supervisor's implementation modules (herd-survey, -dispatch, -monitor,
+// -verify, -review, -retention) ship in the `herd` profile. This file is the
+// single CLI entrypoint and ships in `core`, so a trimmed `--profile core`
+// install (or an older core-only install) still has `scripts/herd.mjs` — and
+// invoking it there prints a clear install hint instead of a raw
+// module-not-found error. See the guard at the CLI entrypoint below. The config
+// layer (everything this module exports) has no dependency on those modules, so
+// importing `herd.mjs` for its config/exports works without the `herd` profile.
+
+// Repo-root resolution — duplicated in scripts/herd-survey.mjs (the `herd`
+// profile) so every herd stage imports it from one place. Defined here too
+// because `main()` resolves the repo root without statically importing
+// herd-survey (which would fail in a core-only install before the guard below
+// could run). Keep the two copies in sync; consolidate into a shared `core`
+// module if a third copy appears.
+export class RepoRootError extends Error {}
+
+export function resolveRepoRoot(startDir = process.cwd()) {
+  let dir = resolve(startDir);
+  for (;;) {
+    if (existsSync(join(dir, ".git"))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) {
+      throw new RepoRootError(
+        `herd: not inside a Ratchet checkout — no .git found at or above ${startDir}`,
+      );
+    }
+    dir = parent;
+  }
+}
 
 // Config location, relative to the repo root. Entrypoints anchor it there via
 // resolveRepoRoot so `init`/`run` touch the same file from any subdirectory.
@@ -594,6 +619,34 @@ export function main(argv, { root } = {}) {
 const isMain =
   process.argv[1] && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1]);
 if (isMain) {
+  // Guard: the supervisor implementation lives in the `herd` profile
+  // (herd-survey.mjs + herd-{dispatch,monitor,verify,review,retention}.mjs).
+  // A trimmed `--profile core` install, or an older core-only install, lacks
+  // them — invoking `node scripts/herd.mjs` there must print a clear install
+  // hint naming the exact command that adds the files, never a raw
+  // module-not-found error. Dynamically import the implementation so a missing
+  // `herd` profile is caught here with one message, not surfaced by Node's
+  // static-import resolver.
+  let ghJson, ratchetPaths, runLoop, pollOnce, dispatchOne, surveyReady, monitorOnce, verifyOnce, reviewOnce, retentionOnce;
+  try {
+    ({ ghJson, ratchetPaths, runLoop, pollOnce } = await import("./herd-survey.mjs"));
+    ({ dispatchOne, surveyReady } = await import("./herd-dispatch.mjs"));
+    ({ monitorOnce } = await import("./herd-monitor.mjs"));
+    ({ verifyOnce } = await import("./herd-verify.mjs"));
+    ({ reviewOnce } = await import("./herd-review.mjs"));
+    ({ retentionOnce } = await import("./herd-retention.mjs"));
+  } catch (e) {
+    if (e.code === "ERR_MODULE_NOT_FOUND") {
+      console.error(
+        "herd: the fleet supervisor files are not installed in this project (the `herd` profile is absent from this install). Add them with:\n" +
+          "    bash scripts/bootstrap.sh --version <tag> --profile herd\n" +
+          "  (pick a <tag> from https://github.com/praveenvijayan/Ratchet/releases), then re-run.\n" +
+          "  If your .ratchet-install.json already lists `herd` in its profiles, run ./scripts/ratchet-update.sh instead.",
+      );
+      process.exit(1);
+    }
+    throw e;
+  }
   const argv = process.argv.slice(2);
   const cmd = argv[0];
   if (cmd === undefined || cmd === "run") {
