@@ -185,6 +185,7 @@ memory/
   ARCHITECTURE.md               Coarse codebase map (generated; agent scopes reads with it)
   MEMORY.md                     Distilled knowledge cache (agent proposes via PR)
 scripts/
+  agents-kernel.test.mjs        Regression test for the AGENTS.md safety-kernel rewrite
   archive-closed-plans-workflow.test.mjs Regression test for the archive workflow
   archive-closed-plans.mjs      Move closed issue plans into plan/done/
   bootstrap.sh                  Install Ratchet into a host project from a pinned release (manifest + profiles)
