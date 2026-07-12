@@ -45,6 +45,7 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 | 4g5   | test: review-verdict-sweep      | `node scripts/review-verdict-sweep.test.mjs`      | exit 0 |
 | 4h    | test: ratchet-update            | `node scripts/ratchet-update.test.mjs`            | exit 0 |
 | 4i    | test: criteria                  | `node scripts/criteria.test.mjs`                  | exit 0 |
+| 4i2   | test: gh-api                    | `node scripts/gh-api.test.mjs`                    | exit 0 |
 | 4j    | test: pr-size-check             | `node scripts/pr-size-check.test.mjs`             | exit 0 |
 | 4k    | test: run-gates                 | `node scripts/run-gates.test.mjs`                 | exit 0 |
 | 4l    | test: sweep-lease               | `node scripts/sweep-lease.test.mjs`               | exit 0 |

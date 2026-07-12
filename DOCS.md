@@ -194,6 +194,8 @@ scripts/
   criteria.mjs                  Shared acceptance-criteria readiness rule
   criteria.test.mjs             Regression test for the readiness rule
   docs-refresh.test.mjs         Regression test for documentation inventory
+  gh-api.mjs                    Shared GitHub REST client (ghClient, paginate, resolveAuth)
+  gh-api.test.mjs               Regression test for the shared GitHub client
   gates-coverage.mjs            Guard: every *.test.mjs runs in a GATES.md row
   gates-coverage.test.mjs       Regression test for the coverage guard
   gates-table.mjs               Shared parser for the GATES.md markdown table
