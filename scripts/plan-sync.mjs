@@ -11,7 +11,7 @@
 
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { hasAcceptanceCriteria } from "./criteria.mjs";
+import { hasAcceptanceCriteria, planSlug, formatPlanMarker } from "./criteria.mjs";
 import { ghClient, paginate, resolveAuth } from "./gh-api.mjs";
 
 // Token/repo (from GITHUB_TOKEN | GITHUB_PAT and GITHUB_REPOSITORY, environment
@@ -52,9 +52,7 @@ async function listAllIssues() {
   return all.filter((i) => !i.pull_request);
 }
 
-function markerOf(slug) {
-  return `<!-- plan-id: ${slug} -->`;
-}
+const markerOf = formatPlanMarker;
 function stateLabels(issue) {
   return issue.labels.map((l) => (typeof l === "string" ? l : l.name));
 }
@@ -200,8 +198,8 @@ async function main() {
   const issues = await listAllIssues();
   const bySlug = new Map();
   for (const issue of issues) {
-    const mm = (issue.body || "").match(/<!-- plan-id: (.+?) -->/);
-    if (mm) bySlug.set(mm[1], issue);
+    const slug = planSlug(issue.body || "");
+    if (slug) bySlug.set(slug, issue);
   }
   const slugToNumber = new Map();
   for (const [slug, issue] of bySlug) slugToNumber.set(slug, issue.number);

@@ -20,11 +20,32 @@ export function hasAcceptanceCriteria(body = "") {
   return /-\s*\[[ x]\]/i.test(criteriaText);
 }
 
-// The plan-file slug from the `<!-- plan-id: <slug> -->` marker, or null when
-// the body has no marker (e.g. a hand-authored issue).
+// Single source of truth for the `<!-- plan-id: <slug> -->` marker. Every
+// consumer (plan-sync, archive, verify) reads and writes the marker through the
+// exports below rather than re-deriving a regex — a divergent pattern is exactly
+// how issue #345's silent archive skip happened. The pattern tolerates optional
+// whitespace around `plan-id:` and the slug so an unusually-spaced marker still
+// resolves everywhere.
+const PLAN_ID_MARKER_RE = /<!--\s*plan-id:\s*(.+?)\s*-->/;
+
+// The plan-file slug from the marker, or null when the body has no marker
+// (e.g. a hand-authored issue).
 export function planSlug(body = "") {
-  const m = /<!--\s*plan-id:\s*(.+?)\s*-->/.exec(String(body));
+  const m = PLAN_ID_MARKER_RE.exec(String(body));
   return m ? m[1] : null;
+}
+
+// Render the canonical marker for a slug — the exact string plan-sync appends
+// to a compiled issue body.
+export function formatPlanMarker(slug) {
+  return `<!-- plan-id: ${slug} -->`;
+}
+
+// True iff a single line is nothing but a plan-id marker (with optional
+// surrounding whitespace). Used to strip the machine-appended marker line from
+// a reviewed body without pulling in a second regex definition.
+export function isPlanMarkerLine(line = "") {
+  return new RegExp(`^\\s*${PLAN_ID_MARKER_RE.source}\\s*$`).test(String(line));
 }
 
 // Decide an unblocked issue's post-unblock state and the comment to post.
