@@ -14,8 +14,18 @@
 //   5. --force replaces listed modified files and reports each replacement.
 //   6. Install/update records a content hash for every installed framework
 //      file, so a later run can detect local modification.
-//   7. No .ratchet-install.json fails clearly, pointing at bootstrap, and
-//      leaves the project unchanged.
+//   7. No .ratchet-install.json AND no .ratchet-version fails clearly, naming
+//      the reinstall command, and leaves the project unchanged.
+// Plus issue #398 (plan 0166-update-adopt-missing-install-record):
+//   8.  Missing install record but a readable .ratchet-version → adoption
+//       reconstructs a valid record (profiles, per-file hashes, recorded
+//       version) from the pinned release, no full reinstall.
+//   9.  Adoption never destroys local changes: a file differing from the
+//       recorded release is reported and left byte-for-byte untouched.
+//   10. After adoption, ratchet-update runs to completion in the same repo.
+//   11. Adoption that cannot proceed names the exact reinstall command,
+//       never a stack trace.
+//   12. Exactly one test block per criterion.
 // Zero dependencies. Run: node scripts/ratchet-update.test.mjs
 
 import assert from "node:assert/strict";
@@ -189,14 +199,121 @@ function stdRelease(tag, version) {
   assert.deepEqual(readdirSync(consumer).sort(), before, "project tree is left unchanged");
 }
 
-// --- Meta: exactly one test block per criterion ------------------------------
+// A remote carrying several tagged releases in one history, so adoption can
+// resolve a RECORDED version distinct from the update target.
+function makeReleaseSeq(steps) {
+  const dir = tmp("update-release-");
+  git(dir, "init", "-b", "main");
+  for (const { tag, manifest, files } of steps) {
+    writeFileSync(join(dir, "ratchet-manifest.json"), JSON.stringify(manifest));
+    for (const [rel, body] of Object.entries(files)) if (body !== undefined) write(dir, rel, body);
+    git(dir, "add", "-A");
+    git(dir, "commit", "-m", `release ${tag}`);
+    git(dir, "tag", tag);
+  }
+  return dir;
+}
+
+// --- Issue #398: adopting an install that has no .ratchet-install.json --------
+// A repo that got Ratchet by direct copy has framework files + .ratchet-version
+// but no install record. The updater reconstructs the record from the recorded
+// release rather than demanding a full reinstall.
+
+// --- Criterion 8: adoption writes a valid record (profiles, per-file hashes,
+//     recorded version) without a full reinstall ------------------------------
+{
+  const release = stdRelease("v1.0.0", "1.0.0"); // core + optional profiles
+  const consumer = makeConsumer({
+    // no install record — the direct-copy case
+    seed: {
+      "AGENTS.md": CORE_AGENTS_V1,
+      "scripts/plan-sync.mjs": CORE_PLAN_SYNC_V1,
+      "scripts/optional-tool.mjs": "// optional\n", // optional profile present on disk
+      "GATES.md": "host GATES\n",
+      ".ratchet-version": "1.0.0\n",
+    },
+  });
+  const r = runUpdate(consumer, release, ["v1.0.0"]);
+  assert.equal(r.status, 0, `adoption + update should succeed: ${r.out}`);
+  assert.ok(existsSync(join(consumer, ".ratchet-install.json")), "adoption writes the install record");
+  const install = JSON.parse(readFileSync(join(consumer, ".ratchet-install.json"), "utf8"));
+  assert.equal(install.version, "1.0.0", "record carries the recorded version");
+  assert.ok(install.profiles.includes("core") && install.profiles.includes("optional"), "detects the installed profiles from disk");
+  assert.equal(install.hashes["AGENTS.md"], sha256(Buffer.from(CORE_AGENTS_V1)), "records pristine hash for a core file");
+  assert.equal(install.hashes["scripts/plan-sync.mjs"], sha256(Buffer.from(CORE_PLAN_SYNC_V1)), "records pristine hash for a core script");
+  assert.equal(install.hashes["scripts/optional-tool.mjs"], sha256(Buffer.from("// optional\n")), "records pristine hash for an optional-profile file");
+  assert.ok(!existsSync(join(consumer, "scripts/optional-tool.test.mjs")), "no full reinstall — excluded files are not pulled");
+}
+
+// --- Criterion 9: adoption never destroys local changes — a file differing
+//     from the recorded release is reported and left byte-for-byte untouched --
+{
+  const release = stdRelease("v1.0.0", "1.0.0");
+  const hostEdited = "AGENTS v1 BUT HOST EDITED THIS\n";
+  const consumer = makeConsumer({
+    seed: {
+      "AGENTS.md": hostEdited, // differs from the pristine v1.0.0 release
+      "scripts/plan-sync.mjs": CORE_PLAN_SYNC_V1,
+      ".ratchet-version": "1.0.0\n",
+    },
+  });
+  const r = runUpdate(consumer, release, ["v1.0.0"]);
+  assert.equal(readFileSync(join(consumer, "AGENTS.md"), "utf8"), hostEdited, "the host's edit is left byte-for-byte untouched");
+  assert.ok(/AGENTS\.md/.test(r.out), "the modified path is reported to the user");
+  const install = JSON.parse(readFileSync(join(consumer, ".ratchet-install.json"), "utf8"));
+  assert.equal(install.hashes["AGENTS.md"], sha256(Buffer.from(CORE_AGENTS_V1)), "adoption records the PRISTINE hash, so future runs keep detecting the local edit");
+}
+
+// --- Criterion 10: after adoption, ratchet-update runs to completion in the
+//     same repo with no further manual steps ----------------------------------
+{
+  const manifest = {
+    profiles: { core: "base", optional: "extra" },
+    files: [
+      { path: "AGENTS.md", class: "framework", profile: "core" },
+      { path: "scripts/plan-sync.mjs", class: "framework", profile: "core" },
+      { path: "scripts/optional-tool.mjs", class: "framework", profile: "optional" },
+      { path: "GATES.md", class: "generated" },
+    ],
+  };
+  const release = makeReleaseSeq([
+    { tag: "v1.0.0", manifest, files: { "AGENTS.md": CORE_AGENTS_V1, "scripts/plan-sync.mjs": CORE_PLAN_SYNC_V1, "scripts/optional-tool.mjs": "// optional\n", "GATES.md": "released GATES\n", ".ratchet-version": "1.0.0\n" } },
+    { tag: "v2.0.0", manifest, files: { "AGENTS.md": "AGENTS v2\n", "scripts/plan-sync.mjs": "// plan-sync v2\n", "scripts/optional-tool.mjs": "// optional v2\n", "GATES.md": "released GATES\n", ".ratchet-version": "2.0.0\n" } },
+  ]);
+  const consumer = makeConsumer({
+    seed: { "AGENTS.md": CORE_AGENTS_V1, "scripts/plan-sync.mjs": CORE_PLAN_SYNC_V1, ".ratchet-version": "1.0.0\n" }, // core-only, recorded at 1.0.0
+  });
+  const r = runUpdate(consumer, release, ["v2.0.0"]); // adopt @1.0.0, then update to 2.0.0 in one run
+  assert.equal(r.status, 0, `single invocation must complete: ${r.out}`);
+  assert.equal(readFileSync(join(consumer, "AGENTS.md"), "utf8"), "AGENTS v2\n", "framework file refreshed to the target version");
+  assert.equal(readFileSync(join(consumer, ".ratchet-version"), "utf8"), "2.0.0\n", "version bumped to the target");
+  const install = JSON.parse(readFileSync(join(consumer, ".ratchet-install.json"), "utf8"));
+  assert.equal(install.version, "2.0.0", "install record advanced to the target version");
+  assert.ok(!existsSync(join(consumer, "scripts/optional-tool.mjs")), "core-only adoption did not pull the optional profile");
+}
+
+// --- Criterion 11: adoption that cannot proceed (recorded release unfetchable)
+//     names the exact reinstall command, never a stack trace -----------------
+{
+  const release = stdRelease("v1.0.0", "1.0.0"); // remote only has v1.0.0
+  const consumer = makeConsumer({
+    seed: { "AGENTS.md": CORE_AGENTS_V1, ".ratchet-version": "9.9.9\n" }, // recorded version absent upstream
+  });
+  const r = runUpdate(consumer, release, ["v1.0.0"]);
+  assert.notEqual(r.status, 0, "unfetchable recorded release must stop the run");
+  assert.ok(/bootstrap\.sh --version/.test(r.out), "names the exact reinstall command");
+  assert.ok(/9\.9\.9/.test(r.out), "identifies the recorded version it could not fetch");
+  noStack(r.out);
+}
+
+// --- Criterion 12: exactly one test block per criterion ----------------------
 {
   const src = readFileSync(SELF, "utf8");
-  for (let n = 1; n <= 7; n++) {
+  for (let n = 1; n <= 12; n++) {
     const hits = src.match(new RegExp(`--- Criterion ${n}:`, "g")) || [];
     assert.equal(hits.length, 1, `expected exactly one "Criterion ${n}" block, found ${hits.length}`);
   }
 }
 
 for (const d of dirs) { spawnSync("rm", ["-rf", d]); }
-console.log("PASS ratchet-update.test.mjs (7 criteria, end-to-end)");
+console.log("PASS ratchet-update.test.mjs (12 criteria, end-to-end)");
