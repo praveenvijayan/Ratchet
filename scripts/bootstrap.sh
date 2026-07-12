@@ -32,6 +32,11 @@ while [ $# -gt 0 ]; do case "$1" in
   *) echo "bootstrap: unknown argument: $1" >&2; exit 2;;
 esac; done
 
+# "core" is always installed; de-dupe it for display so `--profile core`
+# reads "core", not "core,core" (the recorded manifest de-dupes separately).
+PROF_DISPLAY="core"
+for p in ${PROFILES//,/ }; do [ "$p" = "core" ] || PROF_DISPLAY="$PROF_DISPLAY,$p"; done
+
 die(){ echo "bootstrap: $*" >&2; exit 1; }
 
 # Portable content hash (file or directory) so the uninstaller can later tell
@@ -113,7 +118,7 @@ done <<< "$LIST"
 
 # AC: --dry-run reports and writes nothing.
 if [ "$DRY" -eq 1 ]; then
-  echo "bootstrap: DRY RUN (profiles: core${PROFILES:+,$PROFILES}) — nothing will be written."
+  echo "bootstrap: DRY RUN (profiles: $PROF_DISPLAY) — nothing will be written."
   for rel in "${INSTALL[@]:-}"; do [ -n "$rel" ] || continue
     if [ -e "$rel" ]; then echo "  would conflict: $rel (needs --force)"; else echo "  would create:   $rel"; fi
   done
@@ -351,7 +356,7 @@ node -e '
 ' "$VER" "$PROFILES" "$HASHFILE" "${INSTALL[@]:-}" -- "${GEN_SCAFFOLDED[@]:-}"
 
 echo
-echo "bootstrap: Ratchet $VER installed (profiles: core${PROFILES:+,$PROFILES}). Recorded in .ratchet-install.json."
+echo "bootstrap: Ratchet $VER installed (profiles: $PROF_DISPLAY). Recorded in .ratchet-install.json."
 echo "Next steps:"
 echo "  1. ./setup.sh       # generate the skill mirrors your agent reads"
 echo "  2. /ratchet-init    # detect your stack and fill in GATES.md"
