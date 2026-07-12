@@ -97,6 +97,7 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 | 4z15  | test: agents-kernel             | `node scripts/agents-kernel.test.mjs`             | exit 0 |
 | 4z14  | test: plan-authoring-rules      | `node scripts/plan-authoring-rules.test.mjs`      | exit 0 |
 | 4z16  | test: protocol-coverage         | `node scripts/protocol-coverage.test.mjs`         | exit 0 |
+| 4z18  | test: static-autodeploy         | `node scripts/static-autodeploy.test.mjs`         | exit 0 |
 | 4r    | test-coverage                   | `node scripts/gates-coverage.mjs`                 | exit 0 |
 | 4z    | skill-parity                    | `node scripts/skill-parity.mjs`                   | exit 0 |
 | 4z10  | skill-detail                    | `node scripts/skill-detail.mjs`                   | exit 0 |

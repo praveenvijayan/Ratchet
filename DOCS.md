@@ -294,6 +294,7 @@ scripts/
   state-label-exclusivity.mjs   Enforce one state:* label per issue on a labeled event
   state-label-exclusivity.test.mjs Regression test for state-label exclusivity
   state-instructions-symmetry.test.mjs Regression test that state-set instructions remove the previous label
+  static-autodeploy.test.mjs    Regression test for the site Pages auto-deploy trigger
   sweep-lease.mjs               Shared claim lease freshness rule
   sweep-lease.test.mjs          Regression test for renewable leases
   sweep-stale-claims.mjs        Return abandoned work to the queue
