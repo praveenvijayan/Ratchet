@@ -135,4 +135,26 @@ const issue = (number, state, slug) => ({ number, state, pull_request: undefined
   assert.equal(exitCode, 1, "AC2: a refused move exits non-zero");
 }
 
-console.log("PASS archive-closed-plans.test.mjs (base + AC1 + AC2)");
+// === #345 AC3: a closed issue whose marker carries extra internal whitespace
+// is archived exactly as a normally-spaced marker is. Before the fix the archive
+// sweep's exact-spacing regex silently skipped it while sync still resolved it.
+{
+  const dir = await mkdtemp(join(tmpdir(), "archive-spaced-"));
+  await writeFile(join(dir, "0030-spaced.md"), planLine("0030-spaced"));  // marker spaced -> must still archive
+  await writeFile(join(dir, "0031-normal.md"), planLine("0031-normal"));  // normal spacing control
+
+  const spacedIssue = { number: 30, state: "closed", pull_request: undefined, body: "b\n\n<!--   plan-id:    0030-spaced   -->" };
+  const { exitCode } = await runSweep("spaced", dir, [
+    spacedIssue,
+    issue(31, "closed", "0031-normal"),
+  ]);
+
+  const top = await readdir(dir);
+  const done = await readdir(join(dir, "done"));
+  assert.ok(!top.includes("0030-spaced.md"), "AC3: a spaced marker's plan must leave the active dir");
+  assert.ok(done.includes("0030-spaced.md"), "AC3: a spaced marker's plan is archived exactly as a normal marker is");
+  assert.ok(done.includes("0031-normal.md"), "AC3: the normally-spaced control archives too");
+  assert.equal(exitCode, 0, "AC3: a clean sweep exits zero");
+}
+
+console.log("PASS archive-closed-plans.test.mjs (base + AC1 + AC2 + #345 AC3)");

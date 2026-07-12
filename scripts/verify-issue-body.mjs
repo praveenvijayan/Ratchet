@@ -13,7 +13,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { planSlug } from "./criteria.mjs";
+import { planSlug, isPlanMarkerLine } from "./criteria.mjs";
 
 export { planSlug };
 
@@ -55,7 +55,7 @@ export function planBody(planText) {
 // by plan-sync) removed, so what remains is exactly what a reviewer approved.
 export function issueCore(issueBody) {
   let lines = String(issueBody).replace(/\r\n/g, "\n").split("\n");
-  lines = lines.filter((l) => !/^\s*<!--\s*plan-id:\s*.+?\s*-->\s*$/.test(l));
+  lines = lines.filter((l) => !isPlanMarkerLine(l));
   const isBlank = (l) => l.trim() === "";
   const isBlocker = (l) => /^\s*Blocked by #\d+\s*$/.test(l);
   while (lines.length && (isBlank(lines[lines.length - 1]) || isBlocker(lines[lines.length - 1]))) {

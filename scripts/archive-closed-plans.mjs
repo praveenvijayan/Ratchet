@@ -22,6 +22,7 @@ import { readdir, mkdir, rename } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { ghClient, paginate, resolveAuth } from "./gh-api.mjs";
+import { planSlug } from "./criteria.mjs";
 
 // Token/repo (from GITHUB_TOKEN | GITHUB_PAT and GITHUB_REPOSITORY, environment
 // or .env) and the shared REST client. Resolved at load so a missing credential
@@ -56,9 +57,9 @@ async function main() {
   const openSlugs = new Set();
   const closedSlugs = new Set();
   for (const issue of issues) {
-    const m = (issue.body || "").match(/<!-- plan-id: (.+?) -->/);
-    if (!m) continue;
-    (issue.state === "closed" ? closedSlugs : openSlugs).add(m[1]);
+    const slug = planSlug(issue.body || "");
+    if (!slug) continue;
+    (issue.state === "closed" ? closedSlugs : openSlugs).add(slug);
   }
 
   const toArchive = planFiles.filter((f) => {
