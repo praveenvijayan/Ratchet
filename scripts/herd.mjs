@@ -17,7 +17,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, realpathSync, acces
 import { dirname, join, isAbsolute, delimiter as pathDelimiter } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runLoop, pollOnce, ghJson, resolveRepoRoot, ratchetPaths, RepoRootError } from "./herd-survey.mjs";
-import { dispatchOne, surveyReady } from "./herd-dispatch.mjs";
+import { dispatchOne, surveyReady, parseIssueTargets } from "./herd-dispatch.mjs";
 import { monitorOnce } from "./herd-monitor.mjs";
 import { verifyOnce } from "./herd-verify.mjs";
 import { reviewOnce } from "./herd-review.mjs";
@@ -515,8 +515,18 @@ if (isMain) {
     // Supervisor: validate the config, then poll. Each pass surveys/reconciles
     // (pollOnce) and dispatches at most one worker. `--once` does a single pass;
     // `--dry-run` prints the plan without spawning (and implies a single pass);
-    // `--max <n>` overrides maxWorkers. Never merges, approves, closes, or
-    // labels anything — it observes, dispatches, and escalates.
+    // `--max <n>` overrides maxWorkers; `--issues 12,34` / repeated `--issue 12`
+    // restrict dispatch to a named set (intersected with the ready survey — a
+    // filter, never a bypass). Never merges, approves, closes, or labels
+    // anything — it observes, dispatches, and escalates.
+    // Validate direct-issue targeting before anything else: a malformed entry
+    // (non-integer) is a usage error — exit 2 and spawn nothing, ahead of config
+    // load, so bad args fail fast regardless of repo state.
+    const { targets, error: targetsError } = parseIssueTargets(argv);
+    if (targetsError) {
+      console.error(targetsError);
+      process.exit(2);
+    }
     let root, config;
     try {
       root = resolveRepoRoot();
@@ -584,7 +594,7 @@ if (isMain) {
         o.log(`herd: dispatch survey failed: ${e.message}; skipping dispatch this poll.`);
         return [];
       });
-      await dispatchOne({ ...o, config, ready, dryRun, maxWorkers, claimTimeoutMs: config.claimTimeoutSeconds * 1000 });
+      await dispatchOne({ ...o, config, ready, dryRun, targets, maxWorkers, claimTimeoutMs: config.claimTimeoutSeconds * 1000 });
     };
     runLoop({ gh: ghJson, log: console.log, ...paths, once: argv.includes("--once") || dryRun, pollSeconds: config.pollSeconds, step }).then(
       () => process.exit(0),

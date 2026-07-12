@@ -50,6 +50,48 @@ export function pickNext(ready) {
   return ranked.length ? ranked[0] : null;
 }
 
+// Parse the optional issue-targeting flags for `herd run`. Two equivalent
+// forms combine into one deduplicated set: the comma list `--issues 12,34`
+// (repeatable) and the repeated single `--issue 12 --issue 34`. Targeting is a
+// selection *filter*, never a state bypass — the returned set is later
+// intersected with the state:ready survey (see dispatchOne), so naming an
+// ineligible issue can never dispatch it.
+//
+// Returns { targets, error }:
+//   - no targeting flag present -> { targets: null }  (dispatch the whole queue)
+//   - all entries valid         -> { targets: [n, …] } (deduplicated; order is
+//                                    irrelevant — pickNext re-orders downstream)
+//   - any non-integer entry     -> { error: "<usage message>", targets: null }
+// The caller (herd.mjs run) turns a non-null error into exit code 2 and spawns
+// nothing — a malformed target list is a usage error, not a silent empty run.
+export function parseIssueTargets(argv) {
+  const raw = [];
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === "--issues") {
+      for (const part of String(argv[i + 1] ?? "").split(",")) raw.push(part.trim());
+      i++;
+    } else if (argv[i] === "--issue") {
+      raw.push(String(argv[i + 1] ?? "").trim());
+      i++;
+    }
+  }
+  if (raw.length === 0) return { targets: null, error: null };
+  const targets = [];
+  for (const tok of raw) {
+    if (!/^\d+$/.test(tok)) {
+      return {
+        targets: null,
+        error:
+          `herd run: --issue/--issues expects positive integer issue numbers, got "${tok}". ` +
+          `Usage: herd run [--issues 12,34 | --issue 12 --issue 34] [--max N] [--dry-run] [--once]`,
+      };
+    }
+    const n = Number(tok);
+    if (!targets.includes(n)) targets.push(n);
+  }
+  return { targets, error: null };
+}
+
 // Resolve an issue to its concrete dispatch: the routed adapter, the argv with
 // {prompt}/{issue}/{model} substituted, the merged env, and the log file path.
 export function buildDispatch(config, issue, deps = {}) {
@@ -247,6 +289,11 @@ export async function dispatchOne(opts) {
     log = console.log,
     kill = defaultKill,
     dryRun = false,
+    // Optional issue-targeting filter (see parseIssueTargets). null dispatches
+    // the whole queue; an array restricts dispatch to those issue numbers —
+    // intersected with the ready survey below, so an issue outside the ready
+    // set is never dispatched even when named.
+    targets = null,
     maxWorkers = config.maxWorkers,
     claimTimeoutMs = (config.claimTimeoutSeconds ?? 300) * 1000,
     claimIntervalMs = 1000,
@@ -258,7 +305,14 @@ export async function dispatchOne(opts) {
   } = opts;
 
   const state = readState(statePath);
-  const issue = pickNext((ready || []).filter((i) => !(String(i.number) in state)));
+  // One worker per issue, ever (skip issues already in the state file); then, if
+  // a target set was given, intersect with it — targeting filters the ready
+  // queue, it never bypasses eligibility, so an issue outside the ready survey
+  // is unreachable even when explicitly named.
+  const untracked = (ready || []).filter((i) => !(String(i.number) in state));
+  const targetSet = targets == null ? null : new Set(targets);
+  const eligible = targetSet ? untracked.filter((i) => targetSet.has(i.number)) : untracked;
+  const issue = pickNext(eligible);
   if (!issue) return { dispatched: null, reason: "no-eligible-issue" };
 
   const cursors = readRouting(routingPath);

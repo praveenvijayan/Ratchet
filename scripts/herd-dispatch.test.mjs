@@ -12,7 +12,9 @@ import assert from "node:assert/strict";
 import { readFileSync, writeFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pickNext, buildDispatch, spawnWorker, waitForClaim, dispatchOne } from "./herd-dispatch.mjs";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { pickNext, buildDispatch, spawnWorker, waitForClaim, dispatchOne, parseIssueTargets } from "./herd-dispatch.mjs";
 import { readState } from "./herd-survey.mjs";
 
 const NOW = Date.UTC(2026, 6, 9, 12, 0, 0); // fixed clock — no Date.now dependence
@@ -691,4 +693,165 @@ await inTempDir(async () => {
   assert.ok(!existsSync("esc.md"), "no escalation for a successful late claim");
 });
 
-console.log("PASS herd-dispatch.test.mjs (8 checks for #105/#126 + 3 for #127 + 1 for #138 + 1 for #151 + 1 for #156 + 3 for #285 + 4 for #286)");
+// ── issue #350: herd direct-issue targeting — parse --issues, filter dispatch ──
+
+// Criterion 1: `run --issues 123,134,445` and the repeated form
+// `run --issue 123 --issue 134 --issue 445` parse to the same deduplicated
+// integer target set; a non-integer entry exits 2 with a usage message and
+// spawns nothing.
+{
+  const csv = parseIssueTargets(["run", "--issues", "123,134,445"]);
+  const repeated = parseIssueTargets(["run", "--issue", "123", "--issue", "134", "--issue", "445"]);
+  assert.deepEqual(csv.targets, [123, 134, 445], "comma list parses to the integer set");
+  assert.deepEqual(repeated.targets, csv.targets, "repeated --issue parses to the same set");
+  assert.equal(csv.error, null, "a valid target set carries no error");
+  // No targeting flag -> null (dispatch the whole queue), not an empty set.
+  assert.deepEqual(parseIssueTargets(["run", "--once"]).targets, null, "no flag means no targeting");
+  // A non-integer entry is a usage error at the CLI: the `run` subprocess exits
+  // 2 with the usage message on stderr and never reaches the dispatch loop, so
+  // nothing is spawned.
+  const herd = fileURLToPath(new URL("./herd.mjs", import.meta.url));
+  const bad = spawnSync(process.execPath, [herd, "run", "--issues", "1,abc"], { encoding: "utf8" });
+  assert.equal(bad.status, 2, "a non-integer target entry exits 2");
+  assert.match(bad.stderr, /positive integer issue numbers/, "the exit-2 message explains the usage");
+  assert.equal(bad.stdout, "", "a rejected target list spawns nothing (no dispatch output)");
+  assert.equal(parseIssueTargets(["run", "--issue", "1.5"]).error != null, true, "a non-integer entry yields an error, not a target");
+}
+
+// Criterion 2: with a target set, the supervisor dispatches only issues in the
+// set — an eligible `state:ready` issue outside the set is never dispatched
+// during a scoped run. Issue #1 is higher priority and would win the unscoped
+// queue, but it is outside the set, so #2 is dispatched and #1 never is.
+await inTempDir(async () => {
+  const ready = [
+    { number: 1, createdAt: "2026-01-01", labels: [{ name: "priority:high" }] },
+    { number: 2, createdAt: "2026-01-02", labels: [{ name: "priority:medium" }] },
+  ];
+  const r = await dispatchOne({
+    config: mkConfig(),
+    ready,
+    targets: [2],
+    statePath: "s.json",
+    dryRun: true,
+    log: () => {},
+  });
+  assert.equal(r.plan.issue, 2, "only the in-set issue is dispatched");
+  assert.notEqual(r.plan.issue, 1, "the higher-priority out-of-set issue is never dispatched");
+});
+
+// Criterion 3: within the set, dispatch order follows the existing pickNext
+// ordering (priority, then oldest), one worker per poll pass, respecting
+// maxWorkers.
+await inTempDir(async () => {
+  // Ordering: both targeted, #6 is higher priority than #5, so pickNext order
+  // holds within the set — #6 goes first.
+  const ready = [
+    { number: 5, createdAt: "2026-01-01", labels: [{ name: "priority:low" }] },
+    { number: 6, createdAt: "2026-01-02", labels: [{ name: "priority:high" }] },
+  ];
+  const ordered = await dispatchOne({ config: mkConfig(), ready, targets: [5, 6], statePath: "o.json", dryRun: true, log: () => {} });
+  assert.equal(ordered.plan.issue, 6, "within the set, pickNext ordering (priority then age) is preserved");
+
+  // One worker per poll pass: a single dispatchOne call dispatches at most one.
+  let spawns = 0;
+  const one = await dispatchOne({
+    config: mkConfig(),
+    ready: [{ number: 5, labels: [] }, { number: 6, labels: [] }],
+    targets: [5, 6],
+    statePath: "one.json",
+    spawn: () => (spawns++, 4242),
+    gh: async () => ({ ref: "x" }),
+    isAlive: () => false,
+    kill: () => {},
+    now: () => 0,
+    sleep: () => Promise.resolve(),
+    log: () => {},
+  });
+  assert.equal(spawns, 1, "exactly one worker is spawned per poll pass");
+  // Both unlabeled -> pickNext ties break on issue number, so #5 (lowest) is the top.
+  assert.equal(one.dispatched, 5, "the single dispatch is the top of the targeted queue");
+
+  // maxWorkers respected: at capacity, a targeted pass dispatches nothing.
+  writeFileSync("cap.json", JSON.stringify({ 6: { pid: 100, status: "dispatched" } }));
+  const capped = await dispatchOne({
+    config: mkConfig({ maxWorkers: 1 }),
+    ready: [{ number: 5, labels: [] }],
+    targets: [5],
+    statePath: "cap.json",
+    spawn: () => 1,
+    isAlive: () => true,
+    log: () => {},
+  });
+  assert.equal(capped.reason, "at-capacity", "targeting still respects maxWorkers — no dispatch at capacity");
+});
+
+// Criterion 4: `--dry-run` combined with `--issues` prints the per-issue plan
+// and spawns nothing.
+await inTempDir(async () => {
+  let spawns = 0;
+  const logs = [];
+  const r = await dispatchOne({
+    config: mkConfig(),
+    ready: [{ number: 7, labels: [] }, { number: 8, labels: [] }],
+    targets: [8],
+    statePath: "s.json",
+    dryRun: true,
+    spawn: () => (spawns++, 1),
+    log: (m) => logs.push(m),
+  });
+  assert.equal(r.dryRun, true, "dry-run returns a plan, not a dispatch");
+  assert.equal(r.plan.issue, 8, "the plan names the targeted issue");
+  assert.equal(spawns, 0, "dry-run with --issues spawns nothing");
+  assert.ok(!existsSync("s.json"), "dry-run writes no state");
+  assert.match(logs.join("\n"), /issue #8/, "the per-issue plan is printed");
+});
+
+// Test note: duplicate issue numbers across both flag forms deduplicate to one
+// worker. The parse dedupes; the dispatch then treats the set as a plain queue,
+// so a number named twice is still one issue -> one worker.
+await inTempDir(async () => {
+  const { targets } = parseIssueTargets(["run", "--issues", "12,34,12", "--issue", "34"]);
+  assert.deepEqual(targets, [12, 34], "duplicates across both forms collapse to one set");
+  let spawns = 0;
+  const r = await dispatchOne({
+    config: mkConfig(),
+    ready: [{ number: 12, labels: [] }, { number: 34, labels: [] }],
+    targets,
+    statePath: "s.json",
+    spawn: () => (spawns++, 99),
+    gh: async () => ({ ref: "x" }),
+    isAlive: () => false,
+    kill: () => {},
+    now: () => 0,
+    sleep: () => Promise.resolve(),
+    log: () => {},
+  });
+  assert.equal(spawns, 1, "a deduplicated set dispatches one worker per pass, not one per raw token");
+  assert.equal(readState("s.json")[String(r.dispatched)].status, "dispatched", "the dispatched issue is recorded once");
+});
+
+// Test note: `--issues` with `--max 5` runs up to five live workers; without
+// `--max` the config `maxWorkers` cap holds. Targeting never alters the cap —
+// dispatchOne enforces whatever maxWorkers it is handed (herd.mjs passes the
+// `--max` override or the config default), independent of the target set.
+await inTempDir(async () => {
+  // maxWorkers 5 (as an explicit --max override would supply): a fifth targeted
+  // dispatch proceeds when four workers are live.
+  const four = { 1: { pid: 11, status: "dispatched" }, 2: { pid: 12, status: "dispatched" }, 3: { pid: 13, status: "dispatched" }, 4: { pid: 14, status: "dispatched" } };
+  writeFileSync("hi.json", JSON.stringify(four));
+  const r5 = await dispatchOne({
+    config: mkConfig(), ready: [{ number: 9, labels: [] }], targets: [9], statePath: "hi.json", maxWorkers: 5,
+    spawn: () => 900, gh: async () => ({ ref: "x" }), isAlive: () => true, kill: () => {}, now: () => 0, sleep: () => Promise.resolve(), log: () => {},
+  });
+  assert.equal(r5.dispatched, 9, "a fifth worker dispatches under --max 5");
+  // Without --max, the config default (3) caps: three live workers -> no dispatch.
+  const three = { 1: { pid: 11, status: "dispatched" }, 2: { pid: 12, status: "dispatched" }, 3: { pid: 13, status: "dispatched" } };
+  writeFileSync("lo.json", JSON.stringify(three));
+  const capped = await dispatchOne({
+    config: mkConfig(), ready: [{ number: 9, labels: [] }], targets: [9], statePath: "lo.json",
+    spawn: () => 1, isAlive: () => true, log: () => {},
+  });
+  assert.equal(capped.reason, "at-capacity", "without --max the config maxWorkers (3) cap holds under targeting");
+});
+
+console.log("PASS herd-dispatch.test.mjs (8 checks for #105/#126 + 3 for #127 + 1 for #138 + 1 for #151 + 1 for #156 + 3 for #285 + 4 for #286 + 6 for #350)");
