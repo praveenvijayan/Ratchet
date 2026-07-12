@@ -33,7 +33,7 @@
 // the dispatched worker's job, not the supervisor's. Every outside-world call is
 // injectable, so it runs offline in tests. Zero dependencies.
 
-import { substitute } from "./herd.mjs";
+import { substitute } from "./herd-adapters.mjs";
 import { STATE_FILE, ESCALATIONS_FILE, EVENTS_FILE, readState, writeState, appendEscalation, appendHerdEvent, isPidAlive } from "./herd-survey.mjs";
 import { spawnWorker, recordExit } from "./herd-dispatch.mjs";
 
