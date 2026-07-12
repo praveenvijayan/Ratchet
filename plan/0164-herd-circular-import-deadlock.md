@@ -2,7 +2,7 @@
 title: Fix herd supervisor ESM circular-import deadlock (exit 13, nothing runs)
 priority: high
 labels: [scripts, herd]
-blocked_by: []
+blocked_by: [0165-herd-adapter-leaf-module]
 ---
 
 `node scripts/herd.mjs` (any mode, including the run loop the dashboard
@@ -19,9 +19,19 @@ herd supervisor is unusable, so the dashboard shows nothing.
 - [ ] Every criterion above has exactly one test named after it
 
 ## Notes
-Cycle introduced in 92e1d2f: `herd-dispatch.mjs` statically imports
-`resolveAdapter`/`substitute`/`extractUsage` from `herd.mjs`, while
-`herd.mjs` top-level-awaits `import("./herd-dispatch.mjs")` inside its
-`isMain` block. ESM cannot finish evaluating either module, Node detects the
-unsettled top-level await and kills the process (exit 13). Reproduced on
-current `main`.
+Root cause is the whole strongly-connected import component, not just
+dispatch: `herd.mjs`'s `isMain` block top-level-awaits dynamic `import()` of
+the profile modules, and ESM cannot settle any of those imports until the
+entire cycle finishes evaluating. All four profile modules import back from
+`herd.mjs` — `herd-dispatch.mjs` (`resolveAdapter`/`substitute`/
+`extractUsage`, deadlocks first at line 691) and `herd-monitor.mjs`/
+`herd-verify.mjs`/`herd-review.mjs` (`substitute`), each of which would
+deadlock in turn. Node detects the unsettled top-level await and kills the
+process (exit 13). Reproduced on current `main`.
+
+Second slice of a two-PR split (file-cap): 0165-herd-adapter-leaf-module
+extracts the helpers into a leaf module first; this issue repoints all four
+profile modules to it and adds the cycle regression test. The `herd.mjs`
+re-exports added in 0165 stay — `herd.test.mjs` imports the three names from
+`herd.mjs`, and a re-export toward a leaf module is acyclic, so removing it
+buys nothing and would push this PR over the file cap.
