@@ -228,7 +228,7 @@
     {
       "path": "scripts/herd.mjs",
       "class": "framework",
-      "profile": "herd"
+      "profile": "core"
     },
     {
       "path": "scripts/herd-survey.mjs",

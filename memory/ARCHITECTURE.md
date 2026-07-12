@@ -81,6 +81,12 @@ and an optional Claude Code plugin.
   truth invoked by both local verify and the `pr-gates` CI check.
 - **Skills** (ten `ratchet-*` dirs) — slash-command ergonomics: init, plan,
   sync, next, status, metrics, memory, map, update, uninstall.
+- **Install manifest** (`ratchet-manifest.json` + `scripts/bootstrap.sh`) —
+  classifies every path as framework/generated/excluded with a profile. A
+  default install ships `core` + `herd` (the fleet supervisor). `scripts/herd.mjs`
+  is the `core`-profile CLI entrypoint that dynamically loads the `herd`-profile
+  supervisor modules (herd-survey/-dispatch/-monitor/-verify/-review/-retention)
+  and prints an install hint when they are absent, never a module-not-found.
 
 ## Conventions
 
