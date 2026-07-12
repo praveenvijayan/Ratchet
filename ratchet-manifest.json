@@ -121,6 +121,11 @@
       "profile": "core"
     },
     {
+      "path": "scripts/gh-api.mjs",
+      "class": "framework",
+      "profile": "core"
+    },
+    {
       "path": "scripts/pr-size-check.mjs",
       "class": "framework",
       "profile": "core"
@@ -532,6 +537,10 @@
     },
     {
       "path": "scripts/conflicted-prs.test.mjs",
+      "class": "excluded"
+    },
+    {
+      "path": "scripts/gh-api.test.mjs",
       "class": "excluded"
     },
     {
