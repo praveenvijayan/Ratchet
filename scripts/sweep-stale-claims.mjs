@@ -16,6 +16,7 @@
 // keeps "is this claim alive?" defined in exactly one place.
 import { leaseReference, isStale, isHeartbeat } from "./sweep-lease.mjs";
 import { classifyRequeue } from "./criteria.mjs";
+import { ghClient, paginate, resolveAuth } from "./gh-api.mjs";
 import { fileURLToPath } from "node:url";
 
 // The three lifecycle states the sweep patrols. state:in-progress is the
@@ -169,40 +170,9 @@ function decideChangesRequested({ now, staleMs, staleHours, branch, lastCommitAt
 // `node scripts/sweep-stale-claims.mjs` and lets the orchestration be regression-
 // tested against an in-memory API (see sweep-stale-claims.test.mjs).
 
-const API = "https://api.github.com";
-
-// One GitHub REST call; throws (with .status) on any non-2xx so callers can
-// distinguish an expected 404 (absent branch) from a real failure.
-function ghClient(token) {
-  return async function gh(method, path, body) {
-    const res = await fetch(`${API}${path}`, {
-      method,
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-      },
-      body: body ? JSON.stringify(body) : undefined,
-    });
-    if (!res.ok) {
-      const err = new Error(`${method} ${path} -> ${res.status} ${await res.text()}`);
-      err.status = res.status;
-      throw err;
-    }
-    return res.status === 204 ? null : res.json();
-  };
-}
-
-async function paginate(gh, path) {
-  const out = [];
-  for (let page = 1; ; page++) {
-    const sep = path.includes("?") ? "&" : "?";
-    const batch = await gh("GET", `${path}${sep}per_page=100&page=${page}`);
-    out.push(...batch);
-    if (batch.length < 100) break;
-  }
-  return out;
-}
+// `ghClient` throws (with .status) on any non-2xx so callers can distinguish an
+// expected 404 (absent branch) from a real failure; `paginate` walks per_page=100
+// pages. Both come from the shared client — see scripts/gh-api.mjs.
 
 const labelNames = (labels) => labels.map((l) => (typeof l === "string" ? l : l.name));
 
@@ -247,12 +217,8 @@ function hoursToMs(name, value) {
   return n * 3600 * 1000;
 }
 
-export async function main() {
-  const token = process.env.GITHUB_TOKEN || process.env.GITHUB_PAT;
-  const repo = process.env.GITHUB_REPOSITORY;
-  if (!token || !repo) {
-    throw new Error("Missing token or repo. Set GITHUB_TOKEN (or GITHUB_PAT) and GITHUB_REPOSITORY.");
-  }
+export async function main({ auth = resolveAuth } = {}) {
+  const { token, repo } = auth();
   const owner = repo.split("/")[0];
   const staleHours = process.env.STALE_HOURS || "2";
   const staleMs = hoursToMs("STALE_HOURS", staleHours);
