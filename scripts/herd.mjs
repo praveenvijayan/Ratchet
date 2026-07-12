@@ -13,7 +13,7 @@
 // Zero dependencies. Requires Node 20+. Run:  node scripts/herd.mjs init
 //                                             node scripts/herd.mjs run
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, realpathSync, accessSync, constants as fsConstants } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync, realpathSync, accessSync, constants as fsConstants } from "node:fs";
 import { dirname, join, isAbsolute, delimiter as pathDelimiter } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runLoop, pollOnce, ghJson, resolveRepoRoot, ratchetPaths, RepoRootError } from "./herd-survey.mjs";
@@ -465,6 +465,91 @@ export function resolveAdapter(config, labels = [], deps = {}) {
   return { name: null, adapter: null, source, route: route.slice(), tried, policy, cursorKey: source, nextCursor: start };
 }
 
+// --- Single-supervisor lock -------------------------------------------------
+// A pidfile under `.ratchet/` so two `run` supervisors never poll the same state
+// file at once (issue #358). The lock is advisory and self-healing: a supervisor
+// that crashed leaves a stale pidfile, and the next `run` detects the dead pid
+// and replaces it rather than blocking forever. `--dry-run` neither takes nor is
+// refused by the lock — it spawns nothing and mutates no state, so it can always
+// run alongside a live supervisor.
+export const PID_PATH = ".ratchet/herd.pid";
+
+// Is `pid` a live process? `process.kill(pid, 0)` signals nothing but performs
+// the permission/existence check: it throws ESRCH when no such process exists
+// (dead → stale lock) and EPERM when the process exists but is owned by another
+// user (alive → still holding the lock). Any other error is unexpected and, to
+// stay conservative, is treated as "alive" so we never steal a lock we cannot
+// prove is dead.
+export function pidIsAlive(pid, kill = process.kill) {
+  try {
+    kill(pid, 0);
+    return true;
+  } catch (e) {
+    if (e.code === "ESRCH") return false;
+    return true;
+  }
+}
+
+// Read the pid a pidfile holds, or null when the file is missing, empty, or
+// corrupt (a garbage pidfile is treated as absent so it never wedges `run`).
+function readLockPid(pidPath) {
+  let raw;
+  try {
+    raw = readFileSync(pidPath, "utf8");
+  } catch (e) {
+    if (e.code === "ENOENT") return null;
+    throw e;
+  }
+  const pid = Number(raw.trim());
+  return Number.isInteger(pid) && pid > 0 ? pid : null;
+}
+
+// Acquire the supervisor lock. Returns one of:
+//   { ok: true, release }                       — lock taken (fresh)
+//   { ok: true, release, stalePid }             — replaced a dead supervisor's lock
+//   { ok: true, dryRun: true, release }         — --dry-run: no lock taken or checked
+//   { ok: false, livePid }                      — a live supervisor holds it; refused
+// The create uses the exclusive `wx` flag so two near-simultaneous starts race
+// through the OS: exactly one create succeeds, the loser sees EEXIST and is
+// refused, naming the winner's pid.
+export function acquireLock({ pidPath, pid = process.pid, isAlive = pidIsAlive, dryRun = false } = {}) {
+  if (dryRun) return { ok: true, dryRun: true, release() {} };
+  mkdirSync(dirname(pidPath), { recursive: true });
+  const holder = readLockPid(pidPath);
+  let stalePid = null;
+  if (holder !== null && holder !== pid && isAlive(holder)) {
+    return { ok: false, livePid: holder };
+  }
+  // Any file still here is replaceable: a dead holder's stale lock, our own
+  // leftover, or a corrupt/empty pidfile (holder null). Clear it so the create
+  // below can take the lock — only a *dead named pid* earns a stale notice.
+  if (existsSync(pidPath)) {
+    if (holder !== null && holder !== pid) stalePid = holder;
+    rmSync(pidPath, { force: true });
+  }
+  try {
+    writeFileSync(pidPath, `${pid}\n`, { flag: "wx" });
+  } catch (e) {
+    if (e.code !== "EEXIST") throw e;
+    // Lost the create race after our read: whoever won now holds the lock.
+    const winner = readLockPid(pidPath);
+    if (winner !== null && winner !== pid && isAlive(winner)) return { ok: false, livePid: winner };
+    // Winner is already gone (dead or cleared) — refuse conservatively rather
+    // than loop; the operator simply retries `run`.
+    return { ok: false, livePid: winner ?? holder };
+  }
+  const release = () => releaseLock(pidPath, pid);
+  return stalePid !== null ? { ok: true, release, stalePid } : { ok: true, release };
+}
+
+// Release the lock, but only if this pid still holds it — never delete a lock a
+// different supervisor acquired after we exited. Best-effort: a vanished file is
+// already released.
+export function releaseLock(pidPath, pid = process.pid) {
+  if (readLockPid(pidPath) !== pid) return;
+  rmSync(pidPath, { force: true });
+}
+
 // --- CLI --------------------------------------------------------------------
 // `main` returns a process exit code so it is unit-testable without spawning a
 // child. HerdConfigError is the only expected failure and is reported as a
@@ -550,6 +635,34 @@ if (isMain) {
     };
     const maxIdx = argv.indexOf("--max");
     const dryRun = argv.includes("--dry-run");
+    // Take the single-supervisor lock before polling. A live holder refuses this
+    // start (naming its pid, leaving the running supervisor and its state file
+    // untouched); a dead holder's stale lock is replaced with a notice. --dry-run
+    // passes through untouched. The lock is released on every clean exit path
+    // below and on SIGINT/SIGTERM, so the next `run` starts without a stale notice.
+    const pidPath = join(root, PID_PATH);
+    let lock = { release() {} };
+    if (!dryRun) {
+      lock = acquireLock({ pidPath });
+      if (!lock.ok) {
+        console.error(
+          `herd: another supervisor is already running (pid ${lock.livePid}); refusing to start a second. ` +
+            `Stop it first, or wait for it to exit.`,
+        );
+        process.exit(1);
+      }
+      if (lock.stalePid != null) {
+        console.log(`herd: replaced a stale lock left by dead supervisor pid ${lock.stalePid}.`);
+      }
+      const releaseAndExit = (signal) => {
+        lock.release();
+        // 128 + signal number is the conventional exit code for a signal-terminated
+        // process; the exact number is not load-bearing, a clean release is.
+        process.exit(signal === "SIGINT" ? 130 : 143);
+      };
+      process.once("SIGINT", () => releaseAndExit("SIGINT"));
+      process.once("SIGTERM", () => releaseAndExit("SIGTERM"));
+    }
     const step = async (o) => {
       const config = resolveConfig(o.log);
       const maxWorkers = maxIdx >= 0 && Number.isInteger(Number(argv[maxIdx + 1]))
@@ -587,8 +700,12 @@ if (isMain) {
       await dispatchOne({ ...o, config, ready, dryRun, maxWorkers, claimTimeoutMs: config.claimTimeoutSeconds * 1000 });
     };
     runLoop({ gh: ghJson, log: console.log, ...paths, once: argv.includes("--once") || dryRun, pollSeconds: config.pollSeconds, step }).then(
-      () => process.exit(0),
+      () => {
+        lock.release();
+        process.exit(0);
+      },
       (e) => {
+        lock.release();
         console.error(`herd: supervisor stopped on an unexpected error: ${e.message}`);
         process.exit(1);
       },
