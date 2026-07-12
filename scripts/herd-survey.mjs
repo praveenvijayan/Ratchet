@@ -593,3 +593,203 @@ export async function runLoop(opts) {
     await sleep(pollSeconds * 1000);
   }
 }
+
+// ── Scoped runs (issue #357): a `herd run --issue/--issues` restricted to an
+// explicit target set. Unlike the open-ended runLoop it reports *why* a named
+// issue is skipped (never a silent drop) and is finite — it refuses to start
+// when nothing is dispatchable and stops once every eligible target has finished.
+
+// Exit code for a scoped run in which every requested issue was ineligible:
+// nothing to dispatch, so it fails loudly rather than idling. Distinct from the
+// config error (1) and argv parse error (2) — "targets all unrunnable" vs "bad flags".
+export const SCOPED_NO_ELIGIBLE_EXIT = 3;
+
+// Statuses at which a scoped target is finished from the supervisor's point of
+// view: its PR is up for human review, or the pipeline escalated/failed and now
+// waits on a human. This is deliberately a *subset* of TERMINAL_STATUS —
+// `awaiting-verification` is excluded because the supervisor is still actively
+// verifying that entry, so a scoped run must keep polling until it resolves one
+// way or the other rather than declaring the target done mid-verification.
+export const SCOPED_DONE_STATUS = new Set([
+  "ready-for-review",
+  "verify-escalated",
+  "escalated",
+  "dispatch-failed",
+]);
+
+// Fetch { state, labels } for each requested target issue, one `gh issue view`
+// per number (in parallel). A per-issue gh failure is recorded as { error }
+// rather than thrown, so one unreadable issue is reported as ineligible instead
+// of aborting the whole run. Returns an object keyed by number; `gh` is injected.
+export async function surveyTargets(gh, targets) {
+  const entries = await Promise.all(
+    (targets || []).map(async (n) => {
+      try {
+        const d = await gh(["issue", "view", String(n), "--json", "number,state,labels"]);
+        return [n, { state: d?.state ?? null, labels: (d?.labels || []).map((l) => l.name) }];
+      } catch (e) {
+        return [n, { error: (e && e.message) || String(e) }];
+      }
+    }),
+  );
+  return Object.fromEntries(entries);
+}
+
+// Pure. Split the requested targets into the set eligible to dispatch and the
+// ineligible ones, each carrying a single reason and human-readable detail. A
+// requested issue is ineligible when it is unreadable, closed, `state:blocked`,
+// already tracked in the state file, or not `state:ready` — mirroring the pick
+// rule in AGENTS.md §1, so targeting is a selection filter and never a state
+// bypass. Checks run most-specific first; the first match is the reason
+// reported. `info` is surveyTargets' output; `state` is the current state file.
+export function classifyTargets(targets, info, state) {
+  const eligible = [];
+  const ineligible = [];
+  for (const n of targets || []) {
+    const i = info[n] || info[String(n)] || {};
+    const labels = new Set(i.labels || []);
+    let reason = null;
+    let detail = null;
+    if (i.error || i.state == null) {
+      reason = "not-found";
+      detail = i.error ? `it could not be read from GitHub (${i.error})` : "it could not be read from GitHub";
+    } else if (i.state === "CLOSED") {
+      reason = "closed";
+      detail = "the issue is closed";
+    } else if (labels.has("state:blocked")) {
+      reason = "blocked";
+      detail = "the issue is state:blocked";
+    } else if (String(n) in state) {
+      reason = "already-tracked";
+      detail = `the issue is already in the state file (status: ${state[String(n)]?.status ?? "unknown"})`;
+    } else if (!labels.has("state:ready")) {
+      const st = [...labels].find((l) => l.startsWith("state:")) || "no state label";
+      reason = "not-ready";
+      detail = `the issue is not state:ready (${st})`;
+    }
+    if (reason) ineligible.push({ issue: n, reason, detail });
+    else eligible.push(n);
+  }
+  return { eligible, ineligible };
+}
+
+// The suggested-action line an ineligible target's escalation carries, keyed by
+// the classify reason so an operator is told exactly how to make it runnable.
+function scopedIneligibleAction(reason) {
+  switch (reason) {
+    case "closed":
+      return "drop it from the target list — the issue is already closed";
+    case "blocked":
+      return "clear its blocker (see the blocking issue) and re-run once it is state:ready";
+    case "already-tracked":
+      return "let the in-flight worker finish, or clear its state-file entry, before targeting it again";
+    case "not-found":
+      return "check the issue number — it could not be read from GitHub";
+    default:
+      return "move it to state:ready (finish planning / unblock it) before targeting it";
+  }
+}
+
+// Pure. Accumulate finished targets into `completed` and report whether every
+// eligible target is now done. A target is finished when its issue is closed (a
+// merge or manual close mid-run is terminal — see the test note on #357) or its
+// state-file entry has reached a SCOPED_DONE_STATUS. Accumulating into a set is
+// what makes this robust to pollOnce's terminal-entry prune: a status seen in
+// one pass is remembered even though the next pass deletes the entry. Mutates
+// and returns `completed`.
+export function markScopedComplete(eligible, state, info, completed) {
+  for (const n of eligible) {
+    if (completed.has(n)) continue;
+    const i = info[n] || info[String(n)] || {};
+    const entry = state[String(n)];
+    if (i.state === "CLOSED" || (entry && SCOPED_DONE_STATUS.has(entry.status))) completed.add(n);
+  }
+  return completed;
+}
+
+// Drive a scoped `herd run`. Up front it surveys and classifies the requested
+// targets: every ineligible one is escalated once (with its reason and a fix)
+// and logged, and never dispatched. If *every* requested issue is ineligible the
+// run does not enter the loop at all — it returns SCOPED_NO_ELIGIBLE_EXIT with
+// zero workers spawned. Otherwise it polls like runLoop but hands `step` only
+// the eligible target set, and after each pass re-surveys the targets and marks
+// the finished ones; the moment all eligible targets are done it exits 0 rather
+// than polling forever. `step` is the same per-pass work the open loop runs;
+// `--once`/`--dry-run` (once:true) still cap it at a single pass.
+export async function scopedRun(opts) {
+  const {
+    gh,
+    targets,
+    statePath = STATE_FILE,
+    escalationsPath = ESCALATIONS_FILE,
+    eventsPath = EVENTS_FILE,
+    log = console.log,
+    step = pollOnce,
+    once = false,
+    dryRun = false,
+    pollSeconds = 60,
+    sleep = defaultSleep,
+    now = () => Date.now(),
+    ...rest
+  } = opts;
+
+  const info = await surveyTargets(gh, targets);
+  const { eligible, ineligible } = classifyTargets(targets, info, readState(statePath));
+  for (const bad of ineligible) {
+    log(
+      `herd: issue #${bad.issue} is ineligible for this scoped run (${bad.reason}): ${bad.detail}. It will not be dispatched.`,
+    );
+    // A dry run previews the plan without touching the escalations log or event
+    // stream — the reason is logged above, but nothing is persisted.
+    if (dryRun) continue;
+    appendEscalation(
+      escalationsPath,
+      {
+        now: now(),
+        issue: bad.issue,
+        what: `requested as a scoped-run target but ineligible (${bad.reason}): ${bad.detail}. It was not dispatched.`,
+        logFile: null,
+        action: scopedIneligibleAction(bad.reason),
+      },
+      { eventsPath, warn: log },
+    );
+  }
+  if (eligible.length === 0) {
+    log(
+      `herd: every requested issue (${(targets || []).map((n) => `#${n}`).join(", ")}) is ineligible; ` +
+        "nothing to dispatch. Exiting non-zero.",
+    );
+    return { exitCode: SCOPED_NO_ELIGIBLE_EXIT, spawned: 0, eligible, ineligible };
+  }
+
+  log(
+    `herd: scoped run over ${eligible.map((n) => `#${n}`).join(", ")}; ` +
+      "will exit once every target has finished.",
+  );
+  const completed = new Set();
+  for (;;) {
+    await step({ gh, statePath, escalationsPath, eventsPath, log, once, pollSeconds, sleep, ...rest, targets: eligible });
+    const passInfo = await surveyTargets(gh, eligible).catch(() => ({}));
+    const st = readState(statePath);
+    const before = new Set(completed);
+    markScopedComplete(eligible, st, passInfo, completed);
+    // Report each newly-finished target (why it finished — a closed issue or a
+    // scoped-done state-file status), so a target concluding mid-run is never a
+    // silent drop.
+    for (const n of eligible) {
+      if (before.has(n) || !completed.has(n)) continue;
+      const closed = (passInfo[n] || passInfo[String(n)] || {}).state === "CLOSED";
+      log(`herd: scoped target #${n} finished (${closed ? "issue closed" : st[String(n)]?.status ?? "terminal"}).`);
+    }
+    if (eligible.every((n) => completed.has(n))) {
+      log(
+        `herd: all scoped targets finished (${eligible.map((n) => `#${n}`).join(", ")}). Exiting.`,
+      );
+      return { exitCode: 0, spawned: eligible.length, eligible, ineligible, completed: [...completed] };
+    }
+    // `--once`/`--dry-run`: a single pass was requested, so stop even if targets
+    // have not all finished — the caller only asked to survey/dispatch once.
+    if (once) return { exitCode: 0, spawned: eligible.length, eligible, ineligible, completed: [...completed] };
+    await sleep(pollSeconds * 1000);
+  }
+}

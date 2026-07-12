@@ -21,6 +21,11 @@ import {
   pollOnce,
   pruneLogs,
   runLoop,
+  surveyTargets,
+  classifyTargets,
+  markScopedComplete,
+  scopedRun,
+  SCOPED_NO_ELIGIBLE_EXIT,
 } from "./herd-survey.mjs";
 import { dispatchOne, recordExit } from "./herd-dispatch.mjs";
 import { monitorOnce } from "./herd-monitor.mjs";
@@ -794,4 +799,137 @@ await inTempDir(async () => {
   assert.ok(logs.some((m) => /1 terminal entry pruned/.test(m)), "the poll summary line reports the terminal-pruned count");
 });
 
-console.log("PASS herd-survey.test.mjs (7 criteria + issue #137: 4 criteria + issue #143: 5 criteria + issue #138: 5 criteria + issue #139: 3 criteria + issue #163: 3 criteria + issue #169: 4 criteria + issue #170: 4 criteria + issue #173: 5 criteria)");
+// ── issue #357: herd scoped-run eligibility reporting & lifecycle ──
+// A gh double answering `issue view --json number,state,labels` from a map of
+// number -> { state, labels } ("error"/absent simulates an unreadable issue).
+function fakeIssueGh(map) {
+  return async (args) => {
+    if (args[0] === "issue" && args[1] === "view") {
+      const n = Number(args[2]);
+      const v = map[n];
+      if (v === "error" || v === undefined) throw new Error(`no such issue #${n}`);
+      return { number: n, state: v.state, labels: (v.labels || []).map((name) => ({ name })) };
+    }
+    return [];
+  };
+}
+const noSleep = async () => {};
+
+// Criterion 1: a requested issue that is closed, state:blocked, not state:ready,
+// or already present in the state file is reported with a per-issue reason and
+// an escalation entry, and is never spawned. The lone eligible target (#50) is
+// the only issue ever handed to dispatch.
+await inTempDir(async () => {
+  writeFileSync(
+    "s.json",
+    JSON.stringify({ 40: { adapter: "claude", pid: null, logFile: null, attempts: 1, pr: null, status: "working" } }),
+  );
+  const gh = fakeIssueGh({
+    10: { state: "CLOSED", labels: [] },
+    20: { state: "OPEN", labels: ["state:blocked"] },
+    30: { state: "OPEN", labels: ["state:draft"] },
+    40: { state: "OPEN", labels: ["state:ready"] }, // ready, but already tracked
+    50: { state: "OPEN", labels: ["state:ready"] }, // the one eligible target
+  });
+  const seenTargets = [];
+  const step = async (o) => {
+    seenTargets.push([...o.targets]);
+    // Advance the eligible target to a scoped-done status so the loop exits.
+    const st = readState("s.json");
+    st["50"] = { adapter: "claude", pid: null, logFile: "x.log", attempts: 1, pr: 7, status: "ready-for-review" };
+    writeFileSync("s.json", JSON.stringify(st));
+  };
+  const r = await scopedRun({
+    gh, targets: [10, 20, 30, 40, 50], statePath: "s.json", escalationsPath: "e.md",
+    eventsPath: "ev.jsonl", log: () => {}, step, sleep: noSleep, now: () => NOW,
+  });
+  const esc = readFileSync("e.md", "utf8");
+  assert.match(esc, /issue #10\n- What happened: [^\n]*\(closed\)/, "closed target #10 is escalated with its reason");
+  assert.match(esc, /issue #20\n- What happened: [^\n]*\(blocked\)/, "state:blocked target #20 is escalated with its reason");
+  assert.match(esc, /issue #30\n- What happened: [^\n]*\(not-ready\)/, "not-ready target #30 is escalated with its reason");
+  assert.match(esc, /issue #40\n- What happened: [^\n]*\(already-tracked\)/, "already-tracked target #40 is escalated with its reason");
+  assert.ok(seenTargets.length >= 1, "the loop ran on the eligible set");
+  assert.ok(
+    seenTargets.every((t) => t.length === 1 && t[0] === 50),
+    "only the eligible target #50 is ever dispatched; no ineligible issue is spawned",
+  );
+  assert.equal(r.exitCode, 0, "the run completes 0 once the eligible target finishes");
+});
+
+// Criterion 2: when every requested issue is ineligible, the supervisor exits
+// non-zero with the per-issue reasons and zero workers are spawned.
+await inTempDir(async () => {
+  const gh = fakeIssueGh({ 11: { state: "CLOSED", labels: [] }, 22: { state: "OPEN", labels: ["state:blocked"] } });
+  let stepCalls = 0;
+  const step = async () => { stepCalls += 1; };
+  const r = await scopedRun({
+    gh, targets: [11, 22], statePath: "s.json", escalationsPath: "e.md",
+    eventsPath: "ev.jsonl", log: () => {}, step, sleep: noSleep, now: () => NOW,
+  });
+  assert.equal(r.exitCode, SCOPED_NO_ELIGIBLE_EXIT, "an all-ineligible scoped run exits with SCOPED_NO_ELIGIBLE_EXIT");
+  assert.notEqual(r.exitCode, 0, "the exit code is non-zero");
+  assert.equal(stepCalls, 0, "zero workers spawned — step never runs when nothing is eligible");
+  assert.equal(r.spawned, 0, "the result records zero spawned workers");
+  const esc = readFileSync("e.md", "utf8");
+  assert.match(esc, /issue #11\n- What happened: [^\n]*\(closed\)/, "the closed target's reason is reported");
+  assert.match(esc, /issue #22\n- What happened: [^\n]*\(blocked\)/, "the blocked target's reason is reported");
+});
+
+// Criterion 3: a scoped run exits once every eligible target has reached a
+// terminal status in the state file, rather than polling forever. A bounded step
+// advances one target per pass; the injected sleep throws past a pass budget, so
+// termination is by completion, not luck.
+await inTempDir(async () => {
+  const gh = fakeIssueGh({ 1: { state: "OPEN", labels: ["state:ready"] }, 2: { state: "OPEN", labels: ["state:ready"] } });
+  let pass = 0;
+  const step = async () => {
+    pass += 1;
+    const st = readState("s.json");
+    if (pass === 1) st["1"] = { adapter: "claude", pid: null, logFile: "a.log", attempts: 1, pr: null, status: "escalated" };
+    if (pass === 2) st["2"] = { adapter: "claude", pid: null, logFile: "b.log", attempts: 1, pr: 9, status: "ready-for-review" };
+    writeFileSync("s.json", JSON.stringify(st));
+  };
+  let slept = 0;
+  const r = await scopedRun({
+    gh, targets: [1, 2], statePath: "s.json", escalationsPath: "e.md", eventsPath: "ev.jsonl", log: () => {}, step,
+    sleep: async () => { slept += 1; if (slept > 20) throw new Error("scoped run polled forever"); }, now: () => NOW,
+  });
+  assert.equal(r.exitCode, 0, "the scoped run exits 0 once every target is terminal");
+  assert.equal(pass, 2, "it stops the pass after the last target reaches a terminal status");
+  assert.deepEqual([...r.completed].sort((a, b) => a - b), [1, 2], "both targets are recorded finished");
+});
+
+// Test note: a target issue closing mid-run is treated as terminal, reported,
+// and the scoped run exits once the remaining targets finish. #5 closes after
+// the first pass; #6 finishes on the second.
+await inTempDir(async () => {
+  const issues = { 5: { state: "OPEN", labels: ["state:ready"] }, 6: { state: "OPEN", labels: ["state:ready"] } };
+  const gh = async (args) => {
+    if (args[0] === "issue" && args[1] === "view") {
+      const n = Number(args[2]);
+      return { number: n, state: issues[n].state, labels: issues[n].labels.map((name) => ({ name })) };
+    }
+    return [];
+  };
+  let pass = 0;
+  const logs = [];
+  const step = async () => {
+    pass += 1;
+    if (pass === 1) issues[5].state = "CLOSED"; // #5 closes mid-run (merged or closed by a human)
+    if (pass === 2) {
+      const st = readState("s.json");
+      st["6"] = { adapter: "claude", pid: null, logFile: "c.log", attempts: 1, pr: 3, status: "ready-for-review" };
+      writeFileSync("s.json", JSON.stringify(st));
+    }
+  };
+  const r = await scopedRun({
+    gh, targets: [5, 6], statePath: "s.json", escalationsPath: "e.md", eventsPath: "ev.jsonl",
+    log: (m) => logs.push(m), step, sleep: noSleep, now: () => NOW,
+  });
+  assert.equal(r.exitCode, 0, "the scoped run exits 0");
+  assert.deepEqual([...r.completed].sort((a, b) => a - b), [5, 6], "the closed target #5 counts as finished alongside #6");
+  assert.equal(pass, 2, "the run keeps polling until the remaining target #6 finishes, then exits");
+  assert.ok(logs.some((m) => /scoped target #5 finished \(issue closed\)/.test(m)), "the mid-run close of #5 is reported");
+});
+
+console.log("PASS herd-survey.test.mjs (7 criteria + issue #137: 4 criteria + issue #143: 5 criteria + issue #138: 5 criteria + issue #139: 3 criteria + issue #163: 3 criteria + issue #169: 4 criteria + issue #170: 4 criteria + issue #173: 5 criteria + issue #357: 3 criteria + 1 test note)");

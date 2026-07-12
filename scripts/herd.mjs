@@ -685,9 +685,9 @@ if (isMain) {
   // module-not-found error. Dynamically import the implementation so a missing
   // `herd` profile is caught here with one message, not surfaced by Node's
   // static-import resolver.
-  let ghJson, ratchetPaths, runLoop, pollOnce, dispatchOne, surveyReady, monitorOnce, verifyOnce, reviewOnce, retentionOnce;
+  let ghJson, ratchetPaths, runLoop, pollOnce, scopedRun, dispatchOne, surveyReady, monitorOnce, verifyOnce, reviewOnce, retentionOnce;
   try {
-    ({ ghJson, ratchetPaths, runLoop, pollOnce } = await import("./herd-survey.mjs"));
+    ({ ghJson, ratchetPaths, runLoop, pollOnce, scopedRun } = await import("./herd-survey.mjs"));
     ({ dispatchOne, surveyReady } = await import("./herd-dispatch.mjs"));
     ({ monitorOnce } = await import("./herd-monitor.mjs"));
     ({ verifyOnce } = await import("./herd-verify.mjs"));
@@ -808,19 +808,38 @@ if (isMain) {
         o.log(`herd: dispatch survey failed: ${e.message}; skipping dispatch this poll.`);
         return [];
       });
-      await dispatchOne({ ...o, config, ready, dryRun, targets, maxWorkers, claimTimeoutMs: config.claimTimeoutSeconds * 1000 });
+      // A scoped run hands `step` the *eligible* subset via o.targets (see
+      // scopedRun); the open loop passes none, so it falls back to the parsed
+      // `targets` (null → the whole queue).
+      await dispatchOne({ ...o, config, ready, dryRun, targets: o.targets ?? targets, maxWorkers, claimTimeoutMs: config.claimTimeoutSeconds * 1000 });
     };
-    runLoop({ gh: ghJson, log: console.log, ...paths, once: argv.includes("--once") || dryRun, pollSeconds: config.pollSeconds, step }).then(
-      () => {
-        lock.release();
-        process.exit(0);
-      },
-      (e) => {
-        lock.release();
-        console.error(`herd: supervisor stopped on an unexpected error: ${e.message}`);
-        process.exit(1);
-      },
-    );
+    const onLoopError = (e) => {
+      lock.release();
+      console.error(`herd: supervisor stopped on an unexpected error: ${e.message}`);
+      process.exit(1);
+    };
+    const once = argv.includes("--once") || dryRun;
+    if (targets != null) {
+      // Scoped run: gate on target eligibility up front (escalating and skipping
+      // any closed/blocked/not-ready/already-tracked issue), then poll only until
+      // every eligible target has finished. Its exit code carries the outcome —
+      // 0 when the targets ran, SCOPED_NO_ELIGIBLE_EXIT when none were runnable.
+      scopedRun({ gh: ghJson, log: console.log, ...paths, targets, once, dryRun, pollSeconds: config.pollSeconds, step }).then(
+        (r) => {
+          lock.release();
+          process.exit(r.exitCode);
+        },
+        onLoopError,
+      );
+    } else {
+      runLoop({ gh: ghJson, log: console.log, ...paths, once, pollSeconds: config.pollSeconds, step }).then(
+        () => {
+          lock.release();
+          process.exit(0);
+        },
+        onLoopError,
+      );
+    }
   } else {
     process.exit(main(argv));
   }
