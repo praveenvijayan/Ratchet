@@ -186,6 +186,11 @@
       "profile": "core"
     },
     {
+      "path": "scripts/ratchet-start.mjs",
+      "class": "framework",
+      "profile": "core"
+    },
+    {
       "path": "scripts/review-verdict.mjs",
       "class": "framework",
       "profile": "core"
@@ -558,6 +563,10 @@
     },
     {
       "path": "scripts/ratchet-submit.test.mjs",
+      "class": "excluded"
+    },
+    {
+      "path": "scripts/ratchet-start.test.mjs",
       "class": "excluded"
     },
     {

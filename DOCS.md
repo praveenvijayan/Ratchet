@@ -248,6 +248,8 @@ scripts/
   ratchet-requeue-heartbeat.test.mjs Regression test for the requeue and heartbeat scripts
   ratchet-submit.mjs            Preflight the PR handoff: integrate/gate/push/PR/label, fail-fast
   ratchet-submit.test.mjs       Regression test for the submit preflight
+  ratchet-start.mjs             Deterministic claim: server-side ref, worktree, owner marker, label flip, assign
+  ratchet-start.test.mjs        Regression test for the deterministic claim
   ratchet-metrics.mjs           Read-only loop health metrics
   ratchet-metrics.test.mjs      Regression test for loop metrics
   ratchet-uninstall.sh          Remove exactly what bootstrap.sh installed, per .ratchet-install.json
