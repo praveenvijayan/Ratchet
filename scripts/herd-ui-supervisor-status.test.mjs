@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 // herd-ui-supervisor-status.test.mjs — the acceptance criteria of issue #305 are
 // the test plan: exactly one test per criterion of the supervisor-status header
-// (the live dot turns green only when online, and a details area reports the
-// supervisor's state, freshness, and poll cadence). Driven through herd-ui.mjs's
-// public interface — the pure liveness classifier, the snapshot builder, and the
-// served PAGE_HTML whose client-side renderHeartbeat drives the dot and details.
-// Offline, zero deps. Run:
+// (the live dot turns green only when online, and the single heartbeat indicator
+// reports the supervisor's state, freshness, and poll cadence). Driven through
+// herd-ui.mjs's public interface — the pure liveness classifier, the snapshot
+// builder, and the served PAGE_HTML whose client-side renderHeartbeat drives the
+// dot and indicator text. Offline, zero deps. Run:
 //   node scripts/herd-ui-supervisor-status.test.mjs
 
 import assert from "node:assert/strict";
@@ -65,46 +65,41 @@ function snapAt(ageSeconds) {
   assert.match(PAGE_HTML, /dot\.classList\.add\("live"\)/, "the live branch turns the dot green");
 }
 
-// --- #305 criterion 2: when online, a supervisor details area shows the status
-// ("live"/"online"), the age since the last heartbeat, and the poll interval. ---
+// --- #305 criterion 2: when online, the heartbeat indicator shows the status
+// ("live"), the age since the last heartbeat, and the poll interval. ---
 {
   const snap = snapAt(30);
   assert.equal(snap.heartbeat.state, "live", "a 30s-old heartbeat is online");
   assert.equal(snap.heartbeat.ageSeconds, 30, "the snapshot carries the freshness (age)");
   assert.equal(snap.heartbeat.pollSeconds, POLL, "the snapshot carries the poll cadence");
 
-  // The details area exists in the page and its live branch fills status, age,
-  // and poll interval.
-  assert.match(PAGE_HTML, /id="hbdetails"/, "the header has a supervisor details area");
-  assert.match(PAGE_HTML, /id="hbstatus"[\s\S]*id="hbmeta"/, "the details area has a status and a meta slot");
-  assert.match(PAGE_HTML, /statusEl\.textContent = "live"/, "the live branch reports the status");
-  assert.match(PAGE_HTML, /"polls every " \+ durText\(hb\.pollSeconds\)/, "the details report the poll interval");
-  assert.match(PAGE_HTML, /metaEl\.textContent = "heartbeat " \+ durText\(age\)/, "the live details report the age since the last heartbeat");
+  // The indicator reports status, age, and poll interval in its text.
+  assert.match(PAGE_HTML, /"supervisor live · heartbeat " \+ durText\(age\) \+ " ago"/, "the live indicator reports the status and age since the last heartbeat");
+  assert.match(PAGE_HTML, /"polls every " \+ durText\(hb\.pollSeconds\)/, "the indicator reports the poll interval");
 }
 
-// --- #305 criterion 3: when no heartbeat has ever been seen, the details show
-// "not seen" and the dot is NOT green (no false-positive online state). ---
+// --- #305 criterion 3: when no heartbeat has ever been seen, the indicator
+// shows "not seen" and the dot is NOT green (no false-positive online state). ---
 {
   const snap = snapAt(null);
   assert.equal(snap.heartbeat.lastHeartbeatTs, null, "no heartbeat has been seen");
   assert.equal(snap.heartbeat.state, "unseen", "the classifier reports unseen, never a live guess");
 
-  // The page's unseen branch removes the green and labels the details "not seen".
-  assert.match(PAGE_HTML, /statusEl\.textContent = "not seen"/, "the unseen details read 'not seen'");
+  // The page's unseen branch removes the green and labels the indicator "not seen".
+  assert.match(PAGE_HTML, /"supervisor not seen"/, "the unseen indicator reads 'not seen'");
   assert.match(PAGE_HTML, /hb\.lastHeartbeatTs == null[\s\S]*?dot\.classList\.remove\("live"\)/, "the unseen branch clears the green dot");
 }
 
 // --- #305 criterion 4: when heartbeats have stopped (age exceeds the
-// threshold), the details show "silent" with the time since the last heartbeat,
-// and the dot is NOT green. ---
+// threshold), the indicator shows "silent" with the time since the last
+// heartbeat, and the dot is NOT green. ---
 {
   const snap = snapAt(threshold + 120);
   assert.equal(snap.heartbeat.state, "silent", "a past-threshold heartbeat classifies as silent");
   assert.ok(snap.heartbeat.ageSeconds > threshold, "the age exceeds the freshness threshold");
 
   // The page's silent branch removes the green and reports the elapsed silence.
-  assert.match(PAGE_HTML, /statusEl\.textContent = "silent"/, "the silent details read 'silent'");
-  assert.match(PAGE_HTML, /metaEl\.textContent = "last heartbeat " \+ durText\(age\) \+ " ago"/, "the silent details report the time since the last heartbeat");
+  assert.match(PAGE_HTML, /"supervisor silent · heartbeat " \+ durText\(age\) \+ "s ago"/, "the silent indicator reports the time since the last heartbeat");
   assert.match(PAGE_HTML, /age > hb\.thresholdSeconds[\s\S]*?dot\.classList\.remove\("live"\)/, "the silent branch clears the green dot");
 }
 

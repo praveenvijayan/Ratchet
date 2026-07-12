@@ -233,6 +233,7 @@ scripts/
   herd-ui-mascot-deck-live.test.mjs Regression test for deck cards tracking live workers
   herd-ui-deck-card-issue-status.test.mjs Regression test for deck card worked-issue number and worker status
   herd-ui-supervisor-status.test.mjs Regression test for the supervisor-status header strip
+  herd-ui-supervisor-heartbeat-dedup.test.mjs Regression test for the single heartbeat indicator
   herd-mascots-install.test.mjs  Regression test for mascots/ install manifest delivery
   manifest-check.mjs            Gate: validate ratchet-manifest.json against the repo (no drift in/out)
   manifest-check.test.mjs       Regression test for the install-manifest gate
