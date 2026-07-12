@@ -7,7 +7,7 @@
 // Zero dependencies. Run:  node scripts/gh-api.test.mjs
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, dirname } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -379,3 +379,82 @@ const readScript344 = (name) => readFileSync(join(dirname(fileURLToPath(import.m
 }
 
 console.log("PASS gh-api.test.mjs #344 sync-script migration (4 criteria)");
+
+// ===========================================================================
+// Issue #346 (plan 0155-migrate-gh-api-metrics-scripts): the capstone. It
+// migrates the final two scripts — ratchet-metrics.mjs and pr-size-check.mjs —
+// and turns the batch's postcondition (exactly one fetch-based GitHub client
+// under scripts/) into a permanent automated check (criterion 2 below) rather
+// than a one-time assertion. `#346` markers are distinct from the
+// `#341`/`#342`/`#344` markers counted above.
+// ===========================================================================
+
+const MIGRATED_346 = [
+  { file: "ratchet-metrics.mjs", uses: ["ghClient", "paginate", "resolveAuth"] },
+  { file: "pr-size-check.mjs", uses: ["ghClient", "paginate"] },
+];
+const dir346 = dirname(fileURLToPath(import.meta.url));
+const read346 = (name) => readFileSync(join(dir346, name), "utf8");
+
+// --- #346 Criterion 1: both scripts import the shared client from
+// scripts/gh-api.mjs and keep no private client, pagination loop, or hard-coded
+// API host of their own. -----------------------------------------------------
+{
+  for (const { file, uses } of MIGRATED_346) {
+    const src = read346(file);
+    const m = src.match(/import\s*\{([^}]*)\}\s*from\s*["']\.\/gh-api\.mjs["']/);
+    assert.ok(m, `${file} imports from ./gh-api.mjs`);
+    const imported = m[1].split(",").map((s) => s.trim());
+    for (const sym of uses) {
+      assert.ok(imported.includes(sym), `${file} imports ${sym} from the shared client`);
+    }
+    assert.doesNotMatch(src, /api\.github\.com/, `${file} no longer hard-codes the API host`);
+    assert.doesNotMatch(src, /function\s+ghGet\b|function\s+ghClient\b/, `${file} defines no private client`);
+    assert.doesNotMatch(src, /per_page=100&page=/, `${file} runs no private pagination loop`);
+  }
+}
+
+// --- #346 Criterion 2: the permanent automated check — exactly one fetch-based
+// GitHub client under scripts/. Every production script (scripts/*.mjs, tests
+// excluded) is scanned; only gh-api.mjs may name the api.github.com host, so a
+// reintroduced private client fails this gate on every future PR. Asserting it
+// here also proves it passes on the repository as left by this PR. -----------
+{
+  const offenders = readdirSync(dir346)
+    .filter((n) => n.endsWith(".mjs") && !n.endsWith(".test.mjs") && n !== "gh-api.mjs")
+    .filter((n) => /api\.github\.com/.test(readFileSync(join(dir346, n), "utf8")));
+  assert.deepEqual(
+    offenders,
+    [],
+    `only gh-api.mjs may construct a fetch to api.github.com; offenders: ${offenders.join(", ")}`,
+  );
+}
+
+// --- #346 Criterion 3: each migrated script's existing suite passes unchanged
+// in what it asserts — run both as subprocesses and require exit 0. ----------
+{
+  for (const { file } of MIGRATED_346) {
+    const testFile = file.replace(/\.mjs$/, ".test.mjs");
+    let status = 0;
+    let out = "";
+    try {
+      out = execFileSync(process.execPath, [join(dir346, testFile)], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    } catch (e) {
+      status = e.status ?? 1;
+      out = `${e.stdout || ""}${e.stderr || ""}`;
+    }
+    assert.equal(status, 0, `${testFile} must still pass after the migration:\n${out}`);
+  }
+}
+
+// --- #346 Criterion 4: every criterion above has exactly one test named after
+// it — count this file's own `#346 Criterion N` markers, 1..4. ---------------
+{
+  const markers = [...read346("gh-api.test.mjs").matchAll(/^\/\/ --- #346 Criterion (\d+):/gim)].map((m) => Number(m[1]));
+  const unique = new Set(markers);
+  assert.equal(markers.length, unique.size, "each #346 criterion tested exactly once");
+  assert.equal(markers.length, 4, "exactly 4 #346 criterion markers are present");
+  for (let n = 1; n <= 4; n++) assert.ok(unique.has(n), `#346 criterion ${n} has a test`);
+}
+
+console.log("PASS gh-api.test.mjs #346 capstone migration (4 criteria)");

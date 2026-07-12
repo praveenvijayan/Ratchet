@@ -21,11 +21,9 @@
 //       node scripts/ratchet-metrics.mjs
 // Tune the scan window with METRICS_LIMIT (default 200 most-recent issues).
 
-import { existsSync, readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { SWEEP_COMMENT_PREFIXES } from "./sweep-stale-claims.mjs";
-
-const API = "https://api.github.com";
+import { ghClient, paginate, resolveAuth } from "./gh-api.mjs";
 
 // Count a comment as a sweep if it starts with any prefix the sweep emits.
 // The list is imported from the sweep script itself (not re-declared here), so
@@ -36,42 +34,19 @@ export const STATES = [
   "ready", "in-progress", "in-review", "changes-requested", "blocked", "draft",
 ];
 
-// Every request goes through here: GET only, no body, ever.
-export async function ghGet(fetchImpl, token, path) {
-  const res = await fetchImpl(`${API}${path}`, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/vnd.github+json",
-      "X-GitHub-Api-Version": "2022-11-28",
-    },
-  });
-  if (!res.ok) throw new Error(`GET ${path} -> ${res.status} ${await res.text()}`);
-  return res.json();
-}
-
-async function paginate(fetchImpl, token, basePath, cap) {
-  const out = [];
-  for (let page = 1; ; page++) {
-    const sep = basePath.includes("?") ? "&" : "?";
-    const batch = await ghGet(fetchImpl, token, `${basePath}${sep}per_page=100&page=${page}`);
-    if (!Array.isArray(batch)) break;
-    out.push(...batch);
-    if (batch.length < 100 || out.length >= cap) break;
-  }
-  return out.slice(0, cap);
-}
-
 const stateOf = (issue) =>
   (issue.labels || [])
     .map((l) => (typeof l === "string" ? l : l.name))
     .find((n) => n && n.startsWith("state:"));
 
 export async function computeMetrics({ fetchImpl, token, repo, limit = 200 }) {
+  const gh = ghClient(token, { fetchImpl });
   // All issues, newest first, capped — the endpoint also returns PRs, so drop
   // them (a PR carries a `pull_request` key).
   const raw = await paginate(
-    fetchImpl, token,
-    `/repos/${repo}/issues?state=all&sort=created&direction=desc`, limit,
+    gh,
+    `/repos/${repo}/issues?state=all&sort=created&direction=desc`,
+    { cap: limit },
   );
   const issues = raw.filter((i) => !i.pull_request);
   const open = issues.filter((i) => i.state === "open");
@@ -92,7 +67,7 @@ export async function computeMetrics({ fetchImpl, token, repo, limit = 200 }) {
 
   for (const issue of issues) {
     const timeline = await paginate(
-      fetchImpl, token, `/repos/${repo}/issues/${issue.number}/timeline`, 300,
+      gh, `/repos/${repo}/issues/${issue.number}/timeline`, { cap: 300 },
     );
 
     // Sweeps can land on any issue, open or closed: count every automated
@@ -175,21 +150,12 @@ export function renderReport(m) {
 }
 
 async function main() {
-  // Local convenience: load .env (never overrides an already-set var).
-  if (existsSync(".env")) {
-    for (const line of readFileSync(".env", "utf8").split("\n")) {
-      const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*?)\s*$/);
-      if (m && !process.env[m[1]]) process.env[m[1]] = m[2].replace(/^["']|["']$/g, "");
-    }
-  }
-  const token = process.env.GITHUB_TOKEN || process.env.GITHUB_PAT;
-  const repo = process.env.GITHUB_REPOSITORY;
   const limit = Number(process.env.METRICS_LIMIT) || 200;
-  if (!token || !repo) {
-    console.error(
-      "Missing GitHub auth. Provide GITHUB_TOKEN (e.g. \"$(gh auth token)\") and " +
-      "GITHUB_REPOSITORY=owner/repo, then re-run. Nothing was read or changed.",
-    );
+  let token, repo;
+  try {
+    ({ token, repo } = resolveAuth());
+  } catch (e) {
+    console.error(e.message);
     process.exit(1);
   }
   try {

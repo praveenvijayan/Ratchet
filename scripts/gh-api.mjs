@@ -58,16 +58,19 @@ export function ghClient(token, { fetchImpl = fetch } = {}) {
 // signals the last page, and return the concatenated results in page order.
 // `gh` is a client from ghClient (or any (method, path) => array). The first
 // `per_page`/`page` pair is appended with the correct separator whether or not
-// `path` already carries a query string.
-export async function paginate(gh, path) {
+// `path` already carries a query string. Pass `cap` to bound the scan: paging
+// stops once `cap` items are collected and the result is truncated to `cap`, so
+// a caller scanning "the 200 most recent" never walks the whole history. The
+// default (Infinity) follows every page, preserving the uncapped behaviour.
+export async function paginate(gh, path, { cap = Infinity } = {}) {
   const out = [];
   for (let page = 1; ; page++) {
     const sep = path.includes("?") ? "&" : "?";
     const batch = await gh("GET", `${path}${sep}per_page=100&page=${page}`);
     out.push(...batch);
-    if (batch.length < 100) break;
+    if (batch.length < 100 || out.length >= cap) break;
   }
-  return out;
+  return cap === Infinity ? out : out.slice(0, cap);
 }
 
 // Parse a KEY=VALUE `.env` file into a plain object, tolerating blank lines,
