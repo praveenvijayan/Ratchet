@@ -82,6 +82,26 @@ gets tested — so every behaviour worth a test must appear as a criterion, and
 anything not worth a test should not be one. If the user diagnosed a cause you
 may add a short `## Notes`, but never prescribe the implementation.
 
+**Encode ordering as `blocked_by`, never only in prose.** The state machine sees
+dependencies **only** through `blocked_by` slugs — prose it cannot read. So any
+ordering or sequencing you state in a plan file's prose (e.g. "do this after the
+others", "the last two complete the consolidation") **must also** be encoded as
+`blocked_by` slugs on the dependent file. A useful tell: if a criterion can only
+be satisfied *after* other issues merge, the blocker list is incomplete — add the
+missing `blocked_by` slugs so the dependent issue syncs `state:blocked` and is
+never picked early. (This is the #346 mis-scope: the ordering lived only in
+prose, so sync shipped the issue `state:ready` while it was really blocked.)
+
+**Phrase a repo-wide invariant as a check on a capstone, never as a bare
+criterion on a member.** A batch-wide postcondition — an invariant that only
+holds once *every* member issue has merged (e.g. "all N call sites use the new
+API", "no module still imports the old path") — cannot be satisfied or tested by
+any single member PR. Never write it as a bare assertion criterion on a member
+issue. Instead phrase it as **"add an automated check that enforces X"** and put
+that criterion on a **capstone** issue `blocked_by` every prerequisite in the
+batch. The capstone unblocks only after the batch lands, and its criterion is
+now a real, testable outcome (the check) rather than a claim no PR can close.
+
 ## Step 3 — Push and open/update the planning PR
 
 ```

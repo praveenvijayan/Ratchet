@@ -34,6 +34,29 @@ One or two sentences: what this is and why it exists.
 credentials" is testable; "handle errors properly" is not. If a criterion can't
 be checked by reading code or running a test, rewrite it.
 
+**Encode ordering as `blocked_by`, never only in prose.** The sync sees
+dependencies **only** through `blocked_by` slugs; prose ordering is invisible to
+it. Any sequencing you state in a plan file's prose must **also** appear as
+`blocked_by` slugs on the dependent file. The tell that you missed one: a
+criterion that can only be satisfied *after* other issues merge means the blocker
+list is incomplete — add the missing slugs so the issue syncs `state:blocked`
+instead of `state:ready`.
+
+**Phrase a repo-wide invariant as a check on a capstone, never as a bare
+criterion on a member.** A batch-wide postcondition that only holds once every
+member issue has merged cannot be satisfied or tested by any single member PR.
+Do not write it as a bare assertion criterion on a member issue. Phrase it as
+**"add an automated check that enforces X"** and place that criterion on a
+**capstone** issue `blocked_by` every prerequisite — the check becomes a real,
+testable outcome once the batch lands.
+
+> **Counter-example — the #346 shape.** Issue #346 shipped `state:ready` while
+> actually blocked on three sibling migrations. Two authoring mistakes caused it:
+> its ordering ("the last two… completing the consolidation") lived only in the
+> plan's prose instead of in `blocked_by`, and it carried a batch-wide
+> postcondition as a plain criterion that no single PR could satisfy. Encoded as
+> `blocked_by` slugs plus a capstone check, neither mis-scope can recur.
+
 **Name the failure modes.** If the change can fail in front of a user, the
 criteria must say what the user sees when it does — "Invalid credentials return
 401 with a generic message", "Network failure shows a retry prompt, not a stack
