@@ -1471,10 +1471,9 @@ export const PAGE_HTML = `<!doctype html>
     border-bottom:2px solid var(--ink);
     background:linear-gradient(180deg, var(--paper-hi), transparent);
   }
-  .brand { display:flex; align-items:baseline; gap:14px; }
+  .brand { display:flex; flex-direction:column; gap:3px; }
   .brand h1 { font-family:var(--serif); font-size:30px; font-weight:400; letter-spacing:.04em; line-height:1; margin:0; }
-  .brand h1 .product { font-family:var(--serif); font-size:30px; font-weight:400; }
-  .brand h1 .role { font-family:var(--sans); font-size:19px; font-weight:500; letter-spacing:.02em; color:var(--ink-soft); }
+  .brand .subhead { font-family:var(--sans); font-size:13px; font-weight:500; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-soft); line-height:1; margin:0; }
   .brand .ordinal { font-family:var(--mono); font-size:10px; letter-spacing:.28em; color:var(--ink-soft); text-transform:uppercase; }
   header .heartbeat { display:flex; align-items:center; gap:10px; margin-left:auto; font-family:var(--mono); font-size:12px; letter-spacing:.05em; color:var(--ink); }
   header .dot { width:10px; height:10px; border-radius:50%; background:var(--ink-faint); display:inline-block; }
@@ -1703,7 +1702,8 @@ export const PAGE_HTML = `<!doctype html>
 <body>
 <header>
   <div class="brand">
-    <h1>Herd Dashboard</h1>
+    <h1>Ratchet</h1>
+    <p class="subhead">Herd Dashboard</p>
   </div>
   <div class="heartbeat"><span class="dot" id="livedot"></span> <span id="livetext" class="empty">connecting…</span></div>
   <div class="supervisor" id="hbdetails" hidden><span class="sup-label">Supervisor</span> <span class="sup-status" id="hbstatus"></span> <span class="sup-meta" id="hbmeta"></span></div>
