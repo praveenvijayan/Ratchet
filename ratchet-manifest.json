@@ -482,6 +482,10 @@
       "class": "excluded"
     },
     {
+      "path": "scripts/herd-ui-supervisor-heartbeat-dedup.test.mjs",
+      "class": "excluded"
+    },
+    {
       "path": "scripts/herd-ui-truthful-tally.test.mjs",
       "class": "excluded"
     },

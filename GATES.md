@@ -71,6 +71,7 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 | 4y15  | test: herd-ui-dashboard-columns | `node scripts/herd-ui-dashboard-columns.test.mjs` | exit 0 |
 | 4y16  | test: herd-ui-combined-cards    | `node scripts/herd-ui-combined-cards.test.mjs`    | exit 0 |
 | 4y14  | test: herd-ui-supervisor-status | `node scripts/herd-ui-supervisor-status.test.mjs` | exit 0 |
+| 4y17  | test: herd-ui-supervisor-heartbeat-dedup | `node scripts/herd-ui-supervisor-heartbeat-dedup.test.mjs` | exit 0 |
 | 4y4   | test: herd-ui-escalation        | `node scripts/herd-ui-escalation.test.mjs`        | exit 0 |
 | 4y5   | test: herd-ui-acknowledge       | `node scripts/herd-ui-acknowledge.test.mjs`       | exit 0 |
 | 4y6   | test: herd-ui-adapter-failures  | `node scripts/herd-ui-adapter-failures.test.mjs`  | exit 0 |
