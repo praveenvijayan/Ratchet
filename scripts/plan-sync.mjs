@@ -10,47 +10,21 @@
 // idempotency. Issues past `state:ready`/`state:draft` are never clobbered.
 
 import { readdir, readFile } from "node:fs/promises";
-import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { hasAcceptanceCriteria } from "./criteria.mjs";
+import { hasAcceptanceCriteria, planSlug, formatPlanMarker } from "./criteria.mjs";
+import { ghClient, paginate, resolveAuth } from "./gh-api.mjs";
 
-// Local convenience: load .env if present (Actions sets env vars directly).
-// Never overrides an already-set variable. .env must be gitignored.
-if (existsSync(".env")) {
-  for (const line of readFileSync(".env", "utf8").split("\n")) {
-    const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*?)\s*$/);
-    if (m && !process.env[m[1]]) process.env[m[1]] = m[2].replace(/^["']|["']$/g, "");
-  }
-}
-
-const TOKEN = process.env.GITHUB_TOKEN || process.env.GITHUB_PAT;
-const REPO = process.env.GITHUB_REPOSITORY;
+// Token/repo (from GITHUB_TOKEN | GITHUB_PAT and GITHUB_REPOSITORY, environment
+// or .env) and the shared REST client. Resolved at load so a missing credential
+// fails before any plan file is touched, exactly as before.
+const { token, repo: REPO } = resolveAuth();
+const gh = ghClient(token);
 const PLAN_DIR = process.env.PLAN_DIR || "plan";
-const API = "https://api.github.com";
 const EDITABLE_STATES = new Set(["state:ready", "state:draft"]);
 const VALID_PRIORITIES = new Set(["high", "medium", "low"]);
 // The documented frontmatter surface (see plan/README.md). Anything else is a
 // typo or an unsupported field: warned about, never silently honoured.
 const KNOWN_KEYS = new Set(["title", "priority", "labels", "blocked_by"]);
-
-if (!TOKEN || !REPO) {
-  console.error("Missing token or repo. Set GITHUB_PAT in .env (local) or GITHUB_TOKEN/GITHUB_REPOSITORY in the environment.");
-  process.exit(1);
-}
-
-async function gh(method, path, body) {
-  const res = await fetch(`${API}${path}`, {
-    method,
-    headers: {
-      Authorization: `Bearer ${TOKEN}`,
-      Accept: "application/vnd.github+json",
-      "X-GitHub-Api-Version": "2022-11-28",
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (!res.ok) throw new Error(`${method} ${path} -> ${res.status} ${await res.text()}`);
-  return res.status === 204 ? null : res.json();
-}
 
 // --- minimal frontmatter parser for the documented format only ---
 function parsePlan(text) {
@@ -74,18 +48,11 @@ function parsePlan(text) {
 }
 
 async function listAllIssues() {
-  const out = [];
-  for (let page = 1; ; page++) {
-    const batch = await gh("GET", `/repos/${REPO}/issues?state=all&per_page=100&page=${page}`);
-    out.push(...batch.filter((i) => !i.pull_request));
-    if (batch.length < 100) break;
-  }
-  return out;
+  const all = await paginate(gh, `/repos/${REPO}/issues?state=all`);
+  return all.filter((i) => !i.pull_request);
 }
 
-function markerOf(slug) {
-  return `<!-- plan-id: ${slug} -->`;
-}
+const markerOf = formatPlanMarker;
 function stateLabels(issue) {
   return issue.labels.map((l) => (typeof l === "string" ? l : l.name));
 }
@@ -230,9 +197,23 @@ async function main() {
   // removed or skipped plans still resolve.
   const issues = await listAllIssues();
   const bySlug = new Map();
+  const slugToIssueNums = new Map();  // slug -> every issue number carrying it
   for (const issue of issues) {
-    const mm = (issue.body || "").match(/<!-- plan-id: (.+?) -->/);
-    if (mm) bySlug.set(mm[1], issue);
+    const slug = planSlug(issue.body || "");
+    if (!slug) continue;
+    bySlug.set(slug, issue);
+    if (!slugToIssueNums.has(slug)) slugToIssueNums.set(slug, []);
+    slugToIssueNums.get(slug).push(issue.number);
+  }
+  // A slug carried by more than one issue is a duplicate the compiler must not
+  // extend: bySlug.has(slug) already suppresses re-creation in pass 2a, so warn
+  // loudly (naming every duplicate) rather than silently creating an Nth issue
+  // or clobbering one at random. Closing the surplus is a human action.
+  for (const [slug, nums] of slugToIssueNums) {
+    if (nums.length > 1) {
+      const named = nums.map((n) => `#${n}`).join(", ");
+      console.log(`WARNING: slug '${slug}' resolves to ${nums.length} issues (${named}); no new issue will be created for it — close the duplicate(s) so exactly one remains.`);
+    }
   }
   const slugToNumber = new Map();
   for (const [slug, issue] of bySlug) slugToNumber.set(slug, issue.number);
@@ -309,7 +290,10 @@ async function main() {
 }
 
 // Top-level await (not .catch()) so a test that dynamically imports this
-// module resumes only after the sync has fully finished.
+// module resumes only after the sync has fully finished. `main` is also
+// exported so an idempotency test can drive a second sync run against the same
+// in-memory issue store within one process (the module body runs only once).
+export { main };
 try {
   await main();
 } catch (e) {

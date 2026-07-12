@@ -71,7 +71,7 @@ const realManifest = loadManifest(repoRoot);
   const profileOf = (p) => realManifest.files.find((e) => e.path === p)?.profile;
   assert.equal(profileOf(".github/workflows/release.yml"), "release");
   assert.equal(profileOf(".github/workflows/ratchet-run.yml"), "unattended-ci");
-  assert.equal(profileOf("scripts/herd.mjs"), "herd");
+  assert.equal(profileOf("scripts/herd.mjs"), "core");
   assert.equal(profileOf(".agents/skills/ratchet-herd"), "herd");
   assert.equal(profileOf("scripts/ratchet-watch.sh"), "watcher");
 }

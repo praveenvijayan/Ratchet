@@ -45,6 +45,8 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 | 4g5   | test: review-verdict-sweep      | `node scripts/review-verdict-sweep.test.mjs`      | exit 0 |
 | 4h    | test: ratchet-update            | `node scripts/ratchet-update.test.mjs`            | exit 0 |
 | 4i    | test: criteria                  | `node scripts/criteria.test.mjs`                  | exit 0 |
+| 4i2   | test: gh-api                    | `node scripts/gh-api.test.mjs`                    | exit 0 |
+| 4i3   | test: gh-api-migration          | `node scripts/gh-api-migration.test.mjs`          | exit 0 |
 | 4j    | test: pr-size-check             | `node scripts/pr-size-check.test.mjs`             | exit 0 |
 | 4k    | test: run-gates                 | `node scripts/run-gates.test.mjs`                 | exit 0 |
 | 4l    | test: sweep-lease               | `node scripts/sweep-lease.test.mjs`               | exit 0 |
@@ -52,6 +54,7 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 | 4n    | test: ratchet-metrics           | `node scripts/ratchet-metrics.test.mjs`           | exit 0 |
 | 4o    | test: docs-refresh              | `node scripts/docs-refresh.test.mjs`              | exit 0 |
 | 4p    | test: ratchet-init-skill        | `node scripts/ratchet-init-skill.test.mjs`        | exit 0 |
+| 4p2   | test: ratchet-hotfix-skill      | `node scripts/ratchet-hotfix-skill.test.mjs`      | exit 0 |
 | 4q    | test: gates-coverage            | `node scripts/gates-coverage.test.mjs`            | exit 0 |
 | 4s    | test: herd                      | `node scripts/herd.test.mjs`                      | exit 0 |
 | 4t    | test: herd-survey               | `node scripts/herd-survey.test.mjs`               | exit 0 |
@@ -68,6 +71,7 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 | 4y15  | test: herd-ui-dashboard-columns | `node scripts/herd-ui-dashboard-columns.test.mjs` | exit 0 |
 | 4y16  | test: herd-ui-combined-cards    | `node scripts/herd-ui-combined-cards.test.mjs`    | exit 0 |
 | 4y14  | test: herd-ui-supervisor-status | `node scripts/herd-ui-supervisor-status.test.mjs` | exit 0 |
+| 4y17  | test: herd-ui-supervisor-heartbeat-dedup | `node scripts/herd-ui-supervisor-heartbeat-dedup.test.mjs` | exit 0 |
 | 4y4   | test: herd-ui-escalation        | `node scripts/herd-ui-escalation.test.mjs`        | exit 0 |
 | 4y5   | test: herd-ui-acknowledge       | `node scripts/herd-ui-acknowledge.test.mjs`       | exit 0 |
 | 4y6   | test: herd-ui-adapter-failures  | `node scripts/herd-ui-adapter-failures.test.mjs`  | exit 0 |
@@ -87,6 +91,9 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 | 4z7   | test: bootstrap                 | `node scripts/bootstrap.test.mjs`                 | exit 0 |
 | 4z8   | test: ratchet-uninstall         | `node scripts/ratchet-uninstall.test.mjs`         | exit 0 |
 | 4z9   | test: install-lifecycle         | `node scripts/install-lifecycle.test.mjs`         | exit 0 |
+| 4z11  | test: ratchet-requeue-heartbeat | `node scripts/ratchet-requeue-heartbeat.test.mjs` | exit 0 |
+| 4z12  | test: ratchet-submit            | `node scripts/ratchet-submit.test.mjs`            | exit 0 |
+| 4z13  | test: ratchet-start             | `node scripts/ratchet-start.test.mjs`             | exit 0 |
 | 4r    | test-coverage                   | `node scripts/gates-coverage.mjs`                 | exit 0 |
 | 4z    | skill-parity                    | `node scripts/skill-parity.mjs`                   | exit 0 |
 | 4z10  | skill-detail                    | `node scripts/skill-detail.mjs`                   | exit 0 |

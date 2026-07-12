@@ -121,6 +121,11 @@
       "profile": "core"
     },
     {
+      "path": "scripts/gh-api.mjs",
+      "class": "framework",
+      "profile": "core"
+    },
+    {
       "path": "scripts/pr-size-check.mjs",
       "class": "framework",
       "profile": "core"
@@ -162,6 +167,26 @@
     },
     {
       "path": "scripts/state-label-exclusivity.mjs",
+      "class": "framework",
+      "profile": "core"
+    },
+    {
+      "path": "scripts/ratchet-requeue.mjs",
+      "class": "framework",
+      "profile": "core"
+    },
+    {
+      "path": "scripts/ratchet-heartbeat.mjs",
+      "class": "framework",
+      "profile": "core"
+    },
+    {
+      "path": "scripts/ratchet-submit.mjs",
+      "class": "framework",
+      "profile": "core"
+    },
+    {
+      "path": "scripts/ratchet-start.mjs",
       "class": "framework",
       "profile": "core"
     },
@@ -223,7 +248,7 @@
     {
       "path": "scripts/herd.mjs",
       "class": "framework",
-      "profile": "herd"
+      "profile": "core"
     },
     {
       "path": "scripts/herd-survey.mjs",
@@ -272,6 +297,11 @@
     },
     {
       "path": ".agents/skills/ratchet-init",
+      "class": "framework",
+      "profile": "core"
+    },
+    {
+      "path": ".agents/skills/ratchet-hotfix",
       "class": "framework",
       "profile": "core"
     },
@@ -452,6 +482,10 @@
       "class": "excluded"
     },
     {
+      "path": "scripts/herd-ui-supervisor-heartbeat-dedup.test.mjs",
+      "class": "excluded"
+    },
+    {
       "path": "scripts/herd-ui-truthful-tally.test.mjs",
       "class": "excluded"
     },
@@ -508,6 +542,10 @@
       "class": "excluded"
     },
     {
+      "path": "scripts/ratchet-hotfix-skill.test.mjs",
+      "class": "excluded"
+    },
+    {
       "path": "scripts/ratchet-metrics.test.mjs",
       "class": "excluded"
     },
@@ -524,6 +562,18 @@
       "class": "excluded"
     },
     {
+      "path": "scripts/ratchet-requeue-heartbeat.test.mjs",
+      "class": "excluded"
+    },
+    {
+      "path": "scripts/ratchet-submit.test.mjs",
+      "class": "excluded"
+    },
+    {
+      "path": "scripts/ratchet-start.test.mjs",
+      "class": "excluded"
+    },
+    {
       "path": "scripts/review-verdict.test.mjs",
       "class": "excluded"
     },
@@ -537,6 +587,14 @@
     },
     {
       "path": "scripts/conflicted-prs.test.mjs",
+      "class": "excluded"
+    },
+    {
+      "path": "scripts/gh-api.test.mjs",
+      "class": "excluded"
+    },
+    {
+      "path": "scripts/gh-api-migration.test.mjs",
       "class": "excluded"
     },
     {

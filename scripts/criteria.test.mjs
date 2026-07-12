@@ -5,7 +5,10 @@
 // Zero dependencies. Run:  node scripts/criteria.test.mjs
 
 import assert from "node:assert/strict";
-import { classifyUnblock, classifyRequeue } from "./criteria.mjs";
+import { readdirSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+import { classifyUnblock, classifyRequeue, planSlug, formatPlanMarker, isPlanMarkerLine } from "./criteria.mjs";
 
 const CLOSED = 42;
 const withCriteria = `Some body.
@@ -131,4 +134,94 @@ const readyDecision = {
   assert.equal(r.comment, blockedDecision.comment, "a non-ready target keeps its comment");
 }
 
-console.log("PASS criteria.test.mjs (16 assertions)");
+// #345 AC1: criteria.mjs exports read + write of the `<!-- plan-id: <slug> -->`
+// marker from one definition, tolerating optional whitespace around `plan-id:`
+// and the slug. Reading a marker written by formatPlanMarker round-trips.
+{
+  const slug = "0154-plan-id-marker-single-authority";
+  // Read tolerates spacing variants — the exact bug #345 fixes.
+  assert.equal(planSlug(`b\n\n<!-- plan-id: ${slug} -->`), slug, "normal spacing resolves");
+  assert.equal(planSlug(`<!--plan-id:${slug}-->`), slug, "no surrounding whitespace resolves");
+  assert.equal(planSlug(`<!--   plan-id:    ${slug}   -->`), slug, "extra internal whitespace resolves");
+  assert.equal(planSlug("body with no marker"), null, "a marker-less body yields null, not a throw");
+  // Write is canonical and round-trips through the reader.
+  assert.equal(formatPlanMarker(slug), `<!-- plan-id: ${slug} -->`, "formatPlanMarker renders the canonical marker");
+  assert.equal(planSlug(formatPlanMarker(slug)), slug, "what is written can be read back");
+  // isPlanMarkerLine matches a whole marker line (any spacing) and nothing else.
+  assert.equal(isPlanMarkerLine(`<!-- plan-id: ${slug} -->`), true, "a bare marker line matches");
+  assert.equal(isPlanMarkerLine(`   <!--plan-id:${slug}-->   `), true, "a spaced marker line matches");
+  assert.equal(isPlanMarkerLine(`text <!-- plan-id: ${slug} --> more`), false, "a marker mid-line is not a marker line");
+  assert.equal(isPlanMarkerLine("## Acceptance criteria"), false, "an ordinary line does not match");
+}
+
+// #345 AC2: every consumer obtains the slug via criteria.mjs — no other file
+// under scripts/ carries its own plan-id regex. Scan the source: only
+// criteria.mjs may contain a slash-delimited regex literal mentioning plan-id.
+{
+  const scriptsDir = dirname(fileURLToPath(import.meta.url));
+  const REGEX_LITERAL = /\/[^/\n]*plan-id[^/\n]*\//;
+  const offenders = readdirSync(scriptsDir)
+    .filter((f) => f.endsWith(".mjs") && !f.endsWith(".test.mjs") && f !== "criteria.mjs")
+    .filter((f) => REGEX_LITERAL.test(readFileSync(join(scriptsDir, f), "utf8")));
+  assert.deepEqual(offenders, [], `these files still define their own plan-id regex instead of importing from criteria.mjs: ${offenders.join(", ")}`);
+}
+
+// #375 AC1: planSlug resolves the LAST `plan-id` marker in a body. plan-sync
+// always appends the real marker as the final line, so a plan whose prose quotes
+// the marker syntax earlier (a placeholder or an example slug) must still resolve
+// to its own appended marker — not the quoted string. A first-match parser keyed
+// the dedup map on the placeholder and re-created the issue on every sync run:
+// the #345/#349/#356 triplicate bug.
+{
+  const real = "0161-plan-sync-marker-position-idempotency";
+  const bodyQuotesMarker =
+    "This plan discusses the `<!-- plan-id: 0000-example-quoted -->` marker syntax.\n\n" +
+    "## Acceptance criteria\n- [ ] something\n\n" +
+    `<!-- plan-id: ${real} -->`;
+  assert.equal(planSlug(bodyQuotesMarker), real, "planSlug must resolve the last (appended) marker, not a quoted placeholder");
+  // The last-match rule leaves the common single-marker body unchanged.
+  assert.equal(planSlug(`b\n\n<!-- plan-id: ${real} -->`), real, "a single-marker body still resolves to its slug");
+  // An issue body carrying more than one marker-shaped comment resolves to the
+  // last one (Test notes fixture).
+  assert.equal(
+    planSlug("<!-- plan-id: 0000-first -->\nmiddle\n<!-- plan-id: 0000-second -->\ntail\n<!-- plan-id: 0000-third -->"),
+    "0000-third",
+    "multiple markers must resolve to the last occurrence",
+  );
+  assert.equal(planSlug("no marker at all"), null, "a marker-less body still yields null, not a throw");
+}
+
+// #375 AC2: every consumer obtains the slug only through the criteria.mjs
+// export, and no other file under scripts/ carries its own plan-id regex. The
+// slug-resolution rule (including AC1's last-match fix) lives in exactly one
+// place, so it can never drift between plan-sync, archive, and verify.
+{
+  const scriptsDir = dirname(fileURLToPath(import.meta.url));
+  const REGEX_LITERAL = /\/[^/\n]*plan-id[^/\n]*\//;
+  const files = readdirSync(scriptsDir).filter((f) => f.endsWith(".mjs") && !f.endsWith(".test.mjs") && f !== "criteria.mjs");
+  const offenders = files.filter((f) => REGEX_LITERAL.test(readFileSync(join(scriptsDir, f), "utf8")));
+  assert.deepEqual(offenders, [], `these files define their own plan-id regex instead of importing from criteria.mjs: ${offenders.join(", ")}`);
+  // The slug-bearing consumers actually import planSlug from criteria.mjs.
+  for (const consumer of ["plan-sync.mjs", "archive-closed-plans.mjs"]) {
+    const src = readFileSync(join(scriptsDir, consumer), "utf8");
+    assert.match(src, /import\s*\{[^}]*\bplanSlug\b[^}]*\}\s*from\s*["']\.\/criteria\.mjs["']/, `${consumer} must import planSlug from criteria.mjs`);
+  }
+}
+
+// #375 AC6: every acceptance criterion of #375 has exactly one test named after
+// it. This suite plus plan-sync.test.mjs must carry each `#375 AC<n>` header
+// exactly once (AC1/AC2/AC6 here, AC3/AC4/AC5 there) so the traceability the
+// criterion demands can never silently rot.
+{
+  const scriptsDir = dirname(fileURLToPath(import.meta.url));
+  const combined =
+    readFileSync(join(scriptsDir, "criteria.test.mjs"), "utf8") +
+    readFileSync(join(scriptsDir, "plan-sync.test.mjs"), "utf8");
+  for (let n = 1; n <= 6; n++) {
+    const header = `#375 AC${n}:`;
+    const count = combined.split(header).length - 1;
+    assert.equal(count, 1, `#375 AC${n} must have exactly one test named after it, found ${count}`);
+  }
+}
+
+console.log("PASS criteria.test.mjs (16 assertions + #345 AC1/AC2 + #375 AC1/AC2/AC6)");

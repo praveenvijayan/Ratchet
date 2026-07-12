@@ -194,6 +194,9 @@ scripts/
   criteria.mjs                  Shared acceptance-criteria readiness rule
   criteria.test.mjs             Regression test for the readiness rule
   docs-refresh.test.mjs         Regression test for documentation inventory
+  gh-api.mjs                    Shared GitHub REST client (ghClient, paginate, resolveAuth)
+  gh-api.test.mjs               Regression test for the shared GitHub client
+  gh-api-migration.test.mjs     Guard: sweep/label/conflict scripts use the shared client
   gates-coverage.mjs            Guard: every *.test.mjs runs in a GATES.md row
   gates-coverage.test.mjs       Regression test for the coverage guard
   gates-table.mjs               Shared parser for the GATES.md markdown table
@@ -230,6 +233,7 @@ scripts/
   herd-ui-mascot-deck-live.test.mjs Regression test for deck cards tracking live workers
   herd-ui-deck-card-issue-status.test.mjs Regression test for deck card worked-issue number and worker status
   herd-ui-supervisor-status.test.mjs Regression test for the supervisor-status header strip
+  herd-ui-supervisor-heartbeat-dedup.test.mjs Regression test for the single heartbeat indicator
   herd-mascots-install.test.mjs  Regression test for mascots/ install manifest delivery
   manifest-check.mjs            Gate: validate ratchet-manifest.json against the repo (no drift in/out)
   manifest-check.test.mjs       Regression test for the install-manifest gate
@@ -239,6 +243,14 @@ scripts/
   pr-size-check.mjs             Enforce the agent PR size limit in CI
   pr-size-check.test.mjs        Regression test for the size gate
   ratchet-init-skill.test.mjs   Regression test for the init skill contract
+  ratchet-hotfix-skill.test.mjs Regression test for the hotfix/revert fast-lane skill contract
+  ratchet-heartbeat.mjs         Post a lease heartbeat comment to renew a claim without pushing
+  ratchet-requeue.mjs           Return an issue to state:ready with an explaining comment
+  ratchet-requeue-heartbeat.test.mjs Regression test for the requeue and heartbeat scripts
+  ratchet-submit.mjs            Preflight the PR handoff: integrate/gate/push/PR/label, fail-fast
+  ratchet-submit.test.mjs       Regression test for the submit preflight
+  ratchet-start.mjs             Deterministic claim: server-side ref, worktree, owner marker, label flip, assign
+  ratchet-start.test.mjs        Regression test for the deterministic claim
   ratchet-metrics.mjs           Read-only loop health metrics
   ratchet-metrics.test.mjs      Regression test for loop metrics
   ratchet-uninstall.sh          Remove exactly what bootstrap.sh installed, per .ratchet-install.json

@@ -13,39 +13,7 @@
 
 import { fileURLToPath } from "node:url";
 import { mapIssueNumber } from "./review-verdict.mjs";
-
-const API = "https://api.github.com";
-
-function ghClient(token) {
-  return async function gh(method, path, body) {
-    const res = await fetch(`${API}${path}`, {
-      method,
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-      },
-      body: body ? JSON.stringify(body) : undefined,
-    });
-    if (!res.ok) {
-      const err = new Error(`${method} ${path} -> ${res.status} ${await res.text()}`);
-      err.status = res.status;
-      throw err;
-    }
-    return res.status === 204 ? null : res.json();
-  };
-}
-
-async function paginate(gh, path) {
-  const out = [];
-  for (let page = 1; ; page++) {
-    const sep = path.includes("?") ? "&" : "?";
-    const batch = await gh("GET", `${path}${sep}per_page=100&page=${page}`);
-    out.push(...batch);
-    if (batch.length < 100) break;
-  }
-  return out;
-}
+import { ghClient, paginate, resolveAuth } from "./gh-api.mjs";
 
 const labelNames = (labels) => labels.map((l) => (typeof l === "string" ? l : l.name));
 
@@ -88,13 +56,9 @@ export function decideReconcile({ labels = [], latestReviewState: state }) {
 // and flips the mapped issue when the fast path missed it. A GitHub API failure
 // on one PR is logged and never aborts the remaining PRs.
 
-export async function main() {
-  const token = process.env.GITHUB_TOKEN || process.env.GITHUB_PAT;
-  const repo = process.env.GITHUB_REPOSITORY;
-  if (!token || !repo) {
-    throw new Error("Missing token or repo. Set GITHUB_TOKEN (or GITHUB_PAT) and GITHUB_REPOSITORY.");
-  }
-  const gh = ghClient(token);
+export async function main({ auth = resolveAuth, fetchImpl } = {}) {
+  const { token, repo } = auth();
+  const gh = ghClient(token, { fetchImpl });
 
   let prs;
   try {

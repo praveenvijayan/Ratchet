@@ -20,11 +20,44 @@ export function hasAcceptanceCriteria(body = "") {
   return /-\s*\[[ x]\]/i.test(criteriaText);
 }
 
-// The plan-file slug from the `<!-- plan-id: <slug> -->` marker, or null when
-// the body has no marker (e.g. a hand-authored issue).
+// Single source of truth for the `<!-- plan-id: <slug> -->` marker. Every
+// consumer (plan-sync, archive, verify) reads and writes the marker through the
+// exports below rather than re-deriving a regex — a divergent pattern is exactly
+// how issue #345's silent archive skip happened. The pattern tolerates optional
+// whitespace around `plan-id:` and the slug so an unusually-spaced marker still
+// resolves everywhere.
+const PLAN_ID_MARKER_RE = /<!--\s*plan-id:\s*(.+?)\s*-->/;
+// Global variant used to walk every marker occurrence — see planSlug.
+const PLAN_ID_MARKER_RE_G = new RegExp(PLAN_ID_MARKER_RE.source, "g");
+
+// The plan-file slug from the marker, or null when the body has no marker
+// (e.g. a hand-authored issue). Resolves the LAST marker occurrence: plan-sync
+// always appends the real marker as the final line of a rendered body, so a
+// plan whose prose quotes the marker syntax earlier (a placeholder, or an
+// example slug) must not shadow its own appended marker. A first-match parser
+// captured the quoted string instead, keyed the dedup map on it, and re-created
+// the issue on every sync run — the #345/#349/#356 triplicate bug (#375).
 export function planSlug(body = "") {
-  const m = /<!--\s*plan-id:\s*(.+?)\s*-->/.exec(String(body));
-  return m ? m[1] : null;
+  const text = String(body);
+  PLAN_ID_MARKER_RE_G.lastIndex = 0;
+  let last = null;
+  for (let m = PLAN_ID_MARKER_RE_G.exec(text); m; m = PLAN_ID_MARKER_RE_G.exec(text)) {
+    last = m[1];
+  }
+  return last;
+}
+
+// Render the canonical marker for a slug — the exact string plan-sync appends
+// to a compiled issue body.
+export function formatPlanMarker(slug) {
+  return `<!-- plan-id: ${slug} -->`;
+}
+
+// True iff a single line is nothing but a plan-id marker (with optional
+// surrounding whitespace). Used to strip the machine-appended marker line from
+// a reviewed body without pulling in a second regex definition.
+export function isPlanMarkerLine(line = "") {
+  return new RegExp(`^\\s*${PLAN_ID_MARKER_RE.source}\\s*$`).test(String(line));
 }
 
 // Decide an unblocked issue's post-unblock state and the comment to post.

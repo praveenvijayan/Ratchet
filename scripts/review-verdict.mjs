@@ -13,28 +13,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-
-const API = "https://api.github.com";
-
-function ghClient(token) {
-  return async function gh(method, path, body) {
-    const res = await fetch(`${API}${path}`, {
-      method,
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-      },
-      body: body ? JSON.stringify(body) : undefined,
-    });
-    if (!res.ok) {
-      const err = new Error(`${method} ${path} -> ${res.status} ${await res.text()}`);
-      err.status = res.status;
-      throw err;
-    }
-    return res.status === 204 ? null : res.json();
-  };
-}
+import { ghClient, resolveAuth } from "./gh-api.mjs";
 
 const labelNames = (labels) => labels.map((l) => (typeof l === "string" ? l : l.name));
 
@@ -61,13 +40,9 @@ export function mapIssueNumber(headRef, body) {
   return null;
 }
 
-export async function main() {
-  const token = process.env.GITHUB_TOKEN || process.env.GITHUB_PAT;
-  const repo = process.env.GITHUB_REPOSITORY;
-  if (!token || !repo) {
-    throw new Error("Missing token or repo. Set GITHUB_TOKEN (or GITHUB_PAT) and GITHUB_REPOSITORY.");
-  }
-  const gh = ghClient(token);
+export async function main({ auth = resolveAuth, fetchImpl } = {}) {
+  const { token, repo } = auth();
+  const gh = ghClient(token, { fetchImpl });
   const event = reviewEvent();
   const state = event.review?.state;
   const pr = event.pull_request;

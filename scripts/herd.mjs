@@ -13,15 +13,40 @@
 // Zero dependencies. Requires Node 20+. Run:  node scripts/herd.mjs init
 //                                             node scripts/herd.mjs run
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, realpathSync, accessSync, constants as fsConstants } from "node:fs";
-import { dirname, join, isAbsolute, delimiter as pathDelimiter } from "node:path";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync, realpathSync, accessSync, constants as fsConstants } from "node:fs";
+import { dirname, join, isAbsolute, resolve, delimiter as pathDelimiter } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runLoop, pollOnce, ghJson, resolveRepoRoot, ratchetPaths, RepoRootError } from "./herd-survey.mjs";
-import { dispatchOne, surveyReady, parseIssueTargets } from "./herd-dispatch.mjs";
-import { monitorOnce } from "./herd-monitor.mjs";
-import { verifyOnce } from "./herd-verify.mjs";
-import { reviewOnce } from "./herd-review.mjs";
-import { retentionOnce } from "./herd-retention.mjs";
+
+// The herd supervisor's implementation modules (herd-survey, -dispatch, -monitor,
+// -verify, -review, -retention) ship in the `herd` profile. This file is the
+// single CLI entrypoint and ships in `core`, so a trimmed `--profile core`
+// install (or an older core-only install) still has `scripts/herd.mjs` — and
+// invoking it there prints a clear install hint instead of a raw
+// module-not-found error. See the guard at the CLI entrypoint below. The config
+// layer (everything this module exports) has no dependency on those modules, so
+// importing `herd.mjs` for its config/exports works without the `herd` profile.
+
+// Repo-root resolution — duplicated in scripts/herd-survey.mjs (the `herd`
+// profile) so every herd stage imports it from one place. Defined here too
+// because `main()` resolves the repo root without statically importing
+// herd-survey (which would fail in a core-only install before the guard below
+// could run). Keep the two copies in sync; consolidate into a shared `core`
+// module if a third copy appears.
+export class RepoRootError extends Error {}
+
+export function resolveRepoRoot(startDir = process.cwd()) {
+  let dir = resolve(startDir);
+  for (;;) {
+    if (existsSync(join(dir, ".git"))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) {
+      throw new RepoRootError(
+        `herd: not inside a Ratchet checkout — no .git found at or above ${startDir}`,
+      );
+    }
+    dir = parent;
+  }
+}
 
 // Config location, relative to the repo root. Entrypoints anchor it there via
 // resolveRepoRoot so `init`/`run` touch the same file from any subdirectory.
@@ -465,6 +490,91 @@ export function resolveAdapter(config, labels = [], deps = {}) {
   return { name: null, adapter: null, source, route: route.slice(), tried, policy, cursorKey: source, nextCursor: start };
 }
 
+// --- Single-supervisor lock -------------------------------------------------
+// A pidfile under `.ratchet/` so two `run` supervisors never poll the same state
+// file at once (issue #358). The lock is advisory and self-healing: a supervisor
+// that crashed leaves a stale pidfile, and the next `run` detects the dead pid
+// and replaces it rather than blocking forever. `--dry-run` neither takes nor is
+// refused by the lock — it spawns nothing and mutates no state, so it can always
+// run alongside a live supervisor.
+export const PID_PATH = ".ratchet/herd.pid";
+
+// Is `pid` a live process? `process.kill(pid, 0)` signals nothing but performs
+// the permission/existence check: it throws ESRCH when no such process exists
+// (dead → stale lock) and EPERM when the process exists but is owned by another
+// user (alive → still holding the lock). Any other error is unexpected and, to
+// stay conservative, is treated as "alive" so we never steal a lock we cannot
+// prove is dead.
+export function pidIsAlive(pid, kill = process.kill) {
+  try {
+    kill(pid, 0);
+    return true;
+  } catch (e) {
+    if (e.code === "ESRCH") return false;
+    return true;
+  }
+}
+
+// Read the pid a pidfile holds, or null when the file is missing, empty, or
+// corrupt (a garbage pidfile is treated as absent so it never wedges `run`).
+function readLockPid(pidPath) {
+  let raw;
+  try {
+    raw = readFileSync(pidPath, "utf8");
+  } catch (e) {
+    if (e.code === "ENOENT") return null;
+    throw e;
+  }
+  const pid = Number(raw.trim());
+  return Number.isInteger(pid) && pid > 0 ? pid : null;
+}
+
+// Acquire the supervisor lock. Returns one of:
+//   { ok: true, release }                       — lock taken (fresh)
+//   { ok: true, release, stalePid }             — replaced a dead supervisor's lock
+//   { ok: true, dryRun: true, release }         — --dry-run: no lock taken or checked
+//   { ok: false, livePid }                      — a live supervisor holds it; refused
+// The create uses the exclusive `wx` flag so two near-simultaneous starts race
+// through the OS: exactly one create succeeds, the loser sees EEXIST and is
+// refused, naming the winner's pid.
+export function acquireLock({ pidPath, pid = process.pid, isAlive = pidIsAlive, dryRun = false } = {}) {
+  if (dryRun) return { ok: true, dryRun: true, release() {} };
+  mkdirSync(dirname(pidPath), { recursive: true });
+  const holder = readLockPid(pidPath);
+  let stalePid = null;
+  if (holder !== null && holder !== pid && isAlive(holder)) {
+    return { ok: false, livePid: holder };
+  }
+  // Any file still here is replaceable: a dead holder's stale lock, our own
+  // leftover, or a corrupt/empty pidfile (holder null). Clear it so the create
+  // below can take the lock — only a *dead named pid* earns a stale notice.
+  if (existsSync(pidPath)) {
+    if (holder !== null && holder !== pid) stalePid = holder;
+    rmSync(pidPath, { force: true });
+  }
+  try {
+    writeFileSync(pidPath, `${pid}\n`, { flag: "wx" });
+  } catch (e) {
+    if (e.code !== "EEXIST") throw e;
+    // Lost the create race after our read: whoever won now holds the lock.
+    const winner = readLockPid(pidPath);
+    if (winner !== null && winner !== pid && isAlive(winner)) return { ok: false, livePid: winner };
+    // Winner is already gone (dead or cleared) — refuse conservatively rather
+    // than loop; the operator simply retries `run`.
+    return { ok: false, livePid: winner ?? holder };
+  }
+  const release = () => releaseLock(pidPath, pid);
+  return stalePid !== null ? { ok: true, release, stalePid } : { ok: true, release };
+}
+
+// Release the lock, but only if this pid still holds it — never delete a lock a
+// different supervisor acquired after we exited. Best-effort: a vanished file is
+// already released.
+export function releaseLock(pidPath, pid = process.pid) {
+  if (readLockPid(pidPath) !== pid) return;
+  rmSync(pidPath, { force: true });
+}
+
 // --- CLI --------------------------------------------------------------------
 // `main` returns a process exit code so it is unit-testable without spawning a
 // child. HerdConfigError is the only expected failure and is reported as a
@@ -506,27 +616,103 @@ export function main(argv, { root } = {}) {
   }
 }
 
+// Parse the optional issue-targeting flags for `herd run`. Two equivalent forms
+// combine into one deduplicated set: the comma list `--issues 12,34` (repeatable)
+// and the repeated single `--issue 12 --issue 34`. Targeting is a selection
+// *filter*, never a state bypass — the returned set is later intersected with the
+// state:ready survey (see dispatchOne), so naming an ineligible issue can never
+// dispatch it. This is pure argv parsing with no supervisor dependency, so it
+// lives in the core entrypoint and runs before the herd-profile modules load —
+// a malformed target list exits 2 even on a core-only install.
+//
+// Returns { targets, error }:
+//   - no targeting flag present -> { targets: null }  (dispatch the whole queue)
+//   - all entries valid         -> { targets: [n, …] } (deduplicated; order is
+//                                    irrelevant — pickNext re-orders downstream)
+//   - any non-integer entry     -> { error: "<usage message>", targets: null }
+// The caller turns a non-null error into exit code 2 and spawns nothing.
+export function parseIssueTargets(argv) {
+  const raw = [];
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === "--issues") {
+      for (const part of String(argv[i + 1] ?? "").split(",")) raw.push(part.trim());
+      i++;
+    } else if (argv[i] === "--issue") {
+      raw.push(String(argv[i + 1] ?? "").trim());
+      i++;
+    }
+  }
+  if (raw.length === 0) return { targets: null, error: null };
+  const targets = [];
+  for (const tok of raw) {
+    if (!/^\d+$/.test(tok)) {
+      return {
+        targets: null,
+        error:
+          `herd run: --issue/--issues expects positive integer issue numbers, got "${tok}". ` +
+          `Usage: herd run [--issues 12,34 | --issue 12 --issue 34] [--max N] [--dry-run] [--once]`,
+      };
+    }
+    const n = Number(tok);
+    if (!targets.includes(n)) targets.push(n);
+  }
+  return { targets, error: null };
+}
+
 const isMain =
   process.argv[1] && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1]);
 if (isMain) {
   const argv = process.argv.slice(2);
   const cmd = argv[0];
+  // Validate run-mode issue targeting *before* loading the herd-profile modules:
+  // parseIssueTargets is pure core arg parsing, so a malformed --issue/--issues
+  // exits 2 with a usage message even on a core-only install and never reaches
+  // the dispatch import. A valid (or absent) target set flows into the run block.
+  let targets = null;
+  if (cmd === undefined || cmd === "run") {
+    const parsed = parseIssueTargets(argv);
+    if (parsed.error) {
+      console.error(parsed.error);
+      process.exit(2);
+    }
+    targets = parsed.targets;
+  }
+  // Guard: the supervisor implementation lives in the `herd` profile
+  // (herd-survey.mjs + herd-{dispatch,monitor,verify,review,retention}.mjs).
+  // A trimmed `--profile core` install, or an older core-only install, lacks
+  // them — invoking `node scripts/herd.mjs` there must print a clear install
+  // hint naming the exact command that adds the files, never a raw
+  // module-not-found error. Dynamically import the implementation so a missing
+  // `herd` profile is caught here with one message, not surfaced by Node's
+  // static-import resolver.
+  let ghJson, ratchetPaths, runLoop, pollOnce, dispatchOne, surveyReady, monitorOnce, verifyOnce, reviewOnce, retentionOnce;
+  try {
+    ({ ghJson, ratchetPaths, runLoop, pollOnce } = await import("./herd-survey.mjs"));
+    ({ dispatchOne, surveyReady } = await import("./herd-dispatch.mjs"));
+    ({ monitorOnce } = await import("./herd-monitor.mjs"));
+    ({ verifyOnce } = await import("./herd-verify.mjs"));
+    ({ reviewOnce } = await import("./herd-review.mjs"));
+    ({ retentionOnce } = await import("./herd-retention.mjs"));
+  } catch (e) {
+    if (e.code === "ERR_MODULE_NOT_FOUND") {
+      console.error(
+        "herd: the fleet supervisor files are not installed in this project (the `herd` profile is absent from this install). Add them with:\n" +
+          "    bash scripts/bootstrap.sh --version <tag> --profile herd\n" +
+          "  (pick a <tag> from https://github.com/praveenvijayan/Ratchet/releases), then re-run.\n" +
+          "  If your .ratchet-install.json already lists `herd` in its profiles, run ./scripts/ratchet-update.sh instead.",
+      );
+      process.exit(1);
+    }
+    throw e;
+  }
   if (cmd === undefined || cmd === "run") {
     // Supervisor: validate the config, then poll. Each pass surveys/reconciles
     // (pollOnce) and dispatches at most one worker. `--once` does a single pass;
     // `--dry-run` prints the plan without spawning (and implies a single pass);
     // `--max <n>` overrides maxWorkers; `--issues 12,34` / repeated `--issue 12`
-    // restrict dispatch to a named set (intersected with the ready survey — a
-    // filter, never a bypass). Never merges, approves, closes, or labels
-    // anything — it observes, dispatches, and escalates.
-    // Validate direct-issue targeting before anything else: a malformed entry
-    // (non-integer) is a usage error — exit 2 and spawn nothing, ahead of config
-    // load, so bad args fail fast regardless of repo state.
-    const { targets, error: targetsError } = parseIssueTargets(argv);
-    if (targetsError) {
-      console.error(targetsError);
-      process.exit(2);
-    }
+    // restrict dispatch to a named set (parsed above, intersected with the ready
+    // survey — a filter, never a bypass). Never merges, approves, closes, or
+    // labels anything — it observes, dispatches, and escalates.
     let root, config;
     try {
       root = resolveRepoRoot();
@@ -560,6 +746,34 @@ if (isMain) {
     };
     const maxIdx = argv.indexOf("--max");
     const dryRun = argv.includes("--dry-run");
+    // Take the single-supervisor lock before polling. A live holder refuses this
+    // start (naming its pid, leaving the running supervisor and its state file
+    // untouched); a dead holder's stale lock is replaced with a notice. --dry-run
+    // passes through untouched. The lock is released on every clean exit path
+    // below and on SIGINT/SIGTERM, so the next `run` starts without a stale notice.
+    const pidPath = join(root, PID_PATH);
+    let lock = { release() {} };
+    if (!dryRun) {
+      lock = acquireLock({ pidPath });
+      if (!lock.ok) {
+        console.error(
+          `herd: another supervisor is already running (pid ${lock.livePid}); refusing to start a second. ` +
+            `Stop it first, or wait for it to exit.`,
+        );
+        process.exit(1);
+      }
+      if (lock.stalePid != null) {
+        console.log(`herd: replaced a stale lock left by dead supervisor pid ${lock.stalePid}.`);
+      }
+      const releaseAndExit = (signal) => {
+        lock.release();
+        // 128 + signal number is the conventional exit code for a signal-terminated
+        // process; the exact number is not load-bearing, a clean release is.
+        process.exit(signal === "SIGINT" ? 130 : 143);
+      };
+      process.once("SIGINT", () => releaseAndExit("SIGINT"));
+      process.once("SIGTERM", () => releaseAndExit("SIGTERM"));
+    }
     const step = async (o) => {
       const config = resolveConfig(o.log);
       const maxWorkers = maxIdx >= 0 && Number.isInteger(Number(argv[maxIdx + 1]))
@@ -597,8 +811,12 @@ if (isMain) {
       await dispatchOne({ ...o, config, ready, dryRun, targets, maxWorkers, claimTimeoutMs: config.claimTimeoutSeconds * 1000 });
     };
     runLoop({ gh: ghJson, log: console.log, ...paths, once: argv.includes("--once") || dryRun, pollSeconds: config.pollSeconds, step }).then(
-      () => process.exit(0),
+      () => {
+        lock.release();
+        process.exit(0);
+      },
       (e) => {
+        lock.release();
         console.error(`herd: supervisor stopped on an unexpected error: ${e.message}`);
         process.exit(1);
       },

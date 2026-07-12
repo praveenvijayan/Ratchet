@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 // version-consistency.mjs — the SINGLE source of truth for where the framework's
 // version lives, what "the version" means, and the gate that fails a tree whose
-// version strings disagree. The number is duplicated across four files:
+// version strings disagree. The number is duplicated across five files:
 //   - `.ratchet-version`                    — the sole line
 //   - `plugin/.claude-plugin/plugin.json`   — the `"version"` field
 //   - `README.md`                           — the `framework-vX.Y.Z` shields badge
 //   - `DOCS.md`                             — the `Version X.Y.Z` header line
+//   - `index.html`                          — every `vX.Y.Z` in the static site
+//     (hero eyebrow + install/bootstrap commands), each occurrence checked
 // Nothing else checks they still match, so they can drift apart silently and
 // ship mixed. This module catches a disagreeing tree before a PR opens.
 //
@@ -97,29 +99,78 @@ export const VERSION_LOCATIONS = [
       return m[1];
     },
   },
+  {
+    file: "index.html",
+    label: "index.html",
+    // The static site carries the version in several places at once — the hero
+    // eyebrow and the install/bootstrap commands — so a single `extract` is not
+    // enough: every occurrence must agree, and a lone stale one is the exact
+    // drift this location exists to catch. `extractAll` returns one raw string
+    // per `vMAJOR.MINOR.PATCH` occurrence so each is reported and compared on
+    // its own. Throws when the site carries no recognizable version at all.
+    extractAll(text) {
+      const raws = [...text.matchAll(/v\d+\.\d+\.\d+/g)].map((m) => m[0]);
+      if (raws.length === 0) {
+        throw new VersionLocationError(
+          "no version occurrence found (expected a `vMAJOR.MINOR.PATCH` string)",
+        );
+      }
+      return raws;
+    },
+  },
 ];
 
+// Reduce any thrown error to a clear, user-facing message — never a stack trace.
+function errorMessage(e) {
+  if (e instanceof VersionLocationError) return e.message;
+  if (e.code === "ENOENT") return "file not found";
+  return e.message;
+}
+
+// Turn one raw version string into a record, reporting a non-semver value as an
+// `error` rather than throwing so a single bad occurrence never crashes the run.
+function toRecord(label, raw) {
+  try {
+    return { file: label, label, raw, version: normalizeVersion(raw), error: null };
+  } catch (e) {
+    return { file: label, label, raw, version: null, error: errorMessage(e) };
+  }
+}
+
 // Read every location under `root` (default: current directory). Returns one
-// record per location: `{ file, label, raw, version, error }`. On any failure
-// (missing file, absent marker, non-semver) `error` is a clear message string
-// and `raw`/`version` are null; otherwise `error` is null. Never throws — the
-// caller decides how to present the collected errors.
+// record per version occurrence: `{ file, label, raw, version, error }`. Most
+// locations carry a single occurrence, but a multi-occurrence location (such as
+// `index.html`, via `extractAll`) expands to one record per occurrence, each
+// labelled `<file> (occurrence N)`, so a lone drifted copy is reported on its
+// own. On any failure (missing file, absent marker, non-semver) `error` is a
+// clear message string and `raw`/`version` are null; otherwise `error` is null.
+// Never throws — the caller decides how to present the collected errors.
 export function readVersions(root = ".") {
-  return VERSION_LOCATIONS.map((loc) => {
+  const records = [];
+  for (const loc of VERSION_LOCATIONS) {
+    let text;
     try {
-      const text = readFileSync(join(root, loc.file), "utf8");
-      const raw = loc.extract(text);
-      return { file: loc.label, label: loc.label, raw, version: normalizeVersion(raw), error: null };
+      text = readFileSync(join(root, loc.file), "utf8");
     } catch (e) {
-      const error =
-        e instanceof VersionLocationError
-          ? e.message
-          : e.code === "ENOENT"
-            ? "file not found"
-            : e.message;
-      return { file: loc.label, label: loc.label, raw: null, version: null, error };
+      records.push({ file: loc.label, label: loc.label, raw: null, version: null, error: errorMessage(e) });
+      continue;
     }
-  });
+    if (loc.extractAll) {
+      try {
+        const raws = loc.extractAll(text);
+        raws.forEach((raw, i) => records.push(toRecord(`${loc.label} (occurrence ${i + 1})`, raw)));
+      } catch (e) {
+        records.push({ file: loc.label, label: loc.label, raw: null, version: null, error: errorMessage(e) });
+      }
+    } else {
+      try {
+        records.push(toRecord(loc.label, loc.extract(text)));
+      } catch (e) {
+        records.push({ file: loc.label, label: loc.label, raw: null, version: null, error: errorMessage(e) });
+      }
+    }
+  }
+  return records;
 }
 
 // Summarise whether every location carries the same version. `consistent` is

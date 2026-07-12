@@ -8,9 +8,11 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { main, loadConfig, normalizeConfig, substitute, resolveAdapter, adapterAvailability, executableOnPath, defaultConfig, headlessFlagWarnings, HEADLESS_PERMISSION_FLAGS, HerdConfigError, DEFAULTS, extractUsage, USAGE_FIELDS, CONFIG_PATH } from "./herd.mjs";
+import { join, dirname } from "node:path";
+import { main, loadConfig, normalizeConfig, substitute, resolveAdapter, adapterAvailability, executableOnPath, defaultConfig, headlessFlagWarnings, HEADLESS_PERMISSION_FLAGS, HerdConfigError, DEFAULTS, extractUsage, USAGE_FIELDS, CONFIG_PATH, acquireLock, releaseLock, pidIsAlive, PID_PATH, parseIssueTargets } from "./herd.mjs";
 import { resolveRepoRoot, ratchetPaths, RepoRootError } from "./herd-survey.mjs";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 // Run `fn` with cwd set to a fresh temp dir, then clean up — lets CLI-level
 // tests exercise the cwd-relative default config path without side effects.
@@ -970,4 +972,157 @@ withStubOpencode((binDir) => {
   }
 }
 
-console.log("PASS herd.test.mjs (45 criteria + issue #163: 4 criteria + issue #174: 3 criteria)");
+// --- issue #358: herd single-supervisor pidfile lock -----------------------
+// A fresh temp dir with a pidfile path under it, for the lock tests below.
+function withLockDir(fn) {
+  const dir = mkdtempSync(join(tmpdir(), "herd-lock-"));
+  try {
+    return fn(join(dir, PID_PATH), dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// Criterion (#358 AC1): invoking `run` while a supervisor is already running is
+// refused with a message naming the live supervisor's pid, leaving the running
+// supervisor and its state file untouched.
+withLockDir((pidPath, dir) => {
+  const livePid = 424242;
+  mkdirSync(join(dir, ".ratchet"), { recursive: true });
+  writeFileSync(pidPath, `${livePid}\n`);
+  const statePath = join(dir, ".ratchet", "herd-state.json");
+  writeFileSync(statePath, '{"kept":true}');
+  const r = acquireLock({ pidPath, pid: 1, isAlive: () => true });
+  assert.equal(r.ok, false, "a live holder refuses the second start");
+  assert.equal(r.livePid, livePid, "the refusal names the live supervisor's pid");
+  assert.equal(readFileSync(pidPath, "utf8").trim(), String(livePid), "the running supervisor's pidfile is untouched");
+  assert.equal(readFileSync(statePath, "utf8"), '{"kept":true}', "its state file is untouched");
+});
+
+// Criterion (#358 AC2): a stale pidfile whose pid is no longer alive does not
+// block — the new run replaces the lock and reports that a stale lock from the
+// dead pid was replaced.
+withLockDir((pidPath) => {
+  const deadPid = 999001;
+  mkdirSync(dirname(pidPath), { recursive: true });
+  writeFileSync(pidPath, `${deadPid}\n`);
+  const r = acquireLock({ pidPath, pid: 4321, isAlive: () => false });
+  assert.equal(r.ok, true, "a stale lock does not block the new run");
+  assert.equal(r.stalePid, deadPid, "the report names the dead pid whose stale lock was replaced");
+  assert.equal(readFileSync(pidPath, "utf8").trim(), "4321", "the pidfile now holds the new supervisor's pid");
+});
+
+// Criterion (#358 AC3): the lock is released on clean supervisor exit, so an
+// immediate subsequent `run` starts without any stale-lock notice.
+withLockDir((pidPath) => {
+  const first = acquireLock({ pidPath, pid: 555, isAlive: () => true });
+  assert.equal(first.ok, true, "the first run acquires the lock");
+  first.release();
+  assert.equal(existsSync(pidPath), false, "a clean exit releases the lock (pidfile removed)");
+  const second = acquireLock({ pidPath, pid: 556, isAlive: () => true });
+  assert.equal(second.ok, true, "the next run starts cleanly");
+  assert.ok(!("stalePid" in second), "and sees no stale-lock notice after a clean release");
+});
+
+// Criterion (#358 AC4): --dry-run neither takes the lock nor is refused by an
+// existing one.
+withLockDir((pidPath) => {
+  const fresh = acquireLock({ pidPath, pid: 10, dryRun: true });
+  assert.equal(fresh.ok, true, "--dry-run proceeds");
+  assert.equal(existsSync(pidPath), false, "--dry-run does not take the lock");
+  // Even with a live supervisor holding the lock, --dry-run is not refused.
+  mkdirSync(dirname(pidPath), { recursive: true });
+  writeFileSync(pidPath, "777\n");
+  const alongside = acquireLock({ pidPath, pid: 10, isAlive: () => true, dryRun: true });
+  assert.equal(alongside.ok, true, "--dry-run runs alongside a live supervisor");
+  assert.equal(readFileSync(pidPath, "utf8").trim(), "777", "and leaves the live lock untouched");
+});
+
+// Test note (#358): two near-simultaneous starts — exactly one acquires the
+// lock; the loser's refusal names the winner's pid. The exclusive `wx` create
+// makes the first `acquireLock` the sole holder; the second, seeing the winner
+// alive, is refused and names it.
+withLockDir((pidPath) => {
+  const winner = acquireLock({ pidPath, pid: 8001, isAlive: () => true });
+  const loser = acquireLock({ pidPath, pid: 8002, isAlive: () => true });
+  assert.equal(winner.ok, true, "exactly one start acquires the lock");
+  assert.equal(loser.ok, false, "the near-simultaneous loser is refused");
+  assert.equal(loser.livePid, 8001, "the loser's refusal names the winner's pid");
+});
+
+// pidIsAlive maps the process.kill(pid, 0) probe: ESRCH -> dead, EPERM -> alive,
+// and the current process is always alive. Guards the default liveness check the
+// criteria above stub out.
+{
+  assert.equal(pidIsAlive(process.pid), true, "the current process reads as alive");
+  assert.equal(pidIsAlive(1, () => { const e = new Error("no such process"); e.code = "ESRCH"; throw e; }), false, "ESRCH means the pid is dead");
+  assert.equal(pidIsAlive(1, () => { const e = new Error("not permitted"); e.code = "EPERM"; throw e; }), true, "EPERM means the pid is alive but not ours");
+}
+
+// releaseLock never deletes a lock a different supervisor now holds — only the
+// holder can release. Protects the SIGINT/exit release path from clobbering a
+// successor's lock.
+withLockDir((pidPath) => {
+  mkdirSync(dirname(pidPath), { recursive: true });
+  writeFileSync(pidPath, "222\n");
+  releaseLock(pidPath, 111);
+  assert.equal(existsSync(pidPath), true, "a non-holder's release leaves the lock in place");
+  releaseLock(pidPath, 222);
+  assert.equal(existsSync(pidPath), false, "the holder's release removes the lock");
+});
+
+// Error path (#358): a corrupt or empty pidfile never wedges `run`. An
+// unparseable holder is treated as absent and self-healed — the lock is taken,
+// with no false stale notice.
+withLockDir((pidPath) => {
+  mkdirSync(dirname(pidPath), { recursive: true });
+  writeFileSync(pidPath, "not-a-pid");
+  const r = acquireLock({ pidPath, pid: 606, isAlive: () => true });
+  assert.equal(r.ok, true, "a corrupt pidfile does not block the new run");
+  assert.ok(!("stalePid" in r), "and raises no false stale-lock notice");
+  assert.equal(readFileSync(pidPath, "utf8").trim(), "606", "the corrupt file is replaced by the new holder");
+});
+
+// Meta (#358 AC5): each #358 criterion above has exactly one test named after it.
+{
+  const here = readFileSync(new URL("./herd.test.mjs", import.meta.url), "utf8");
+  for (const ac of ["AC1", "AC2", "AC3", "AC4", "AC5"]) {
+    const hits = (here.match(new RegExp(`#358 ${ac}\\)`, "g")) || []).length;
+    assert.equal(hits, 1, `#358 ${ac} has exactly one test named after it`);
+  }
+}
+
+// ── issue #350: herd direct-issue targeting — parse --issues (core entrypoint) ──
+
+// Criterion 1: `run --issues 123,134,445` and the repeated form
+// `run --issue 123 --issue 134 --issue 445` parse to the same deduplicated
+// integer target set; a non-integer entry exits 2 with a usage message and
+// spawns nothing.
+{
+  const csv = parseIssueTargets(["run", "--issues", "123,134,445"]);
+  const repeated = parseIssueTargets(["run", "--issue", "123", "--issue", "134", "--issue", "445"]);
+  assert.deepEqual(csv.targets, [123, 134, 445], "comma list parses to the integer set");
+  assert.deepEqual(repeated.targets, csv.targets, "repeated --issue parses to the same set");
+  assert.equal(csv.error, null, "a valid target set carries no error");
+  // No targeting flag -> null (dispatch the whole queue), not an empty set.
+  assert.deepEqual(parseIssueTargets(["run", "--once"]).targets, null, "no flag means no targeting");
+  assert.notEqual(parseIssueTargets(["run", "--issue", "1.5"]).error, null, "a non-integer entry yields an error, not a target");
+  // A non-integer entry is a usage error at the CLI: the `run` subprocess exits
+  // 2 with the usage message on stderr and never reaches the dispatch loop
+  // (the parse runs ahead of the herd-profile import), so nothing is spawned.
+  const herd = fileURLToPath(new URL("./herd.mjs", import.meta.url));
+  const bad = spawnSync(process.execPath, [herd, "run", "--issues", "1,abc"], { encoding: "utf8" });
+  assert.equal(bad.status, 2, "a non-integer target entry exits 2");
+  assert.match(bad.stderr, /positive integer issue numbers/, "the exit-2 message explains the usage");
+  assert.equal(bad.stdout, "", "a rejected target list spawns nothing (no dispatch output)");
+}
+
+// Test note: duplicate issue numbers across both flag forms deduplicate — the
+// same number named twice (or via both forms) collapses to a single entry, so
+// downstream it maps to one worker.
+{
+  const { targets } = parseIssueTargets(["run", "--issues", "12,34,12", "--issue", "34"]);
+  assert.deepEqual(targets, [12, 34], "duplicates across both flag forms collapse to one set");
+}
+
+console.log("PASS herd.test.mjs (45 criteria + issue #163: 4 criteria + issue #174: 3 criteria + issue #358: 5 criteria + issue #350: parse + dedup)");

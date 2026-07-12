@@ -12,9 +12,7 @@ import assert from "node:assert/strict";
 import { readFileSync, writeFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
-import { pickNext, buildDispatch, spawnWorker, waitForClaim, dispatchOne, parseIssueTargets } from "./herd-dispatch.mjs";
+import { pickNext, buildDispatch, spawnWorker, waitForClaim, dispatchOne } from "./herd-dispatch.mjs";
 import { readState } from "./herd-survey.mjs";
 
 const NOW = Date.UTC(2026, 6, 9, 12, 0, 0); // fixed clock — no Date.now dependence
@@ -693,30 +691,9 @@ await inTempDir(async () => {
   assert.ok(!existsSync("esc.md"), "no escalation for a successful late claim");
 });
 
-// ── issue #350: herd direct-issue targeting — parse --issues, filter dispatch ──
-
-// Criterion 1: `run --issues 123,134,445` and the repeated form
-// `run --issue 123 --issue 134 --issue 445` parse to the same deduplicated
-// integer target set; a non-integer entry exits 2 with a usage message and
-// spawns nothing.
-{
-  const csv = parseIssueTargets(["run", "--issues", "123,134,445"]);
-  const repeated = parseIssueTargets(["run", "--issue", "123", "--issue", "134", "--issue", "445"]);
-  assert.deepEqual(csv.targets, [123, 134, 445], "comma list parses to the integer set");
-  assert.deepEqual(repeated.targets, csv.targets, "repeated --issue parses to the same set");
-  assert.equal(csv.error, null, "a valid target set carries no error");
-  // No targeting flag -> null (dispatch the whole queue), not an empty set.
-  assert.deepEqual(parseIssueTargets(["run", "--once"]).targets, null, "no flag means no targeting");
-  // A non-integer entry is a usage error at the CLI: the `run` subprocess exits
-  // 2 with the usage message on stderr and never reaches the dispatch loop, so
-  // nothing is spawned.
-  const herd = fileURLToPath(new URL("./herd.mjs", import.meta.url));
-  const bad = spawnSync(process.execPath, [herd, "run", "--issues", "1,abc"], { encoding: "utf8" });
-  assert.equal(bad.status, 2, "a non-integer target entry exits 2");
-  assert.match(bad.stderr, /positive integer issue numbers/, "the exit-2 message explains the usage");
-  assert.equal(bad.stdout, "", "a rejected target list spawns nothing (no dispatch output)");
-  assert.equal(parseIssueTargets(["run", "--issue", "1.5"]).error != null, true, "a non-integer entry yields an error, not a target");
-}
+// ── issue #350: herd direct-issue targeting — dispatch filter ──
+// (parseIssueTargets and the CLI exit-2 path live in herd.mjs / herd.test.mjs;
+// these tests cover the dispatchOne target filter — criteria 2, 3, 4.)
 
 // Criterion 2: with a target set, the supervisor dispatches only issues in the
 // set — an eligible `state:ready` issue outside the set is never dispatched
@@ -806,17 +783,16 @@ await inTempDir(async () => {
   assert.match(logs.join("\n"), /issue #8/, "the per-issue plan is printed");
 });
 
-// Test note: duplicate issue numbers across both flag forms deduplicate to one
-// worker. The parse dedupes; the dispatch then treats the set as a plain queue,
-// so a number named twice is still one issue -> one worker.
+// Test note: a target set dispatches one worker per pass regardless of how many
+// issues it names — the dispatch treats the set as a plain queue (deduplication
+// itself is a parse concern, covered in herd.test.mjs), so pickNext still yields
+// exactly one worker per pass.
 await inTempDir(async () => {
-  const { targets } = parseIssueTargets(["run", "--issues", "12,34,12", "--issue", "34"]);
-  assert.deepEqual(targets, [12, 34], "duplicates across both forms collapse to one set");
   let spawns = 0;
   const r = await dispatchOne({
     config: mkConfig(),
     ready: [{ number: 12, labels: [] }, { number: 34, labels: [] }],
-    targets,
+    targets: [12, 34],
     statePath: "s.json",
     spawn: () => (spawns++, 99),
     gh: async () => ({ ref: "x" }),
@@ -826,7 +802,7 @@ await inTempDir(async () => {
     sleep: () => Promise.resolve(),
     log: () => {},
   });
-  assert.equal(spawns, 1, "a deduplicated set dispatches one worker per pass, not one per raw token");
+  assert.equal(spawns, 1, "a target set dispatches one worker per pass, not one per named issue");
   assert.equal(readState("s.json")[String(r.dispatched)].status, "dispatched", "the dispatched issue is recorded once");
 });
 
@@ -854,4 +830,4 @@ await inTempDir(async () => {
   assert.equal(capped.reason, "at-capacity", "without --max the config maxWorkers (3) cap holds under targeting");
 });
 
-console.log("PASS herd-dispatch.test.mjs (8 checks for #105/#126 + 3 for #127 + 1 for #138 + 1 for #151 + 1 for #156 + 3 for #285 + 4 for #286 + 6 for #350)");
+console.log("PASS herd-dispatch.test.mjs (8 checks for #105/#126 + 3 for #127 + 1 for #138 + 1 for #151 + 1 for #156 + 3 for #285 + 4 for #286 + 5 for #350 dispatch filter)");

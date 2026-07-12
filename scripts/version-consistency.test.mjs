@@ -24,8 +24,31 @@ import { consistencyReport, normalizeVersion, reportLines } from "./version-cons
 const CHECK = fileURLToPath(new URL("./version-consistency.mjs", import.meta.url));
 const repoRoot = fileURLToPath(new URL("../", import.meta.url));
 
-// Write a fixture tree with the four version locations. A key set to `undefined`
-// omits that file entirely (to exercise the missing-file error path).
+// The bare MAJOR.MINOR.PATCH of the first semver-looking value, so a fixture
+// that does not set `index` defaults its static site to the tree's own version
+// and never introduces spurious drift into a test aimed at another file.
+function firstSemver(...vals) {
+  for (const x of vals) {
+    if (typeof x === "string" && /^v?\d+\.\d+\.\d+$/.test(x.trim())) return x.trim().replace(/^v/, "");
+  }
+  return undefined;
+}
+
+// Write an index.html carrying one `vX.Y.Z` per entry in `spec` (a string is a
+// single occurrence; an array is one occurrence per element), mirroring the real
+// site's hero eyebrow and install/bootstrap commands.
+function writeIndex(dir, spec) {
+  const list = Array.isArray(spec) ? spec : [spec];
+  const body = list
+    .map((v, i) => `<code>curl .../Ratchet/v${String(v).replace(/^v/, "")}/bootstrap.sh --version v${String(v).replace(/^v/, "")}</code><!--${i}-->`)
+    .join("\n");
+  writeFileSync(join(dir, "index.html"), `<main><p class="eyebrow">v${String(list[0]).replace(/^v/, "")}</p>${body}</main>\n`);
+}
+
+// Write a fixture tree with the five version locations. A key set to `undefined`
+// omits that file entirely (to exercise the missing-file error path). `index`
+// defaults to the tree's own version; pass a string or array to control the
+// static site's occurrences explicitly, or `null` to omit index.html.
 function makeTree(v) {
   const dir = mkdtempSync(join(tmpdir(), "version-consistency-"));
   if (v.ratchet !== undefined) writeFileSync(join(dir, ".ratchet-version"), `${v.ratchet}\n`);
@@ -45,6 +68,8 @@ function makeTree(v) {
   if (v.docs !== undefined) {
     writeFileSync(join(dir, "DOCS.md"), `# Ratchet — Docs\n\nVersion ${v.docs} · MIT\n`);
   }
+  const idx = v.index !== undefined ? v.index : firstSemver(v.ratchet, v.plugin, v.readme, v.docs);
+  if (idx !== undefined && idx !== null) writeIndex(dir, idx);
   return dir;
 }
 
@@ -120,6 +145,35 @@ const tree = (v) => {
   assert.ok(bad.lines.join("\n").includes(".ratchet-version"), "names the bad location");
 }
 
+// --- issue #331: static-site version sync -------------------------------
+// #331 criterion 2: index.html versions are checked per occurrence — the gate
+// fails with a clear per-occurrence report when any version in index.html
+// disagrees with the rest of the tree, and passes when they agree.
+{
+  // Every occurrence agrees with the other locations -> green.
+  const agree = tree({ ratchet: "3.6.0", plugin: "3.6.0", readme: "3.6.0", docs: "3.6.0", index: ["3.6.0", "3.6.0", "3.6.0"] });
+  assert.equal(consistencyReport(agree).consistent, true, "agreeing index.html occurrences pass");
+  assert.equal(runCheck(agree).status, 0, "a site whose occurrences all match the tree exits 0");
+
+  // One occurrence drifted -> non-zero, naming that occurrence and its version.
+  const drift = tree({ ratchet: "3.6.0", plugin: "3.6.0", readme: "3.6.0", docs: "3.6.0", index: ["3.6.0", "3.3.6", "3.6.0"] });
+  const report = consistencyReport(drift);
+  assert.equal(report.consistent, false, "a lone drifted occurrence breaks consistency");
+  const red = runCheck(drift);
+  assert.notEqual(red.status, 0, "a disagreeing site exits non-zero");
+  assert.ok(/index\.html \(occurrence \d+\)/.test(red.out), "reports the drift per occurrence, not just the file");
+  assert.ok(red.out.includes("3.3.6"), "prints the drifted version the occurrence carries");
+  assert.ok(/disagree/i.test(red.out), "states the problem in words");
+  assert.ok(!/\n\s+at\s+/.test(red.out), "a per-occurrence report is never a stack trace");
+
+  // A site with no recognizable version at all is reported, not crashed.
+  const empty = tree({ ratchet: "3.6.0", plugin: "3.6.0", readme: "3.6.0", docs: "3.6.0", index: null });
+  writeFileSync(join(empty, "index.html"), "<main><p>no version here</p></main>\n");
+  const bad = reportLines(consistencyReport(empty));
+  assert.equal(bad.code, 1, "a site with no version occurrence fails the check");
+  assert.ok(bad.lines.join("\n").includes("index.html"), "names index.html as the location at fault");
+}
+
 // --- Criterion 4: wired into GATES.md, and the real tree is consistent ---
 {
   const gatesText = spawnSync("cat", [join(repoRoot, "GATES.md")], { encoding: "utf8" }).stdout || "";
@@ -137,4 +191,4 @@ const tree = (v) => {
 }
 
 for (const dir of trees) rmSync(dir, { recursive: true, force: true });
-console.log("PASS version-consistency.test.mjs (6 assertions of 4 criteria + error paths)");
+console.log("PASS version-consistency.test.mjs (4 criteria + #331 per-occurrence + error paths)");

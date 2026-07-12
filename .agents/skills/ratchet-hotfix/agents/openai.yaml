@@ -1,0 +1,8 @@
+# Codex skill metadata. Explicit-only — this opens a branch and PR outside the
+# normal plan-first loop, and only a human may trigger it. Invoke with
+# /skills or $ratchet-hotfix.
+policy:
+  allow_implicit_invocation: false
+interface:
+  display_name: "ratchet-hotfix"
+  short_description: "Human-triggered hotfix/revert fast lane for production breakage."
