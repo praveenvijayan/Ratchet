@@ -258,6 +258,8 @@ scripts/
    review-verdict-workflow.test.mjs  Guards review-verdict.yml's permissions block (contents:read + issues:write)
   run-gates.mjs                 Run GATES.md locally and in CI
   run-gates.test.mjs            Regression test for the gate runner
+  skill-detail.mjs              Guard: ratchet-next/ratchet-status still carry the situational detail AGENTS.md delegates to them
+  skill-detail.test.mjs         Regression test for the owned-skill-detail guard
   skill-parity.mjs              Guard: every skill has agents/openai.yaml + byte-identical .claude/plugin mirrors
   skill-parity.test.mjs         Regression test for the cross-agent parity guard
   state-label-exclusivity.mjs   Enforce one state:* label per issue on a labeled event

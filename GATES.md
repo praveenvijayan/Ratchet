@@ -61,6 +61,7 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 | 4w1   | test: herd-review               | `node scripts/herd-review.test.mjs`               | exit 0 |
 | 4w2   | test: herd-retention            | `node scripts/herd-retention.test.mjs`            | exit 0 |
 | 4x    | test: skill-parity              | `node scripts/skill-parity.test.mjs`              | exit 0 |
+| 4x2   | test: skill-detail              | `node scripts/skill-detail.test.mjs`              | exit 0 |
 | 4y    | test: herd-ui                   | `node scripts/herd-ui.test.mjs`                   | exit 0 |
 | 4y2   | test: herd-avatar               | `node scripts/herd-avatar.test.mjs`               | exit 0 |
 | 4y3   | test: herd-ui-log-search        | `node scripts/herd-ui-log-search.test.mjs`        | exit 0 |
@@ -88,6 +89,7 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 | 4z9   | test: install-lifecycle         | `node scripts/install-lifecycle.test.mjs`         | exit 0 |
 | 4r    | test-coverage                   | `node scripts/gates-coverage.mjs`                 | exit 0 |
 | 4z    | skill-parity                    | `node scripts/skill-parity.mjs`                   | exit 0 |
+| 4z10  | skill-detail                    | `node scripts/skill-detail.mjs`                   | exit 0 |
 | 4z4   | version-consistency             | `node scripts/version-consistency.mjs`            | exit 0 |
 | 4z6   | manifest-check                  | `node scripts/manifest-check.mjs`                 | exit 0 |
 | 5     | build       | TODO: build command               | —              |
