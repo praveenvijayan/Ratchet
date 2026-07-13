@@ -58,6 +58,29 @@ function fakeGh({ ready = [], inProgress = [], openPrs = [] } = {}) {
   return gh;
 }
 
+// A fake conditional `gh` caller for the ETag survey. `plan` maps each endpoint
+// key (ready / inProgress / openPrs) to a sequence of { status, etag, body }
+// responses consumed one per call (the last one repeats). It records the
+// (path, etag) of every call so a test can assert the If-None-Match it sent.
+function fakeGhc(plan = {}) {
+  const calls = [];
+  const idx = {};
+  const ghc = async (path, etag) => {
+    calls.push({ path, etag });
+    const key = path.includes("pulls")
+      ? "openPrs"
+      : path.includes("state:in-progress")
+        ? "inProgress"
+        : "ready";
+    const seq = plan[key] || [{ status: 200, etag: null, body: [] }];
+    const i = idx[key] ?? 0;
+    idx[key] = i + 1;
+    return seq[Math.min(i, seq.length - 1)];
+  };
+  ghc.calls = calls;
+  return ghc;
+}
+
 async function inTempDir(fn) {
   const dir = mkdtempSync(join(tmpdir(), "herd-survey-"));
   const cwd = process.cwd();
@@ -1019,4 +1042,135 @@ await inTempDir(async () => {
   assert.equal(adopted.length, 0, "no adoption happens without the open-PR-by-head-branch input");
 }
 
-console.log("PASS herd-survey.test.mjs (7 criteria + issue #137: 4 criteria + issue #143: 5 criteria + issue #138: 5 criteria + issue #139: 3 criteria + issue #163: 3 criteria + issue #169: 4 criteria + issue #170: 4 criteria + issue #173: 5 criteria + issue #357: 3 criteria + issue #405: 5 criteria + 1 test note)");
+// --- Issue #420: the survey sends conditional GitHub requests (ETag /
+// If-None-Match) so an unchanged tick returns 304 and costs no rate limit.
+// One test per acceptance criterion, named after it. ---
+
+const pollArgs = (over) => ({
+  gh: fakeGh(),
+  isAlive: () => false,
+  now: NOW,
+  statePath: "s.json",
+  escalationsPath: "e.md",
+  eventsPath: "ev.jsonl",
+  log: () => {},
+  ...over,
+});
+
+// #420 AC1: the first request per endpoint is unconditional and stores the
+// returned ETag; the next tick sends that stored ETag back as If-None-Match.
+await inTempDir(async () => {
+  const etags = {};
+  const ghc = fakeGhc({
+    ready: [
+      { status: 200, etag: 'W/"r1"', body: [{ number: 1, title: "a" }] },
+      { status: 200, etag: 'W/"r2"', body: [{ number: 1, title: "a" }] },
+    ],
+    inProgress: [
+      { status: 200, etag: 'W/"i1"', body: [] },
+      { status: 200, etag: 'W/"i2"', body: [] },
+    ],
+    openPrs: [
+      { status: 200, etag: 'W/"p1"', body: [] },
+      { status: 200, etag: 'W/"p2"', body: [] },
+    ],
+  });
+  await pollOnce(pollArgs({ ghc, etags }));
+  assert.deepEqual(
+    ghc.calls.map((c) => c.etag),
+    [null, null, null],
+    "the first tick sends no If-None-Match on any endpoint",
+  );
+  assert.equal(etags.ready.etag, 'W/"r1"', "the returned ETag is stored per endpoint");
+  await pollOnce(pollArgs({ ghc, etags }));
+  assert.deepEqual(
+    ghc.calls.slice(3).map((c) => c.etag),
+    ['W/"r1"', 'W/"i1"', 'W/"p1"'],
+    "the second tick sends each endpoint's stored ETag as If-None-Match",
+  );
+});
+
+// #420 AC2: when every polled endpoint returns 304 the tick short-circuits —
+// pollOnce reports { skipped: true } and writes no state file.
+await inTempDir(async () => {
+  const etags = {
+    ready: { etag: 'W/"r"', body: [] },
+    inProgress: { etag: 'W/"i"', body: [] },
+    openPrs: { etag: 'W/"p"', body: [] },
+  };
+  const ghc = fakeGhc({
+    ready: [{ status: 304, etag: null, body: null }],
+    inProgress: [{ status: 304, etag: null, body: null }],
+    openPrs: [{ status: 304, etag: null, body: null }],
+  });
+  const r = await pollOnce(pollArgs({ ghc, etags }));
+  assert.equal(r.skipped, true, "an all-304 tick is skipped");
+  assert.equal(existsSync("s.json"), false, "a skipped tick mutates no state (no state file written)");
+});
+
+// #420 AC3: when any endpoint returns 200 the full pass runs and that
+// endpoint's stored ETag is replaced with the new one (others keep theirs).
+await inTempDir(async () => {
+  const etags = {
+    ready: { etag: 'W/"r1"', body: [{ number: 9, title: "old" }] },
+    inProgress: { etag: 'W/"i1"', body: [] },
+    openPrs: { etag: 'W/"p1"', body: [] },
+  };
+  const ghc = fakeGhc({
+    ready: [{ status: 200, etag: 'W/"r2"', body: [{ number: 5, title: "new" }] }],
+    inProgress: [{ status: 304, etag: null, body: null }],
+    openPrs: [{ status: 304, etag: null, body: null }],
+  });
+  const r = await pollOnce(pollArgs({ ghc, etags }));
+  assert.equal(r.skipped, undefined, "a 200 on any endpoint runs the full pass, not a skip");
+  assert.equal(r.ready, 1, "the full pass surveys the fresh ready queue");
+  assert.equal(etags.ready.etag, 'W/"r2"', "the changed endpoint's ETag is replaced");
+  assert.equal(etags.inProgress.etag, 'W/"i1"', "an unchanged (304) endpoint keeps its stored ETag");
+  assert.equal(existsSync("s.json"), true, "the full pass writes state");
+});
+
+// #420 AC4: a response with no ETag header, or a gh failure, falls back to a
+// full unconditional pass and logs a `survey-fallback` herd event — never a
+// crash, never a skipped pass.
+await inTempDir(async () => {
+  // (a) 200 with no ETag: the full pass runs, no ETag is cached, and a
+  // survey-fallback event is logged so the next tick is unconditional.
+  const etags = {};
+  const noEtag = fakeGhc({
+    ready: [{ status: 200, etag: null, body: [{ number: 1, title: "x" }] }],
+    inProgress: [{ status: 200, etag: null, body: [] }],
+    openPrs: [{ status: 200, etag: null, body: [] }],
+  });
+  const r1 = await pollOnce(pollArgs({ ghc: noEtag, etags }));
+  assert.equal(r1.skipped, undefined, "a missing-ETag response runs the full pass, never a skip");
+  assert.equal(etags.ready.etag, null, "no ETag is cached when the header is absent");
+  const ev1 = readFileSync("ev.jsonl", "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  assert.ok(ev1.some((e) => e.event === "survey-fallback"), "a survey-fallback event is logged for the missing ETag");
+
+  // (b) gh failure: the conditional call throws, so the survey falls back to a
+  // plain unconditional survey over `gh`, logs a survey-fallback event, no crash.
+  const etags2 = {
+    ready: { etag: 'W/"r"', body: [] },
+    inProgress: { etag: 'W/"i"', body: [] },
+    openPrs: { etag: 'W/"p"', body: [] },
+  };
+  const boom = async () => { throw new Error("gh: conditional request failed"); };
+  const gh = fakeGh({ ready: [{ number: 7, title: "fallback" }] });
+  const r2 = await pollOnce(pollArgs({ gh, ghc: boom, etags: etags2, statePath: "s2.json", escalationsPath: "e2.md", eventsPath: "ev2.jsonl" }));
+  assert.equal(r2.ok, true, "a conditional gh failure does not crash the poll");
+  assert.equal(r2.skipped, undefined, "a gh failure falls back to a full pass, never a skip");
+  assert.equal(r2.ready, 1, "the fallback surveys reality unconditionally via gh");
+  const ev2 = readFileSync("ev2.jsonl", "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  assert.ok(ev2.some((e) => e.event === "survey-fallback"), "a survey-fallback event is logged for the gh failure");
+});
+
+// #420 AC5: every criterion above has exactly one test named after it.
+{
+  const self = readFileSync(new URL("./herd-survey.test.mjs", import.meta.url), "utf8");
+  for (const ac of ["AC1", "AC2", "AC3", "AC4", "AC5"]) {
+    const hits = (self.match(new RegExp(`// #420 ${ac}:`, "g")) || []).length;
+    assert.equal(hits, 1, `#420 ${ac} has exactly one test named after it`);
+  }
+}
+
+console.log("PASS herd-survey.test.mjs (7 criteria + issue #137: 4 criteria + issue #143: 5 criteria + issue #138: 5 criteria + issue #139: 3 criteria + issue #163: 3 criteria + issue #169: 4 criteria + issue #170: 4 criteria + issue #173: 5 criteria + issue #357: 3 criteria + issue #405: 5 criteria + issue #420: 5 criteria + 1 test note)");
