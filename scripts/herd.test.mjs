@@ -205,12 +205,13 @@ inTempDir(() => {
 
 // ── Issue #132: pin the herd worker prompt to its dispatched issue ──
 // The default promptTemplate is data in herd.json; defaultConfig() is its
-// single source of truth. Every criterion below is asserted against the string
-// defaultConfig() writes, for both shipped adapters.
+// single source of truth. The pinned worker rules now live in the canonical
+// herd skill; the prompt only points workers there.
 const promptTemplates = () => {
   const { adapters } = defaultConfig();
   return Object.entries(adapters).map(([name, a]) => [name, a.promptTemplate]);
 };
+const pinnedDispatchRules = readFileSync(new URL("../.agents/skills/ratchet-herd/SKILL.md", import.meta.url), "utf8");
 
 // Criterion 11 (#132 AC1): the default promptTemplate tells the worker issue
 // {issue} is its entire assignment — skip AGENTS.md's pick step and never
@@ -218,41 +219,26 @@ const promptTemplates = () => {
 {
   for (const [name, t] of promptTemplates()) {
     assert.match(t, /\{issue\} is your entire assignment/i, `${name}: names {issue} as the whole assignment`);
-    assert.match(t, /skip AGENTS\.md's pick step/i, `${name}: tells the worker to skip AGENTS.md's pick step`);
-    assert.match(
-      t,
-      /never claim, work on, or fall\s+through to any other issue/i,
-      `${name}: forbids claiming/working/falling through to another issue`,
-    );
+    assert.match(t, /\.agents\/skills\/ratchet-herd\/SKILL\.md/, `${name}: points to the pinned dispatch skill`);
   }
+  assert.match(pinnedDispatchRules, /skip\s+`?AGENTS\.md`?'s pick step/i, "the skill tells the worker to skip AGENTS.md's pick step");
+  assert.match(pinnedDispatchRules, /never claim, work on, or fall\s+through to any other issue/i, "the skill forbids another issue");
 }
 
 // Criterion 12 (#132 AC2): the template treats an existing agent/issue-{issue}
 // branch as this same assignment — resume it per AGENTS.md's resume rules —
 // never as a foreign claim that triggers exit or fall-through.
 {
-  for (const [name, t] of promptTemplates()) {
-    assert.match(t, /agent\/issue-\{issue\} branch is your own prior claim/i, `${name}: the branch is the worker's own claim`);
-    assert.match(t, /resume it under AGENTS\.md's resume rules/i, `${name}: resume per AGENTS.md, not re-claim`);
-    assert.match(t, /never as a foreign claim/i, `${name}: the branch is not treated as foreign`);
-  }
+  assert.match(pinnedDispatchRules, /agent\/issue-\{issue\}.*branch is your own prior claim/i, "the skill names the worker's own claim");
+  assert.match(pinnedDispatchRules, /resume it under .*AGENTS\.md.*resume rules/i, "the skill preserves resume semantics");
+  assert.match(pinnedDispatchRules, /never as a foreign\s+claim/i, "the skill never treats its own claim as foreign");
 }
 
 // Criterion 13 (#132 AC3): a worker whose issue already has a PR opened by
 // someone else is told to exit without touching any branch, worktree, or issue.
 {
-  for (const [name, t] of promptTemplates()) {
-    assert.match(
-      t,
-      /pull request opened by someone else, exit immediately/i,
-      `${name}: a foreign PR means exit immediately`,
-    );
-    assert.match(
-      t,
-      /without touching any branch, worktree, or other issue/i,
-      `${name}: exit touches nothing`,
-    );
-  }
+  assert.match(pinnedDispatchRules, /pull request opened by someone else, exit\s+immediately/i, "the skill exits for a foreign PR");
+  assert.match(pinnedDispatchRules, /without touching any branch, worktree, or other issue/i, "the skill exits without touching anything");
 }
 
 // Criterion 14 (#132 AC4): the promptTemplate examples in DOCS.md match the new
