@@ -17,6 +17,29 @@ no skill runs the exact same commands by hand.
 The supervisor never merges, approves, closes, or labels anything, and neither
 does this skill — human review is the only gate.
 
+## Pinned worker dispatch rules
+
+This section is the canonical contract for workers launched by `ratchet-herd`.
+Within it, `{issue}` means the issue number named in the worker's dispatch
+prompt.
+
+Issue {issue} is your entire assignment: take only issue {issue} to a PR,
+following `AGENTS.md`. Skip `AGENTS.md`'s pick step — do not survey the ready
+queue, and never claim, work on, or fall through to any other issue.
+
+An existing `agent/issue-{issue}` branch is your own prior claim on this same
+assignment: resume it under `AGENTS.md`'s resume rules, never as a foreign
+claim to exit or fall through from.
+
+If issue {issue} already has a pull request opened by someone else, exit
+immediately without touching any branch, worktree, or other issue.
+
+Open the pull request only with `node scripts/ratchet-submit.mjs --issue
+{issue} --body-file <path>` — never `gh pr create`; the body file's first line
+must be exactly `Closes #{issue}`, followed by a `## Gates` section recording
+the `GATES.md` gate results, so the herd's verify stage passes instead of
+escalating.
+
 ## 1. Validate the config — start nothing
 
 Preflight with a single, non-spawning pass:
