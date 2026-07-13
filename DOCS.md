@@ -943,12 +943,12 @@ configuration, not committed framework.
   "adapters": {
     "claude": {
       "launch": ["claude", "-p", "--dangerously-skip-permissions", "{prompt}"],
-      "promptTemplate": "Issue {issue} is your entire assignment: take only issue {issue} to a PR, following AGENTS.md. Skip AGENTS.md's pick step — do not survey the ready queue, and never claim, work on, or fall through to any other issue. An existing agent/issue-{issue} branch is your own prior claim on this same assignment: resume it under AGENTS.md's resume rules, never as a foreign claim to exit or fall through from. If issue {issue} already has a pull request opened by someone else, exit immediately without touching any branch, worktree, or other issue. Open the pull request only with `node scripts/ratchet-submit.mjs --issue {issue} --body-file <path>` — never `gh pr create`; the body file's first line must be exactly `Closes #{issue}`, followed by a `## Gates` section recording the GATES.md gate results, so the herd's verify stage passes instead of escalating.",
+      "promptTemplate": "Issue {issue} is your entire assignment. Read `.agents/skills/ratchet-herd/SKILL.md` for the pinned worker dispatch rules, then follow them and AGENTS.md.",
       "env": {}
     },
     "codex": {
       "launch": ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "{prompt}"],
-      "promptTemplate": "Issue {issue} is your entire assignment: take only issue {issue} to a PR, following AGENTS.md. Skip AGENTS.md's pick step — do not survey the ready queue, and never claim, work on, or fall through to any other issue. An existing agent/issue-{issue} branch is your own prior claim on this same assignment: resume it under AGENTS.md's resume rules, never as a foreign claim to exit or fall through from. If issue {issue} already has a pull request opened by someone else, exit immediately without touching any branch, worktree, or other issue. Open the pull request only with `node scripts/ratchet-submit.mjs --issue {issue} --body-file <path>` — never `gh pr create`; the body file's first line must be exactly `Closes #{issue}`, followed by a `## Gates` section recording the GATES.md gate results, so the herd's verify stage passes instead of escalating.",
+      "promptTemplate": "Issue {issue} is your entire assignment. Read `.agents/skills/ratchet-herd/SKILL.md` for the pinned worker dispatch rules, then follow them and AGENTS.md.",
       "env": {}
     }
   },
@@ -1005,6 +1005,9 @@ An adapter tells the supervisor how to start and restart one worker CLI:
   `herd init` runs** — an existing `.ratchet/herd.json` keeps whatever template
   it was created with, so update the `promptTemplate` in yours by hand to pick
   up this behaviour.
+  Keep the shared prompt prefix short and dispatch instructions tight: this
+  improves prompt-cache hit rate when staggered workers launch against the same
+  repository.
 - **`env`** (optional object) — see the env passthrough below.
 
 **Substitution is deliberately tiny: only `{prompt}` and `{issue}` are
