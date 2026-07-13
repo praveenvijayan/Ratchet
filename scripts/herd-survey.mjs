@@ -16,6 +16,7 @@ import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync, rea
 import { dirname, basename, join, resolve } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { REQUEUE_MARKER } from "./ratchet-requeue.mjs";
 
 export const STATE_FILE = ".ratchet/herd-state.json";
 export const ESCALATIONS_FILE = ".ratchet/herd-escalations.md";
@@ -94,6 +95,11 @@ export const HERD_EVENT_TYPES = Object.freeze([
   // logged here rather than crashing the loop, so a failed reactive pass is
   // visible and the next periodic tick reconciles (plan 0173). No `issue` field.
   "supervisor-pass-error",
+  // Dead-worker claim auto-recovery (plan 0178): a worker the supervisor watched
+  // claim died at the rework cap with no PR, so the supervisor deleted the claim
+  // ref it observed its own worker create and requeued the issue. One per
+  // recovery — the single permitted deletion, made visible in the event stream.
+  "claim-recovered",
 ]);
 
 // Statuses the pipeline has already resolved — a stage escalated or handed them
@@ -139,6 +145,28 @@ export function isPidAlive(pid) {
 // dispatcher quote the identical command — an operator copies one string.
 export function deleteRefCommand(issue) {
   return `gh api -X DELETE repos/{owner}/{repo}/git/refs/heads/agent/issue-${issue}`;
+}
+
+// The exact command a human runs to requeue an issue after its claim ref is
+// gone. Paired with deleteRefCommand in the recovery escalation (plan 0178) so a
+// gh failure mid-recovery hands the operator the identical two-step by hand.
+export function requeueCommand(issue) {
+  return `node scripts/ratchet-requeue.mjs --issue ${issue} --reason "<why>"`;
+}
+
+// Auto-recover a claim ref the supervisor watched its own worker create (plan
+// 0178): delete the ref on origin, then requeue the issue exactly as
+// ratchet-requeue does — comment FIRST (so an interrupted run leaves an
+// explained state), then a single label flip to state:ready. This is the ONE
+// deletion the supervisor is permitted, and only ever over a ref backed by a
+// live supervisor state entry — the caller guarantees ownership; this function
+// performs the janitor work and nothing else. `gh` is the injected CLI runner
+// (array args). Any gh failure throws so the caller escalates once with the
+// exact deleteRefCommand + requeueCommand rather than leaving a half-recovery.
+export async function recoverClaim({ gh, issue, reason }) {
+  await gh(["api", "-X", "DELETE", `repos/{owner}/{repo}/git/refs/heads/agent/issue-${issue}`]);
+  await gh(["issue", "comment", String(issue), "--body", `${reason}\n\n${REQUEUE_MARKER}`]);
+  await gh(["issue", "edit", String(issue), "--add-label", "state:ready", "--remove-label", "state:in-progress"]);
 }
 
 // List the claim refs agent/issue-<N> present on origin, as issue numbers.

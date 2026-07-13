@@ -1270,4 +1270,24 @@ await inTempDir(async () => {
   }
 }
 
-console.log("PASS herd-survey.test.mjs (7 criteria + issue #137: 4 criteria + issue #143: 5 criteria + issue #138: 5 criteria + issue #139: 3 criteria + issue #163: 3 criteria + issue #169: 4 criteria + issue #170: 4 criteria + issue #173: 5 criteria + issue #357: 3 criteria + issue #405: 5 criteria + issue #419: 4 criteria + issue #420: 5 criteria + 1 test note)");
+// --- Criterion 3 (#427): a claim ref the supervisor did NOT observe its own
+// worker create (no live state entry backs it) is never deleted by the new
+// dead-worker auto-recovery — the survey's stale-claim path still only escalates
+// it, exactly as issue #138 (0066). We record every gh call and prove no actual
+// DELETE / requeue was issued; only an escalation naming the manual command. ---
+await inTempDir(async () => {
+  const calls = [];
+  const base = fakeGhWithRefs({ claimRefs: [88] }); // a foreign ref: present, no state entry, no PR
+  const gh = async (args) => {
+    calls.push(args);
+    return base(args);
+  };
+  const r = await pollOnce({ gh, isAlive: () => false, now: NOW, statePath: "s.json", escalationsPath: "e.md", log: () => {} });
+  assert.equal(r.staleEscalated, 1, "the unobserved ref still escalates as a stale claim");
+  assert.ok(!calls.some((a) => a[0] === "api" && a[2] === "DELETE"), "the supervisor never deletes a ref it did not observe its own worker create");
+  assert.ok(!calls.some((a) => a[0] === "issue" && (a[1] === "comment" || a[1] === "edit")), "an unobserved ref is never requeued automatically");
+  const esc = readFileSync("e.md", "utf8");
+  assert.match(esc, /stale claim ref agent\/issue-88 on origin/, "the escalation names the foreign ref for a human");
+});
+
+console.log("PASS herd-survey.test.mjs (7 criteria + issue #137: 4 criteria + issue #143: 5 criteria + issue #138: 5 criteria + issue #139: 3 criteria + issue #163: 3 criteria + issue #169: 4 criteria + issue #170: 4 criteria + issue #173: 5 criteria + issue #357: 3 criteria + issue #405: 5 criteria + issue #419: 4 criteria + issue #420: 5 criteria + issue #427: 1 criterion + 1 test note)");
