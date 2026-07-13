@@ -932,7 +932,7 @@ configuration, not committed framework.
 {
   // Optional top-level knobs — omit any to take the default shown.
   "maxWorkers": 3,              // most workers alive at once (one issue each)
-  "pollSeconds": 60,            // seconds between survey passes
+  "pollSeconds": 15,            // seconds between survey passes; short by default because conditional (ETag) survey requests make an unchanged tick free (304, no rate-limit cost)
   "reworkCap": 2,               // resume attempts before an issue is escalated, never retried again
   "logDir": ".ratchet/logs",    // where per-worker logs are written
   "claimTimeoutSeconds": 300,   // how long to wait for a worker to create its claim ref before killing it as dispatch-failed

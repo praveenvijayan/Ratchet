@@ -78,7 +78,12 @@ export const SELECTION_POLICIES = Object.freeze(["failover", "round-robin"]);
 // Optional top-level fields and the defaults applied when they are omitted.
 export const DEFAULTS = Object.freeze({
   maxWorkers: 3,
-  pollSeconds: 60,
+  // Conditional survey requests (issue #420) make an unchanged tick return 304s
+  // at no rate-limit cost, so the default cadence is short — GitHub-originated
+  // changes (new PRs, review verdicts) are noticed within seconds. An operator
+  // may still override this; the dashboard's "supervisor silent" threshold is
+  // derived from whatever value is configured (see heartbeatThresholdSeconds).
+  pollSeconds: 15,
   reworkCap: 2,
   logDir: ".ratchet/logs",
   // How long the dispatcher waits for a worker to create its claim ref

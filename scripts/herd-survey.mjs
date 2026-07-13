@@ -846,7 +846,7 @@ function passErrorHandler({ eventsPath = EVENTS_FILE, log = console.log, now = (
 // exit listener so a local exit fires an immediate reactive pass. The tick
 // metronome is independent of event passes, so a reaction never shifts cadence.
 export async function runLoop(opts) {
-  const { once = false, pollSeconds = 60, sleep = defaultSleep, step = pollOnce, onExitSignal = null } = opts;
+  const { once = false, pollSeconds = 15, sleep = defaultSleep, step = pollOnce, onExitSignal = null } = opts;
   const pump = createSupervisorPump({
     runPass: (kind) => step({ ...opts, kind }),
     onError: passErrorHandler(opts),
@@ -995,7 +995,7 @@ export async function scopedRun(opts) {
     step = pollOnce,
     once = false,
     dryRun = false,
-    pollSeconds = 60,
+    pollSeconds = 15,
     sleep = defaultSleep,
     now = () => Date.now(),
     onExitSignal = null,

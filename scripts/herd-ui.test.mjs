@@ -52,6 +52,7 @@ import {
   PAGE_HTML,
 } from "./herd-ui.mjs";
 import { pollOnce } from "./herd-survey.mjs";
+import { DEFAULTS, normalizeConfig } from "./herd.mjs";
 
 const CONFIG = { reworkCap: 2, claimTimeoutSeconds: 300 };
 const NOW = Date.UTC(2026, 6, 9, 12, 0, 0); // fixed clock for deterministic ages
@@ -1993,6 +1994,60 @@ async function occupyPort413(preferred = 0) {
   assert.equal(markers.length, unique.size, "each #413 criterion tested exactly once (no duplicate markers)");
   assert.equal(markers.length, CRITERIA_COUNT, `one test per #413 acceptance criterion (${CRITERIA_COUNT})`);
   for (let n = 1; n <= CRITERIA_COUNT; n++) assert.ok(unique.has(n), `#413 criterion ${n} has a test`);
+}
+
+// --- Issue #421: lower the herd default poll interval to 15s and keep the
+// dashboard heartbeat-liveness banner accurate at the new default and at
+// operator overrides. One test per acceptance criterion, named after it.
+// (AC4 — the docs/config reference — maps to the docs-consistency check in
+// docs-refresh.test.mjs, per the plan.) ---
+
+// #421 AC1: the default pollSeconds is 15; an operator-configured value still
+// overrides it exactly as before.
+{
+  assert.equal(DEFAULTS.pollSeconds, 15, "the default poll interval is 15s");
+  const base = { adapters: { claude: { launch: ["run"] } }, routing: { default: "claude" } };
+  assert.equal(normalizeConfig(base).pollSeconds, 15, "a config omitting pollSeconds gets the 15s default");
+  assert.equal(normalizeConfig({ ...base, pollSeconds: 45 }).pollSeconds, 45, "an operator-configured pollSeconds overrides the default");
+}
+
+// #421 AC2: at the new default cadence a healthy supervisor — heartbeats every
+// pollSeconds — is never shown as "supervisor silent".
+{
+  const threshold = heartbeatThresholdSeconds(DEFAULTS.pollSeconds);
+  // A heartbeat one whole poll old: the oldest a just-polled supervisor is seen.
+  const oneAgo = new Date(NOW - DEFAULTS.pollSeconds * 1000).toISOString();
+  const s = heartbeatStatus({ lastHeartbeatTs: oneAgo, thresholdSeconds: threshold, now: NOW });
+  assert.equal(s.state, "live", "a healthy supervisor at the 15s default reads live, not silent");
+  assert.ok(DEFAULTS.pollSeconds < threshold, "the derived threshold leaves slack past one poll at the default");
+}
+
+// #421 AC3: heartbeats stopping for longer than the derived threshold still
+// raises the silent banner — at the default and at an operator-overridden
+// pollSeconds.
+{
+  for (const poll of [DEFAULTS.pollSeconds, 40]) {
+    const threshold = heartbeatThresholdSeconds(poll);
+    const stale = new Date(NOW - (threshold + 5) * 1000).toISOString();
+    assert.equal(
+      heartbeatStatus({ lastHeartbeatTs: stale, thresholdSeconds: threshold, now: NOW }).state,
+      "silent",
+      `silence past the threshold raises the banner at pollSeconds=${poll}`,
+    );
+  }
+}
+
+// #421 AC5: every criterion above has exactly one test named after it. AC4 (the
+// docs/config reference) lives in the docs-consistency check, so it is asserted
+// there rather than here.
+{
+  const self = readFileSync(new URL("./herd-ui.test.mjs", import.meta.url), "utf8");
+  for (const ac of ["AC1", "AC2", "AC3", "AC5"]) {
+    const hits = (self.match(new RegExp(`// #421 ${ac}:`, "g")) || []).length;
+    assert.equal(hits, 1, `#421 ${ac} has exactly one test named after it`);
+  }
+  const docsTest = readFileSync(new URL("./docs-refresh.test.mjs", import.meta.url), "utf8");
+  assert.ok(/#421 AC4:/.test(docsTest), "#421 AC4 (docs/config reference) is covered by docs-refresh.test.mjs");
 }
 
 console.log("PASS herd-ui.test.mjs");
