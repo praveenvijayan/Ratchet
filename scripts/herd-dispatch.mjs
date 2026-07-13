@@ -260,6 +260,12 @@ export async function dispatchOne(opts) {
     heartbeatIntervalMs = (config.pollSeconds ?? 60) * 1000,
     env = process.env,
     onPath,
+    // Fired locally the moment this worker's process exits (after recordExit has
+    // updated the state file), so the supervisor can react — reconcile the exit
+    // and dispatch the freed slot — without waiting for the next poll tick
+    // (plan 0173). Injectable and optional; a listener throw is swallowed so it
+    // can never crash the worker-exit path.
+    notifyExit = null,
   } = opts;
 
   const state = readState(statePath);
@@ -334,6 +340,13 @@ export async function dispatchOne(opts) {
   const onExit = (code, signal) => {
     workerExit = { code, signal };
     recordExit(statePath, issue.number, code, signal, { config, eventsPath, now, warn: log });
+    if (notifyExit) {
+      try {
+        notifyExit(issue.number, code, signal);
+      } catch {
+        /* a supervisor listener must never crash the worker-exit path */
+      }
+    }
   };
   const pid = spawnFn(plan.argv, plan.env, plan.logFile, onExit);
 
@@ -507,4 +520,66 @@ export async function dispatchOne(opts) {
     status: "dispatched",
   }, log);
   return { dispatched: issue.number, claimed: true, pid, adapter: plan.adapter };
+}
+
+// One supervisor pass, kind-aware (plan 0173). It changes *when* the existing
+// passes run, never *what* they do. `kind: "tick"` is the periodic pass: it
+// emits the heartbeat and full survey/reconcile (pollOnce) and the periodic
+// retention. `kind: "event"` is a lean, locally-triggered reactive pass (a
+// worker exit) that skips the heartbeat entirely — so event-driven passes
+// neither add nor suppress heartbeats. Both kinds then reconcile exited workers
+// / verify handed-off PRs / react to reviews (the passes that free capacity),
+// then DRAIN the dispatch queue: dispatchOne is called back-to-back until it
+// reports at-capacity or no eligible issue, so N scoped targets launch as each
+// preceding claim is observed rather than one worker per tick. Each dispatchOne
+// serializes its own claim window, and this drain is strictly sequential, so it
+// never opens two claim windows at once. Every stage is injected (defaulting to
+// this module's dispatchOne/surveyReady) so the whole pass runs offline.
+export async function supervisorStep(o) {
+  const {
+    kind = "tick",
+    gh,
+    config,
+    dryRun = false,
+    targets = null,
+    log = console.log,
+    maxWorkers = config?.maxWorkers,
+    pollOnce = null,
+    monitorOnce = null,
+    verifyOnce = null,
+    reviewOnce = null,
+    retentionOnce = null,
+    surveyReady: survey = surveyReady,
+    dispatchOne: dispatch = dispatchOne,
+  } = o;
+  if (kind === "tick") {
+    if (pollOnce) await pollOnce(o);
+    if (retentionOnce)
+      await retentionOnce(o).catch((e) => log(`herd: retention failed: ${e.message}; continuing.`));
+  }
+  // A resume/rework is a spawn, so the monitor/verify/review passes never run on
+  // --dry-run — same contract the pre-0173 loop held.
+  if (!dryRun) {
+    if (monitorOnce)
+      await monitorOnce(o).catch((e) => log(`herd: monitor failed: ${e.message}; continuing to dispatch.`));
+    if (verifyOnce)
+      await verifyOnce(o).catch((e) => log(`herd: verify failed: ${e.message}; continuing to dispatch.`));
+    if (reviewOnce)
+      await reviewOnce(o).catch((e) => log(`herd: review failed: ${e.message}; continuing to dispatch.`));
+  }
+  const ready = await survey(gh).catch((e) => {
+    log(`herd: dispatch survey failed: ${e.message}; skipping dispatch this poll.`);
+    return [];
+  });
+  let r;
+  let launched = 0;
+  do {
+    r = await dispatch({ ...o, ready, dryRun, targets, maxWorkers });
+    if (r && r.claimed) launched += 1;
+    // --dry-run previews a single plan (dispatched: null) and stops; a real pass
+    // keeps dispatching while the previous call actually dispatched something
+    // (claimed or dispatch-failed both free the drain to try the next issue) and
+    // stops the moment dispatchOne reports at-capacity or no-eligible-issue.
+  } while (!dryRun && r && r.dispatched != null);
+  return { kind, ready: ready.length, launched };
 }

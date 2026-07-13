@@ -26,8 +26,9 @@ import {
   markScopedComplete,
   scopedRun,
   SCOPED_NO_ELIGIBLE_EXIT,
+  createSupervisorPump,
 } from "./herd-survey.mjs";
-import { dispatchOne, recordExit } from "./herd-dispatch.mjs";
+import { dispatchOne, recordExit, supervisorStep } from "./herd-dispatch.mjs";
 import { monitorOnce } from "./herd-monitor.mjs";
 import { verifyOnce } from "./herd-verify.mjs";
 import { normalizeConfig } from "./herd.mjs";
@@ -1019,4 +1020,120 @@ await inTempDir(async () => {
   assert.equal(adopted.length, 0, "no adoption happens without the open-PR-by-head-branch input");
 }
 
-console.log("PASS herd-survey.test.mjs (7 criteria + issue #137: 4 criteria + issue #143: 5 criteria + issue #138: 5 criteria + issue #139: 3 criteria + issue #163: 3 criteria + issue #169: 4 criteria + issue #170: 4 criteria + issue #173: 5 criteria + issue #357: 3 criteria + issue #405: 5 criteria + 1 test note)");
+// ── issue #419 (plan 0173): event-driven local dispatch. One test per
+// acceptance criterion, named after it. ──
+
+// #419 criterion 4: claim-window serialization holds — an exit or claim event
+// arriving while another dispatch's claim window is open never starts a second
+// concurrent claim window.
+await inTempDir(async () => {
+  let active = 0;
+  let maxActive = 0;
+  const order = [];
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  let n = 0;
+  const runPass = async (kind) => {
+    active += 1;
+    maxActive = Math.max(maxActive, active);
+    order.push(kind);
+    if (n++ === 0) await gate; // the first pass holds its "claim window" open
+    active -= 1;
+  };
+  const pump = createSupervisorPump({ runPass });
+  const p1 = pump.tick(); // opens the claim window and blocks on the gate
+  pump.event(); // an exit/claim event arrives mid-window
+  pump.event(); // and another — both coalesce; neither may run yet
+  assert.equal(active, 1, "while a pass's claim window is open, no second pass runs beside it");
+  release();
+  await p1;
+  await pump.idle();
+  assert.equal(maxActive, 1, "at most one claim window is ever open at a time");
+  assert.deepEqual(order, ["tick", "event"], "coalesced events run once, after the in-flight pass, never concurrently");
+});
+
+// #419 criterion 5: the periodic tick still runs and heartbeats are written at
+// the pollSeconds cadence; event-driven passes neither add nor suppress them.
+await inTempDir(async () => {
+  let heartbeats = 0;
+  const pass = (kind) =>
+    supervisorStep({
+      kind, gh: async () => [], config: mkConfig(), maxWorkers: 3,
+      statePath: "s.json", escalationsPath: "e.md", eventsPath: "ev.jsonl",
+      pollOnce: async () => { heartbeats += 1; },
+      monitorOnce: async () => {},
+      surveyReady: async () => [],
+      dispatchOne: async () => ({ dispatched: null, reason: "no-eligible-issue" }),
+      log: () => {},
+    });
+  await pass("tick");
+  await pass("event");
+  await pass("event");
+  await pass("tick");
+  assert.equal(heartbeats, 2, "one heartbeat per tick; the two event passes neither added nor suppressed a heartbeat");
+});
+
+// #419 criterion 6: a scoped run exits once every target reaches a terminal
+// state, including when the final transition is observed via a local event
+// rather than a tick.
+await inTempDir(async () => {
+  const gh = fakeIssueGh({
+    1: { state: "OPEN", labels: ["state:ready"] },
+    2: { state: "OPEN", labels: ["state:ready"] },
+  });
+  let ticks = 0;
+  let events = 0;
+  let trigger;
+  const step = async (o) => {
+    const st = readState("s.json");
+    if (o.kind === "event") {
+      events += 1;
+      st["2"] = { adapter: "claude", pid: null, logFile: "b.log", attempts: 1, pr: 9, status: "ready-for-review" };
+    } else {
+      ticks += 1;
+      st["1"] = { adapter: "claude", pid: null, logFile: "a.log", attempts: 1, pr: 8, status: "ready-for-review" };
+    }
+    writeFileSync("s.json", JSON.stringify(st));
+  };
+  const r = await scopedRun({
+    gh, targets: [1, 2], statePath: "s.json", escalationsPath: "e.md", eventsPath: "ev.jsonl",
+    log: () => {}, step, now: () => NOW,
+    onExitSignal: (fn) => { trigger = fn; },
+    // A worker exits between the first tick and the next: deliver it during the
+    // metronome sleep so the completing pass is the local event, not a later tick.
+    sleep: async () => { if (events === 0) await trigger(); },
+  });
+  assert.equal(r.exitCode, 0, "the scoped run exits 0 once every target is terminal");
+  assert.equal(ticks, 1, "only the initial tick ran — the completing pass was a local event, not a later tick");
+  assert.ok(events >= 1, "the final target transition was observed via a local worker-exit event");
+  assert.deepEqual([...r.completed].sort((a, b) => a - b), [1, 2], "both targets are recorded finished");
+});
+
+// #419 criterion 7: an error thrown inside an event-triggered pass is logged as
+// a herd event and does not crash the supervisor; the next tick reconciles.
+await inTempDir(async () => {
+  let ticks = 0;
+  let trigger;
+  let sleeps = 0;
+  const step = async (o) => {
+    if (o.kind === "event") throw new Error("reactive boom");
+    ticks += 1;
+  };
+  await assert.rejects(
+    runLoop({
+      gh: fakeGh({ ready: [] }), statePath: "s.json", escalationsPath: "e.md", eventsPath: "ev.jsonl",
+      log: () => {}, step, now: () => NOW,
+      onExitSignal: (fn) => { trigger = fn; },
+      sleep: async () => {
+        sleeps += 1;
+        if (sleeps === 1) await trigger(); // fire the failing event pass mid-run
+        if (sleeps >= 3) throw new Error("STOP"); // bound the otherwise-infinite loop
+      },
+    }),
+    /STOP/,
+  );
+  assert.match(readFileSync("ev.jsonl", "utf8"), /supervisor-pass-error/, "the event-pass error is logged as a herd event");
+  assert.ok(ticks >= 2, "the supervisor survived the event error and kept ticking — the next tick reconciled");
+});
+
+console.log("PASS herd-survey.test.mjs (7 criteria + issue #137: 4 criteria + issue #143: 5 criteria + issue #138: 5 criteria + issue #139: 3 criteria + issue #163: 3 criteria + issue #169: 4 criteria + issue #170: 4 criteria + issue #173: 5 criteria + issue #357: 3 criteria + issue #405: 5 criteria + issue #419: 4 criteria + 1 test note)");
