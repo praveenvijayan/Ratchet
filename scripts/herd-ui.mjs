@@ -678,6 +678,11 @@ export function buildWorkers({ state, events, config, now = Date.now(), repoSlug
       status,
       group: lifecycleGroup(status),
       adapter: e.adapter ?? null,
+      // The adapter's family label, derived by the same adapterFamily the deck
+      // roster uses — so a worker whose recorded adapter has since been renamed
+      // or removed from config still labels its mascot card from its own
+      // recorded name, with no client-side second implementation to drift.
+      family: adapterFamily(e.adapter ?? null),
       avatar,
       defaultAvatar: defaultAvatarFor(e.adapter ?? null),
       pid: e.pid ?? null,
@@ -2037,8 +2042,16 @@ export const PAGE_HTML = `<!doctype html>
     // renders as the mascot card carrying the issue's full details — one card
     // instead of a deck card plus a duplicate work row. It lives inside the
     // lifecycle groups, so the same card moves Live → Escalated → Terminal as
-    // the issue's group changes. A worker with no rostered adapter keeps the
-    // plain row below.
+    // the issue's group changes.
+    //
+    // A worker whose recorded adapter is *not* on the roster — renamed or
+    // removed from config after the dispatch pinned the old name — still renders
+    // the mascot card, but self-described from the row's own avatar, recorded
+    // adapter name, and family (no live deck entry to read). It omits the
+    // per-adapter vitals block: dispatches/failures/successes are the configured
+    // adapter's tally, and this worker's adapter is no longer configured. Only a
+    // truly adapterless row (w.adapter null/empty — e.g. the survey's
+    // stale-claim sentinel) falls through to the plain row below.
     const d = (snapshot.deck || []).find((x) => x.name === w.adapter);
     if (d) {
       const src = d.avatar || d.defaultAvatar;
@@ -2053,6 +2066,24 @@ export const PAGE_HTML = `<!doctype html>
         telemetry +
         '<div class="vitals">' + vital("Disp.", d.dispatches) + vital("Fail", d.failures) +
         vital("Launched", d.successes) + "</div>" +
+        "</article>";
+    }
+    // Stale-adapter fallback: the worker carries a recorded adapter name that is
+    // no longer on the roster. Render the same mascot card, self-described from
+    // the row's own avatar (or bundled default), recorded name, and family — but
+    // with no vitals block, since dispatches/failures/successes belong to the
+    // configured adapter this one no longer is.
+    if (w.adapter) {
+      const src = w.avatar || w.defaultAvatar;
+      return '<article class="mascot-card' + sel + '" data-issue="' + w.issue + '">' +
+        '<span class="family">' + esc(w.family) + "</span>" +
+        '<span class="slot-no">' + issueLink(w) + "</span>" +
+        '<div class="mascot"><img alt="' + esc(w.adapter) + ' mascot" src="' + esc(src) +
+        '" data-default="' + esc(w.defaultAvatar) + '" onerror="avatarFallback(this)"></div>' +
+        '<div class="name">' + esc(w.adapter) + "</div>" +
+        '<div class="card-chips">' + statusChip + "</div>" +
+        issueCell(w) +
+        telemetry +
         "</article>";
     }
     // Assignee with avatar chip; an unassigned worker shows the faint em dash.
