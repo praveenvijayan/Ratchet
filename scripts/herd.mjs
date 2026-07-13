@@ -31,7 +31,7 @@ export {
   extractUsage,
   resolveAdapter,
 } from "./herd-adapters.mjs";
-import { DEFAULT_POLICY, USAGE_FIELDS } from "./herd-adapters.mjs";
+import { DEFAULT_POLICY, USAGE_FIELDS, createBreaker } from "./herd-adapters.mjs";
 
 // The herd supervisor's implementation modules (herd-survey, -dispatch, -monitor,
 // -verify, -review, -retention) ship in the `herd` profile. This file is the
@@ -96,6 +96,12 @@ export const DEFAULTS = Object.freeze({
   // whose issue has no live worker. A log of a still-live worker is kept
   // regardless of age.
   logRetentionDays: 14,
+  // How many consecutive claim failures an adapter may accumulate before the
+  // circuit breaker skips it for the rest of the run (issue #428). A worker that
+  // exits without claiming, or dies within its claim window after claiming,
+  // counts one failure; a successful claim resets the adapter's count to zero.
+  // Default 2 — one failure can be bad luck, two in a row is a broken adapter.
+  adapterFailureThreshold: 2,
 });
 
 // The permission/approval-bypass flag each shipped adapter's CLI needs to run
@@ -299,6 +305,7 @@ export function normalizeConfig(raw, file = CONFIG_PATH) {
     reworkCap: int(raw.reworkCap, DEFAULTS.reworkCap, "reworkCap", 0),
     claimTimeoutSeconds: int(raw.claimTimeoutSeconds, DEFAULTS.claimTimeoutSeconds, "claimTimeoutSeconds", 1),
     logRetentionDays: int(raw.logRetentionDays, DEFAULTS.logRetentionDays, "logRetentionDays", 1),
+    adapterFailureThreshold: int(raw.adapterFailureThreshold, DEFAULTS.adapterFailureThreshold, "adapterFailureThreshold", 1),
     logDir: str(raw.logDir, DEFAULTS.logDir, "logDir"),
     adapters,
     routing: { default: defaultRoute, labels: { ...labels }, policies: { ...policies } },
@@ -674,6 +681,10 @@ async function runCli(argv) {
     // Per-endpoint ETag cache, in-memory for this supervisor process; lives across
     // ticks so a poll whose upstream is unchanged returns 304s and short-circuits.
     const surveyEtags = {};
+    // One circuit breaker for the whole run (issue #428): created here, threaded
+    // through every tick's supervisorStep, so an adapter that trips stays skipped
+    // for the rest of this supervisor process — a restart starts it fresh.
+    const breaker = createBreaker();
     // supervisorStep runs the kind-aware pass (plan 0173). A scoped run hands
     // `step` the eligible subset via o.targets; the open loop passes none, falling
     // back to the parsed `targets` (null → whole queue). --dry-run never spawns.
@@ -687,6 +698,7 @@ async function runCli(argv) {
         config,
         dryRun,
         maxWorkers,
+        breaker,
         targets: o.targets ?? targets,
         claimTimeoutMs: config.claimTimeoutSeconds * 1000,
         notifyExit,

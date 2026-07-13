@@ -68,4 +68,49 @@ function transitiveLocalImports(entry) {
   assert.equal(res.status, 0, `pre-existing herd.test.mjs must pass unchanged; got:\n${res.stdout}${res.stderr}`);
 }
 
-console.log("PASS herd-adapters.test.mjs (2 criteria)");
+// ── issue #428: adapter circuit breaker ──────────────────────────────────────
+
+// Model sanity shared by the criteria below: a fresh breaker is empty, trips at
+// the threshold, and skips a tripped adapter in resolveAdapter.
+const twoAdapterConfig = {
+  adapters: { a: { launch: ["a"] }, b: { launch: ["b"] } },
+  routing: { default: { adapters: ["a", "b"], policy: "failover" } },
+};
+
+// --- Criterion 5: adapterFailureThreshold is validated config — a non-positive
+// or non-numeric value exits non-zero naming the key ---------------------------
+{
+  const base = { adapters: { a: { launch: ["a"] } }, routing: { default: "a" } };
+  assert.equal(herd.normalizeConfig(base).adapterFailureThreshold, 2, "omitted threshold takes the default (2)");
+  assert.equal(herd.normalizeConfig({ ...base, adapterFailureThreshold: 3 }).adapterFailureThreshold, 3, "a valid positive integer is accepted");
+  for (const bad of [0, -1, 1.5, "two", null]) {
+    assert.throws(
+      () => herd.normalizeConfig({ ...base, adapterFailureThreshold: bad }),
+      (e) => e instanceof herd.HerdConfigError && /adapterFailureThreshold/.test(e.message),
+      `adapterFailureThreshold ${JSON.stringify(bad)} is rejected with a message naming the key`,
+    );
+  }
+}
+
+// --- Criterion 6: the framework purity check still passes — the breaker logic
+// references no specific CLI, model, or vendor name ----------------------------
+{
+  const src = readFileSync(resolve(scriptsDir, "herd-adapters.mjs"), "utf8");
+  const BANNED = [
+    "claude", "codex", // CLI names
+    "opus", "sonnet", "haiku", "gpt-3", "gpt-4", "gpt-5", "gemini", "llama", "mistral", "anthropic", "openai", // models/vendors
+    "tmux", "zellij", "wezterm", "litellm", "openrouter", // multiplexers / proxies
+  ];
+  for (const token of BANNED)
+    assert.ok(!new RegExp(token, "i").test(src), `herd-adapters.mjs must stay framework-pure: it references "${token}"`);
+  // The breaker really is keyed by an opaque adapter name — trip "a", and only
+  // "a" is skipped; "b" still resolves, so nothing about the identity leaked in.
+  const breaker = leaf.createBreaker();
+  leaf.recordAdapterOutcome(breaker, "a", false, 2);
+  leaf.recordAdapterOutcome(breaker, "a", false, 2);
+  assert.equal(leaf.isAdapterTripped(breaker, "a"), true, "'a' trips after two consecutive failures");
+  const res = leaf.resolveAdapter(twoAdapterConfig, [], { onPath: () => true, breaker });
+  assert.equal(res.name, "b", "a tripped adapter is skipped; the route falls through to the next");
+}
+
+console.log("PASS herd-adapters.test.mjs (2 criteria + issue #428: 2 criteria)");

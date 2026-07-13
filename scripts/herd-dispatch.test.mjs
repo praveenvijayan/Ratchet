@@ -13,6 +13,7 @@ import { readFileSync, writeFileSync, existsSync, mkdtempSync, rmSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pickNext, buildDispatch, spawnWorker, waitForClaim, dispatchOne, supervisorStep } from "./herd-dispatch.mjs";
+import { createBreaker } from "./herd-adapters.mjs";
 import { readState, createSupervisorPump } from "./herd-survey.mjs";
 
 const NOW = Date.UTC(2026, 6, 9, 12, 0, 0); // fixed clock — no Date.now dependence
@@ -901,4 +902,105 @@ await inTempDir(async () => {
   assert.deepEqual(Object.keys(readState("s.json")).sort(), ["7", "8"], "issue #9 is held at capacity and the already-tracked #7/#8 get no second worker");
 });
 
-console.log("PASS herd-dispatch.test.mjs (8 checks for #105/#126 + 3 for #127 + 1 for #138 + 1 for #151 + 1 for #156 + 3 for #285 + 4 for #286 + 5 for #350 dispatch filter + 3 for #419 event-driven dispatch)");
+// ── issue #428: adapter circuit breaker (dispatch-side behaviour) ────────────
+
+// Drive one dispatch whose worker never claims — gh always 404s and the claim
+// window is zero, so it times out immediately and is recorded as one adapter
+// failure. Shared `breaker` accumulates across calls, exactly as a real run.
+const timeoutFail = (breaker, n, extra = {}) =>
+  dispatchOne({
+    onPath: () => true,
+    config: mkConfig(),
+    ready: [{ number: n, labels: [] }],
+    statePath: "s.json",
+    escalationsPath: "esc.md",
+    spawn: () => 100 + n,
+    gh: async () => {
+      throw new Error("404 Not Found");
+    },
+    isAlive: () => false,
+    kill: () => {},
+    now: () => 0,
+    sleep: () => Promise.resolve(),
+    log: () => {},
+    claimTimeoutMs: 0,
+    claimIntervalMs: 1000,
+    breaker,
+    ...extra,
+  });
+
+// Criterion 1 (#428): an adapter accumulates adapterFailureThreshold (default 2)
+// consecutive claim failures — a worker that exits without ever claiming, or one
+// that dies within the claim window after claiming — and is then skipped in
+// routing for the remainder of the run.
+await inTempDir(async () => {
+  const breaker = createBreaker();
+  // Shape one: the worker never claims and the wait times out.
+  await timeoutFail(breaker, 1);
+  assert.equal(breaker.failures.claude, 1, "a never-claiming timeout counts as one failure");
+  assert.equal(breaker.tripped.claude ?? false, false, "one failure does not trip at threshold 2");
+  // Shape two: the worker claims but its process dies within the claim window.
+  let ghN = 0;
+  await timeoutFail(breaker, 2, {
+    spawn: (_argv, _env, _log, onExit) => (onExit(0, null), 222), // exits during the window
+    gh: async () => {
+      // First probe (waitForClaim) 404s so the wait ends on the observed exit;
+      // the re-check (claimRefPresent) then finds the ref the worker did create.
+      if (++ghN === 1) throw new Error("404 Not Found");
+      return {};
+    },
+  });
+  assert.equal(breaker.tripped.claude, true, "a claim-then-death is the second consecutive failure and trips the adapter");
+  // Skipped for the remainder: a fresh issue on the now-tripped route never spawns.
+  let spawned = false;
+  const r3 = await timeoutFail(breaker, 3, { spawn: () => ((spawned = true), 333) });
+  assert.equal(spawned, false, "the tripped adapter is never spawned again this run");
+  assert.equal(r3.dispatched, null, "an issue whose only adapter is tripped is not dispatched");
+});
+
+// Criterion 2 (#428): a successful claim resets the adapter's consecutive-failure
+// count.
+await inTempDir(async () => {
+  const breaker = createBreaker();
+  await timeoutFail(breaker, 1);
+  assert.equal(breaker.failures.claude, 1, "one failure is recorded");
+  // A clean claim: the ref resolves on the first probe.
+  await timeoutFail(breaker, 2, { spawn: () => 222, gh: async () => ({}) });
+  assert.equal(breaker.failures.claude, 0, "a successful claim resets the consecutive-failure count to zero");
+  assert.equal(breaker.tripped.claude, false, "and the adapter is not tripped");
+});
+
+// Criterion 3 (#428): a tripped adapter is surfaced once as degraded (an
+// escalation naming the adapter and the failure shapes), never re-reported.
+await inTempDir(async () => {
+  const breaker = createBreaker();
+  await timeoutFail(breaker, 1);
+  await timeoutFail(breaker, 2); // trips here
+  const esc1 = readFileSync("esc.md", "utf8");
+  assert.match(esc1, /adapter "claude" tripped the circuit breaker/, "the degraded adapter is named");
+  assert.equal((esc1.match(/tripped the circuit breaker after/g) || []).length, 1, "surfaced as degraded exactly once");
+  // A later attempt on the same route adds no second degraded notice.
+  await timeoutFail(breaker, 3);
+  const esc2 = readFileSync("esc.md", "utf8");
+  assert.equal((esc2.match(/tripped the circuit breaker after/g) || []).length, 1, "the degraded adapter is not re-reported every tick");
+});
+
+// Criterion 4 (#428): when every adapter in a route is tripped, dispatch of the
+// affected issues stops with a single escalation listing the failure count, and
+// the supervisor never spins retrying.
+await inTempDir(async () => {
+  const breaker = createBreaker();
+  await timeoutFail(breaker, 1);
+  await timeoutFail(breaker, 2); // the single-adapter route is now fully tripped
+  let spawned = 0;
+  const r1 = await timeoutFail(breaker, 3, { spawn: () => (spawned++, 9) });
+  const r2 = await timeoutFail(breaker, 4, { spawn: () => (spawned++, 9) });
+  assert.equal(r1.dispatched, null, "dispatch of an affected issue stops");
+  assert.equal(r2.dispatched, null, "and stays stopped — never spinning on the exhausted route");
+  assert.equal(spawned, 0, "no worker is spawned once the route is exhausted");
+  const esc = readFileSync("esc.md", "utf8");
+  assert.equal((esc.match(/every adapter in route/g) || []).length, 1, "a single route-exhausted escalation");
+  assert.match(esc, /claude \(\d+ consecutive claim failures\)/, "the escalation lists the adapter's failure count");
+});
+
+console.log("PASS herd-dispatch.test.mjs (8 checks for #105/#126 + 3 for #127 + 1 for #138 + 1 for #151 + 1 for #156 + 3 for #285 + 4 for #286 + 5 for #350 dispatch filter + 3 for #419 event-driven dispatch + 4 for #428 circuit breaker)");
