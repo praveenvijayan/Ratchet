@@ -932,4 +932,91 @@ await inTempDir(async () => {
   assert.ok(logs.some((m) => /scoped target #5 finished \(issue closed\)/.test(m)), "the mid-run close of #5 is reported");
 });
 
-console.log("PASS herd-survey.test.mjs (7 criteria + issue #137: 4 criteria + issue #143: 5 criteria + issue #138: 5 criteria + issue #139: 3 criteria + issue #163: 3 criteria + issue #169: 4 criteria + issue #170: 4 criteria + issue #173: 5 criteria + issue #357: 3 criteria + 1 test note)");
+// issue #405 criterion 1: reconcileState with a dead pid, entry.pr == null, and
+// an open PR whose head is the claim branch agent/issue-<N> adopts the entry:
+// status becomes awaiting-verification, pr is set to that PR, and no dead change
+// or escalation is produced for it.
+{
+  const state = { 405: { adapter: "claude", pid: 999999, logFile: "a.log", pr: null, status: "working", attempts: 1 } };
+  const prByHead = new Map([["agent/issue-405", 88]]);
+  const { state: next, changes, adopted } = reconcileState(
+    state,
+    { openPrNumbers: new Set([88]), prByHead },
+    () => false,
+  );
+  assert.equal(next[405].status, "awaiting-verification", "the dead worker's entry is adopted into verification");
+  assert.equal(next[405].pr, 88, "the entry's pr is set to the open PR on its claim branch");
+  assert.equal(next[405].pid, null, "the dead pid is cleared");
+  assert.equal(changes.length, 0, "no dead change (and thus no escalation) is produced for an adopted entry");
+  assert.equal(adopted.length, 1, "the adoption is reported");
+  assert.deepEqual({ issue: adopted[0].issue, pr: adopted[0].pr }, { issue: "405", pr: 88 }, "the adoption names the issue and PR");
+}
+
+// issue #405 criterion 2: an adopted entry survives both of pollOnce's prune
+// passes and is routed into the existing verify stage.
+await inTempDir(async () => {
+  writeFileSync(
+    "s.json",
+    JSON.stringify({ 405: { adapter: "claude", pid: 999999, logFile: "a.log", pr: null, status: "working", attempts: 1 } }),
+  );
+  const gh = fakeGh({ ready: [], inProgress: [], openPrs: [{ number: 88, headRefName: "agent/issue-405" }] });
+  const r = await pollOnce({ gh, isAlive: () => false, now: NOW, statePath: "s.json", escalationsPath: "e.md", eventsPath: "ev.jsonl", log: () => {} });
+  assert.equal(r.pruned, 0, "the change-driven prune leaves the adopted entry");
+  assert.equal(r.terminalPruned, 0, "the terminal-entry prune leaves the adopted entry (its PR is open)");
+  const after = JSON.parse(readFileSync("s.json", "utf8"));
+  assert.equal(after[405]?.status, "awaiting-verification", "the adopted entry survives both prune passes with the verify-stage status");
+  assert.equal(after[405]?.pr, 88, "the adopted entry still tracks its open PR after the poll");
+  // The verify stage consumes exactly this status/pr pair — feed the survived
+  // state to verifyOnce and confirm it acts on the entry rather than skipping it.
+  const verify = await verifyOnce({
+    config: mkConfig(), statePath: "s.json", escalationsPath: "v.md", eventsPath: "ev.jsonl",
+    gh: async () => ({ mergeable: "CONFLICTING", mergeStateStatus: "DIRTY", body: "Closes #405\n\n## Gates" }),
+    spawn: () => 6050, now: () => NOW, log: () => {},
+  });
+  assert.ok(verify.transitions?.some((t) => Number(t.issue) === 405), "the adopted entry is routed into the verify stage");
+});
+
+// issue #405 criterion 3: pollOnce logs exactly one pr-detected event per
+// adoption and reports the adoption count in its result.
+await inTempDir(async () => {
+  writeFileSync(
+    "s.json",
+    JSON.stringify({ 405: { adapter: "claude", pid: 999999, logFile: "a.log", pr: null, status: "working", attempts: 1 } }),
+  );
+  const gh = fakeGh({ ready: [], inProgress: [], openPrs: [{ number: 88, headRefName: "agent/issue-405" }] });
+  const r = await pollOnce({ gh, isAlive: () => false, now: NOW, statePath: "s.json", escalationsPath: "e.md", eventsPath: "ev.jsonl", log: () => {} });
+  assert.equal(r.adopted, 1, "the result reports the adoption count");
+  const detected = readEvents("ev.jsonl").filter((ev) => ev.event === "pr-detected");
+  assert.equal(detected.length, 1, "exactly one pr-detected event is logged for the adoption");
+  assert.equal(Number(detected[0].issue), 405, "the pr-detected event names the adopted issue");
+  assert.equal(detected[0].pr, 88, "the pr-detected event names the adopted PR");
+});
+
+// issue #405 criterion 4: a dead pid with no open PR on its claim branch behaves
+// exactly as before — flagged dead, escalated, pruned.
+await inTempDir(async () => {
+  writeFileSync(
+    "s.json",
+    JSON.stringify({ 405: { adapter: "claude", pid: 999999, logFile: "a.log", pr: null, status: "working", attempts: 1 } }),
+  );
+  const gh = fakeGh({ ready: [], inProgress: [], openPrs: [{ number: 88, headRefName: "agent/issue-999" }] });
+  const r = await pollOnce({ gh, isAlive: () => false, now: NOW, statePath: "s.json", escalationsPath: "e.md", eventsPath: "ev.jsonl", log: () => {} });
+  assert.equal(r.adopted, 0, "no adoption when no open PR matches the claim branch");
+  assert.equal(r.pruned, 1, "the dead entry is pruned as before");
+  const after = JSON.parse(readFileSync("s.json", "utf8"));
+  assert.equal(after[405], undefined, "the dead entry is removed from the state file");
+  assert.match(readFileSync("e.md", "utf8"), /worker pid 999999 is not alive/, "the dead worker is escalated as before");
+});
+
+// issue #405 criterion 5: reconcileState called without the open-PR-by-head-
+// branch input keeps its current behavior (legacy callers unaffected).
+{
+  const state = { 405: { adapter: "claude", pid: 999999, logFile: "a.log", pr: null, status: "working", attempts: 1 } };
+  const { state: next, changes, adopted } = reconcileState(state, { openPrNumbers: new Set([88]) }, () => false);
+  assert.equal(next[405].status, "dead", "with no prByHead a dead pid is flagged dead, not adopted");
+  assert.equal(next[405].pid, null, "the dead pid is cleared, as before");
+  assert.equal(changes.length, 1, "the dead entry is flagged for escalation, as before");
+  assert.equal(adopted.length, 0, "no adoption happens without the open-PR-by-head-branch input");
+}
+
+console.log("PASS herd-survey.test.mjs (7 criteria + issue #137: 4 criteria + issue #143: 5 criteria + issue #138: 5 criteria + issue #139: 3 criteria + issue #163: 3 criteria + issue #169: 4 criteria + issue #170: 4 criteria + issue #173: 5 criteria + issue #357: 3 criteria + issue #405: 5 criteria + 1 test note)");
