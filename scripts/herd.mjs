@@ -128,7 +128,10 @@ export function defaultConfig() {
     "through to any other issue. An existing agent/issue-{issue} branch is your own prior claim on " +
     "this same assignment: resume it under AGENTS.md's resume rules, never as a foreign claim to exit " +
     "or fall through from. If issue {issue} already has a pull request opened by someone else, exit " +
-    "immediately without touching any branch, worktree, or other issue.";
+    "immediately without touching any branch, worktree, or other issue. " +
+    "Open the pull request only with `node scripts/ratchet-submit.mjs --issue {issue} --body-file <path>` — " +
+    "never `gh pr create`; the body file's first line must be exactly `Closes #{issue}`, followed by a " +
+    "`## Gates` section recording the GATES.md gate results, so the herd's verify stage passes instead of escalating.";
   return {
     maxWorkers: DEFAULTS.maxWorkers,
     pollSeconds: DEFAULTS.pollSeconds,
