@@ -773,16 +773,13 @@ export async function pollOnce({
 
 const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Serialize supervisor passes so that no two ever overlap — the guarantee that
-// keeps two claim windows from opening at once (plan 0173, AGENTS.md §2). Only
-// one pass runs at a time; a tick or event arriving while a pass is in flight
-// sets a pending flag and is coalesced into exactly one follow-up pass, with a
-// pending tick (the heartbeat pass) always winning over a pending event (the
-// lean reactive pass) so heartbeats are never dropped nor doubled. A pass that
-// throws is routed to onError (which logs it) and never propagates, so one bad
-// reactive pass cannot crash the loop — the next tick reconciles. `tick()` and
-// `event()` return the settle promise of the batch they belong to; `idle()`
-// awaits the current batch.
+// Serialize supervisor passes so no two overlap — the guarantee that keeps two
+// claim windows from opening at once (plan 0173, AGENTS.md §2). Only one pass
+// runs at a time; a tick or event arriving mid-pass sets a pending flag and is
+// coalesced into one follow-up pass, a pending tick (heartbeat) winning over a
+// pending event so heartbeats are never dropped nor doubled. A throwing pass is
+// routed to onError and never propagates. `tick()`/`event()` return the batch's
+// settle promise; `idle()` awaits the current batch.
 export function createSupervisorPump({ runPass, onError = null }) {
   let running = false;
   let pendingTick = false;
@@ -830,11 +827,10 @@ export function createSupervisorPump({ runPass, onError = null }) {
   };
 }
 
-// An onError for the pump that logs a failed pass as a herd event and swallows
-// it, so a throw inside a locally-triggered (event) pass never crashes the
-// supervisor — the next periodic tick reconciles normally (plan 0173). A tick
-// pass rethrows, preserving the pre-0173 "unexpected error stops the loop"
-// contract (herd.mjs's onLoopError surfaces it).
+// Pump onError: log a failed pass as a herd event and swallow it, so a throw in
+// an event pass never crashes the supervisor — the next tick reconciles (plan
+// 0173). A tick pass rethrows, preserving the pre-0173 "unexpected error stops
+// the loop" contract (herd.mjs's onLoopError surfaces it).
 function passErrorHandler({ eventsPath = EVENTS_FILE, log = console.log, now = () => Date.now() } = {}) {
   return (e, kind) => {
     appendHerdEvent(eventsPath, { now: now(), event: "supervisor-pass-error", kind, message: e.message }, () => {});
@@ -843,14 +839,12 @@ function passErrorHandler({ eventsPath = EVENTS_FILE, log = console.log, now = (
   };
 }
 
-// The poll loop. `--once` (once: true) runs a single pass and returns; the
-// default keeps polling every pollSeconds. `step` is the per-pass work
-// (defaulting to pollOnce; the dispatcher composes survey + dispatch into it,
-// and receives the pass `kind`), and `sleep` is injectable so tests can bound
-// the otherwise-infinite loop. `onExitSignal(fn)` lets the caller register a
-// worker-exit listener: a local worker exit fires an immediate reactive pass
-// instead of waiting for the next tick. The tick metronome is independent of
-// event passes, so a reaction between ticks never shifts the heartbeat cadence.
+// The poll loop. `--once` runs one pass and returns; the default polls every
+// pollSeconds. `step` is the per-pass work (defaulting to pollOnce; the
+// dispatcher composes survey + dispatch into it, receiving the pass `kind`),
+// `sleep` bounds the loop in tests, and `onExitSignal(fn)` registers a worker-
+// exit listener so a local exit fires an immediate reactive pass. The tick
+// metronome is independent of event passes, so a reaction never shifts cadence.
 export async function runLoop(opts) {
   const { once = false, pollSeconds = 60, sleep = defaultSleep, step = pollOnce, onExitSignal = null } = opts;
   const pump = createSupervisorPump({
@@ -1044,11 +1038,9 @@ export async function scopedRun(opts) {
   const completed = new Set();
   let finished = false;
   const result = () => ({ exitCode: 0, spawned: eligible.length, eligible, ineligible, completed: [...completed] });
-  // After each settled pass re-survey the targets and mark the finished ones.
-  // Accumulating into `completed` is what makes completion robust to pollOnce's
-  // terminal-entry prune — a status seen in one pass is remembered even though
-  // the next pass deletes the entry. A target concluding is reported (why), so
-  // it is never a silent drop.
+  // After each settled pass, re-survey the targets and accumulate the finished
+  // ones — accumulating makes completion robust to pollOnce's terminal-entry
+  // prune, and a concluding target is reported (why), never a silent drop.
   const checkComplete = async () => {
     const passInfo = await surveyTargets(gh, eligible).catch(() => ({}));
     const st = readState(statePath);

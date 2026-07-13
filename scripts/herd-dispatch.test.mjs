@@ -872,18 +872,17 @@ await inTempDir(async () => {
   assert.ok(!calls.includes("heartbeat"), "the exit-driven pass runs no pollOnce/heartbeat (it is an event pass)");
 });
 
+// Shared offline harness for the drain checks below: claim ref always present,
+// spawn/liveness/adapter-availability all stubbed so dispatchOne drains for real.
+const readyList = (...ns) => ns.map((n) => ({ number: n, createdAt: "2026-01-01", labels: [{ name: "priority:medium" }] }));
+const stepBase = { gh: async (a) => (a[0] === "api" ? {} : []), statePath: "s.json", escalationsPath: "e.md", eventsPath: "ev.jsonl", isAlive: () => true, onPath: () => true, now: () => NOW, sleep: async () => {}, log: () => {} };
+
 // #419 criterion 2: with 3 scoped targets and maxWorkers 3, all three workers
 // launch in a single drained pass as each preceding claim is observed, not one
 // per tick.
 await inTempDir(async () => {
-  const ready = [1, 2, 3].map((n) => ({ number: n, createdAt: `2026-01-0${n}`, labels: [{ name: "priority:medium" }] }));
   let pid = 100;
-  const r = await supervisorStep({
-    kind: "tick", gh: async (a) => (a[0] === "api" ? {} : []), config: mkConfig({ maxWorkers: 3 }), maxWorkers: 3,
-    statePath: "s.json", escalationsPath: "e.md", eventsPath: "ev.jsonl",
-    surveyReady: async () => ready, spawn: () => ++pid, isAlive: () => true, onPath: () => true,
-    now: () => NOW, sleep: async () => {}, log: () => {},
-  });
+  const r = await supervisorStep({ ...stepBase, kind: "tick", config: mkConfig({ maxWorkers: 3 }), maxWorkers: 3, surveyReady: async () => readyList(1, 2, 3), spawn: () => ++pid });
   assert.equal(r.launched, 3, "all three workers launch in one pass, not one per tick");
   assert.deepEqual(Object.keys(readState("s.json")).sort(), ["1", "2", "3"], "each of the three targets has a worker after the single pass");
 });
@@ -895,14 +894,8 @@ await inTempDir(async () => {
     7: { adapter: "claude", pid: 111, logFile: "a.log", attempts: 1, pr: null, status: "dispatched" },
     8: { adapter: "claude", pid: 112, logFile: "b.log", attempts: 1, pr: null, status: "dispatched" },
   }));
-  const ready = [7, 8, 9].map((n) => ({ number: n, createdAt: "2026-01-01", labels: [{ name: "priority:medium" }] }));
   let spawns = 0;
-  const r = await supervisorStep({
-    kind: "event", gh: async (a) => (a[0] === "api" ? {} : []), config: mkConfig({ maxWorkers: 2 }), maxWorkers: 2,
-    statePath: "s.json", escalationsPath: "e.md", eventsPath: "ev.jsonl",
-    surveyReady: async () => ready, spawn: () => (spawns++, 999), isAlive: () => true, onPath: () => true,
-    now: () => NOW, sleep: async () => {}, log: () => {},
-  });
+  const r = await supervisorStep({ ...stepBase, kind: "event", config: mkConfig({ maxWorkers: 2 }), maxWorkers: 2, surveyReady: async () => readyList(7, 8, 9), spawn: () => (spawns++, 999) });
   assert.equal(spawns, 0, "an event-driven dispatch at maxWorkers spawns nothing");
   assert.equal(r.launched, 0, "no worker is launched");
   assert.deepEqual(Object.keys(readState("s.json")).sort(), ["7", "8"], "issue #9 is held at capacity and the already-tracked #7/#8 get no second worker");

@@ -656,28 +656,19 @@ async function runCli(argv) {
       process.once("SIGINT", () => releaseAndExit("SIGINT"));
       process.once("SIGTERM", () => releaseAndExit("SIGTERM"));
     }
-    // A local worker exit registers here (via runLoop/scopedRun's onExitSignal)
-    // so the pass composed below reacts immediately — reconciling the exit and
-    // dispatching the freed slot without waiting for the next tick (plan 0173).
-    // The registered handler becomes `notifyExit`, threaded into each dispatchOne
-    // so a worker's process exit fires it.
+    // A local worker exit registers here (runLoop/scopedRun's onExitSignal); the
+    // handler becomes `notifyExit`, threaded into each dispatchOne so a worker's
+    // process exit fires an immediate reactive pass (plan 0173).
     let notifyExit = null;
     const onExitSignal = (fn) => {
       notifyExit = fn;
     };
-    // Per-endpoint ETag cache, in-memory for this supervisor process. It lives
-    // across ticks (the first tick per endpoint is unconditional) so a poll whose
-    // upstream is unchanged returns 304s and short-circuits.
+    // Per-endpoint ETag cache, in-memory for this supervisor process; lives across
+    // ticks so a poll whose upstream is unchanged returns 304s and short-circuits.
     const surveyEtags = {};
-    // One kind-aware pass (plan 0173): on the periodic tick supervisorStep runs
-    // pollOnce (heartbeat + ETag-conditional survey/reconcile) and retention, and
-    // gates the upstream-driven verify/review on whether that survey saw a change;
-    // then — every pass — it reconciles exited workers (monitor) and drains the
-    // dispatch queue back-to-back. An event pass (a local worker exit) stays lean:
-    // monitor + dispatch only, no heartbeat and no upstream verify/review. A
-    // scoped run hands `step` the eligible subset via o.targets; the open loop
-    // passes none, falling back to the parsed `targets` (null → whole queue).
-    // --dry-run never spawns (monitor/verify/review/drain skipped inside step).
+    // supervisorStep runs the kind-aware pass (plan 0173). A scoped run hands
+    // `step` the eligible subset via o.targets; the open loop passes none, falling
+    // back to the parsed `targets` (null → whole queue). --dry-run never spawns.
     const step = async (o) => {
       const config = resolveConfig(o.log);
       const maxWorkers = maxIdx >= 0 && Number.isInteger(Number(argv[maxIdx + 1]))

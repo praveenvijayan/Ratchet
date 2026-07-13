@@ -1050,27 +1050,21 @@ await inTempDir(async () => {
 // arriving while another dispatch's claim window is open never starts a second
 // concurrent claim window.
 await inTempDir(async () => {
-  let active = 0;
-  let maxActive = 0;
+  let active = 0, maxActive = 0, n = 0, release;
   const order = [];
-  let release;
   const gate = new Promise((r) => { release = r; });
-  let n = 0;
-  const runPass = async (kind) => {
-    active += 1;
-    maxActive = Math.max(maxActive, active);
-    order.push(kind);
-    if (n++ === 0) await gate; // the first pass holds its "claim window" open
-    active -= 1;
-  };
-  const pump = createSupervisorPump({ runPass });
+  const pump = createSupervisorPump({
+    runPass: async (kind) => {
+      active += 1; maxActive = Math.max(maxActive, active); order.push(kind);
+      if (n++ === 0) await gate; // the first pass holds its "claim window" open
+      active -= 1;
+    },
+  });
   const p1 = pump.tick(); // opens the claim window and blocks on the gate
-  pump.event(); // an exit/claim event arrives mid-window
-  pump.event(); // and another — both coalesce; neither may run yet
+  pump.event(); pump.event(); // two events arrive mid-window; both coalesce
   assert.equal(active, 1, "while a pass's claim window is open, no second pass runs beside it");
   release();
-  await p1;
-  await pump.idle();
+  await p1; await pump.idle();
   assert.equal(maxActive, 1, "at most one claim window is ever open at a time");
   assert.deepEqual(order, ["tick", "event"], "coalesced events run once, after the in-flight pass, never concurrently");
 });
@@ -1100,22 +1094,13 @@ await inTempDir(async () => {
 // state, including when the final transition is observed via a local event
 // rather than a tick.
 await inTempDir(async () => {
-  const gh = fakeIssueGh({
-    1: { state: "OPEN", labels: ["state:ready"] },
-    2: { state: "OPEN", labels: ["state:ready"] },
-  });
-  let ticks = 0;
-  let events = 0;
-  let trigger;
+  const gh = fakeIssueGh({ 1: { state: "OPEN", labels: ["state:ready"] }, 2: { state: "OPEN", labels: ["state:ready"] } });
+  let ticks = 0, events = 0, trigger;
+  const done = (pr) => ({ adapter: "claude", pid: null, logFile: "x.log", attempts: 1, pr, status: "ready-for-review" });
   const step = async (o) => {
     const st = readState("s.json");
-    if (o.kind === "event") {
-      events += 1;
-      st["2"] = { adapter: "claude", pid: null, logFile: "b.log", attempts: 1, pr: 9, status: "ready-for-review" };
-    } else {
-      ticks += 1;
-      st["1"] = { adapter: "claude", pid: null, logFile: "a.log", attempts: 1, pr: 8, status: "ready-for-review" };
-    }
+    if (o.kind === "event") { events += 1; st["2"] = done(9); } // final transition via a local event
+    else { ticks += 1; st["1"] = done(8); }
     writeFileSync("s.json", JSON.stringify(st));
   };
   const r = await scopedRun({
@@ -1135,13 +1120,8 @@ await inTempDir(async () => {
 // #419 criterion 7: an error thrown inside an event-triggered pass is logged as
 // a herd event and does not crash the supervisor; the next tick reconciles.
 await inTempDir(async () => {
-  let ticks = 0;
-  let trigger;
-  let sleeps = 0;
-  const step = async (o) => {
-    if (o.kind === "event") throw new Error("reactive boom");
-    ticks += 1;
-  };
+  let ticks = 0, trigger, sleeps = 0;
+  const step = async (o) => { if (o.kind === "event") throw new Error("reactive boom"); ticks += 1; };
   await assert.rejects(
     runLoop({
       gh: fakeGh({ ready: [] }), statePath: "s.json", escalationsPath: "e.md", eventsPath: "ev.jsonl",

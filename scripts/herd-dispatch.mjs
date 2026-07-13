@@ -260,11 +260,9 @@ export async function dispatchOne(opts) {
     heartbeatIntervalMs = (config.pollSeconds ?? 60) * 1000,
     env = process.env,
     onPath,
-    // Fired locally the moment this worker's process exits (after recordExit has
-    // updated the state file), so the supervisor can react — reconcile the exit
-    // and dispatch the freed slot — without waiting for the next poll tick
-    // (plan 0173). Injectable and optional; a listener throw is swallowed so it
-    // can never crash the worker-exit path.
+    // Fired locally after recordExit when this worker's process exits, so the
+    // supervisor reacts without waiting for the next tick (plan 0173). Optional;
+    // a listener throw is swallowed so it can never crash the worker-exit path.
     notifyExit = null,
   } = opts;
 
@@ -522,22 +520,18 @@ export async function dispatchOne(opts) {
   return { dispatched: issue.number, claimed: true, pid, adapter: plan.adapter };
 }
 
-// One supervisor pass, kind-aware (plan 0173). It changes *when* the existing
-// passes run, never *what* they do. `kind: "tick"` is the periodic pass: it
-// emits the heartbeat and the ETag-conditional survey/reconcile (pollOnce, which
-// returns `{ skipped }` when every endpoint 304'd), runs the periodic retention,
-// and — only when the survey saw an upstream change — the upstream-driven verify
-// and review passes. `kind: "event"` is a lean, locally-triggered reactive pass
-// (a worker exit): it skips pollOnce entirely (so event passes neither add nor
-// suppress heartbeats) and the upstream verify/review, running only the local
-// monitor reconcile. Both kinds then reconcile exited workers (monitor, which is
-// pid-liveness-driven, not upstream) and DRAIN the dispatch queue: dispatchOne is
-// called back-to-back until it reports at-capacity or no eligible issue, so N
-// scoped targets launch as each preceding claim is observed rather than one
-// worker per tick. Each dispatchOne serializes its own claim window and this
-// drain is strictly sequential, so it never opens two claim windows at once.
-// Every stage is injected (defaulting to this module's dispatchOne/surveyReady)
-// so the whole pass runs offline.
+// One supervisor pass, kind-aware (plan 0173) — it changes *when* passes run,
+// never *what* they do. `kind: "tick"` heartbeats + surveys upstream (pollOnce,
+// which returns `{ skipped }` on an all-304 tick), runs retention, and — only
+// when the survey saw a change — the upstream verify/review. `kind: "event"` is
+// the lean reactive pass a local worker exit fires: no pollOnce (so it neither
+// adds nor suppresses heartbeats) and no upstream verify/review. Both kinds run
+// the pid-liveness monitor and then DRAIN dispatch — dispatchOne back-to-back
+// until at-capacity or no eligible issue, so N targets launch as each preceding
+// claim is observed, not one per tick. The drain is sequential and each
+// dispatchOne serializes its own claim window, so two never overlap. Every stage
+// is injected (defaulting to this module's dispatchOne/surveyReady) for offline
+// tests.
 export async function supervisorStep(o) {
   const {
     kind = "tick",
@@ -555,17 +549,12 @@ export async function supervisorStep(o) {
     surveyReady: survey = surveyReady,
     dispatchOne: dispatch = dispatchOne,
   } = o;
-  // Only the periodic tick surveys upstream (pollOnce) and heartbeats. An event
-  // pass never surveys, so it treats upstream as unchanged and skips verify/review.
+  // Only a tick surveys upstream; an event pass treats upstream as unchanged.
   let upstreamChanged = false;
-  if (kind === "tick" && pollOnce) {
-    const poll = await pollOnce(o);
-    upstreamChanged = !poll?.skipped;
-  }
-  // A resume/rework/verify is a spawn or GitHub write, so none run on --dry-run.
+  if (kind === "tick" && pollOnce) upstreamChanged = !(await pollOnce(o))?.skipped;
   if (!dryRun) {
-    // Monitor reconciles exited workers off pid liveness (no upstream needed), so
-    // it runs on every pass — the core reaction to a worker-exit event.
+    // Monitor is pid-liveness-driven (no upstream), so it runs every pass — the
+    // core reaction to a worker exit. Verify/review are upstream, tick-gated.
     if (monitorOnce)
       await monitorOnce(o).catch((e) => log(`herd: monitor failed: ${e.message}; continuing to dispatch.`));
     if (upstreamChanged) {
@@ -575,23 +564,21 @@ export async function supervisorStep(o) {
         await reviewOnce(o).catch((e) => log(`herd: review failed: ${e.message}; continuing to dispatch.`));
     }
   }
-  // Retention is tick-cadence local file cleanup (events.jsonl / escalations);
-  // it runs every tick, dry-run included, and stays off the lean event path.
+  // Retention is tick-cadence local cleanup (dry-run included); off the event path.
   if (kind === "tick" && retentionOnce)
     await retentionOnce(o).catch((e) => log(`herd: retention failed: ${e.message}; continuing.`));
   const ready = await survey(gh).catch((e) => {
     log(`herd: dispatch survey failed: ${e.message}; skipping dispatch this poll.`);
     return [];
   });
+  // Drain: dispatch while the last call did something (claimed or dispatch-failed
+  // both free the next issue); stop on at-capacity/no-eligible. --dry-run previews
+  // one plan (dispatched: null) and stops.
   let r;
   let launched = 0;
   do {
     r = await dispatch({ ...o, ready, dryRun, targets, maxWorkers });
     if (r && r.claimed) launched += 1;
-    // --dry-run previews a single plan (dispatched: null) and stops; a real pass
-    // keeps dispatching while the previous call actually dispatched something
-    // (claimed or dispatch-failed both free the drain to try the next issue) and
-    // stops the moment dispatchOne reports at-capacity or no-eligible-issue.
   } while (!dryRun && r && r.dispatched != null);
   return { kind, ready: ready.length, launched, upstreamChanged };
 }
