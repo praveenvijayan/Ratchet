@@ -1187,7 +1187,18 @@ These hold no matter what the config says:
 
 - **It never merges, approves, closes, or labels** a PR or an issue. Every one
   of the two human jobs — writing plans and reviewing PRs — stays with the
-  human. The supervisor only observes, dispatches, and escalates.
+  human. The supervisor only observes, dispatches, and escalates, with one
+  narrow exception below.
+- **One permitted deletion (dead-worker claim auto-recovery).** The supervisor
+  may delete exactly one thing: a claim ref `agent/issue-<N>` it watched its own
+  worker create, once that worker has died at the rework cap with no PR open on
+  the ref. It deletes that one ref and requeues the issue (the same label flip +
+  comment `ratchet-requeue` performs), so a crashed worker no longer blocks the
+  issue until a human intervenes. It never deletes a ref it did not observe its
+  own worker create — an unobserved/foreign claim ref still only escalates (the
+  survey's stale-claim path is unchanged) — and it touches nothing else: no
+  merge, approve, close, or PR-body edit. A gh failure mid-recovery escalates
+  once with the exact `gh api -X DELETE …` and `ratchet-requeue` commands.
 - **One issue, one worker.** At most `maxWorkers` run at once, and each owns a
   single issue; dispatch uses the same server-side branch-ref claim as a solo
   agent (§2), so two workers can never collide on one issue.

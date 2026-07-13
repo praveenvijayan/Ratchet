@@ -180,7 +180,12 @@ self-invoke**. It skips only the planning round trip — it still runs the
 5. <!-- ratchet:invariant:one-pr --> One issue, one branch, one PR. Rework
    updates the existing PR; never open a second.
 6. <!-- ratchet:invariant:never-merge --> You never merge, approve, close, or
-   touch `main`. The PR is your terminal action.
+   touch `main`. The PR is your terminal action. The `ratchet-herd` supervisor
+   is bound the same way, with one explicit exception: it may delete a single
+   claim ref `agent/issue-<N>` it watched its own worker create, once that
+   worker has died with no PR, and requeue that issue (dead-worker claim
+   auto-recovery — see DOCS.md "Supervisor invariants"). It deletes nothing else
+   and never touches a ref it did not observe its own worker create.
 7. <!-- ratchet:invariant:labelled-exit --> Every exit path leaves the issue in a
    labelled state with a comment explaining why.
 8. <!-- ratchet:invariant:error-paths --> **Error paths ship with the feature.**

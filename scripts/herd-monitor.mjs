@@ -14,12 +14,17 @@
 // supervisor restart that lost the exit event, so an orphan is safely retried
 // (ratchet-next makes re-dispatch idempotent) rather than mis-escalated. Every
 // state change prints ONE compact status line. Like the rest of herd, the
-// supervisor never merges, approves, closes, or labels. Every outside-world call
-// is injectable, so the monitor runs offline in tests. Zero dependencies.
+// supervisor never merges, approves, or closes. It has exactly ONE permitted
+// deletion (plan 0178): a claim ref agent/issue-<N> it watched its own worker
+// create, once that worker has died at the rework cap with no PR — it deletes
+// that one ref and requeues the issue (auto-recovery), then touches nothing
+// else. A ref it did not observe its own worker create is never deleted here.
+// Every outside-world call is injectable, so the monitor runs offline in tests.
+// Zero dependencies.
 
 import { readFileSync } from "node:fs";
 import { substitute } from "./herd-adapters.mjs";
-import { STATE_FILE, ESCALATIONS_FILE, EVENTS_FILE, STALE_CLAIM_STATUS, TERMINAL_STATUS, readState, writeState, appendEscalation, appendHerdEvent, isPidAlive } from "./herd-survey.mjs";
+import { STATE_FILE, ESCALATIONS_FILE, EVENTS_FILE, STALE_CLAIM_STATUS, TERMINAL_STATUS, readState, writeState, appendEscalation, appendHerdEvent, isPidAlive, claimRefPresent, recoverClaim, deleteRefCommand, requeueCommand } from "./herd-survey.mjs";
 import { spawnWorker, recordExit } from "./herd-dispatch.mjs";
 
 // The set of already-resolved statuses now lives in herd-survey.mjs (pollOnce's
@@ -149,11 +154,64 @@ export async function monitorOnce(opts) {
       );
       line = `herd: issue #${issue} -> escalated (exit 0, no PR — agent report in escalations)`;
     } else if (decision.action === "escalate-capped") {
-      escalate(
-        `worker failed and reached the rework cap (${config.reworkCap} attempts) — not retrying. Log tail:\n\n${tailLog(entry.logFile, tailLines)}`,
-        "inspect the log and decide manually; the automated retry budget is exhausted",
-      );
-      line = `herd: issue #${issue} -> escalated (reworkCap ${config.reworkCap} reached after ${decision.attempts} attempts)`;
+      // Auto-recovery carve-out (plan 0178). The worker the supervisor spawned
+      // and watched claim has failed to the rework cap with no PR, orphaning its
+      // claim ref agent/issue-<N> on origin. Left alone that ref blocks the issue
+      // forever (every future worker 422s) until a human deletes it and requeues.
+      // Because the supervisor observed *its own* worker create exactly this ref
+      // (this is that worker's live state entry) and knows no PR exists, it may
+      // delete that one ref and requeue — its single permitted deletion, bounded
+      // janitor work over state it created. A foreign ref never reaches here (the
+      // monitor only iterates supervisor state entries; unobserved refs escalate
+      // via the survey's stale-claim path). A ref the check can't confirm present,
+      // or any gh failure during recovery, falls back to the same escalation.
+      let refPresent = false;
+      try {
+        refPresent = await claimRefPresent(gh, issue);
+      } catch {
+        refPresent = false;
+      }
+      if (refPresent) {
+        try {
+          await recoverClaim({
+            gh,
+            issue,
+            reason:
+              `ratchet-herd auto-recovery: the worker for adapter "${entry.adapter}" died at the rework cap ` +
+              `(${config.reworkCap} attempts) with no PR, leaving its claim ref on origin. The supervisor deleted ` +
+              `the ref it watched its own worker create and requeued this issue for a fresh dispatch.`,
+          });
+          appendHerdEvent(eventsPath, {
+            now: now(),
+            event: "claim-recovered",
+            issue,
+            adapter: entry.adapter,
+            pid: null,
+            logFile: entry.logFile,
+            attempts: entry.attempts,
+            pr: null,
+            status: "recovered",
+          }, log);
+          delete state[issue]; // gone from state -> redispatchable this same run
+          line = `herd: issue #${issue} -> recovered (dead worker's claim ref deleted, issue requeued after reworkCap ${config.reworkCap})`;
+          log(line);
+          transitions.push({ issue: Number(issue), action: "recovered", line });
+          continue;
+        } catch (e) {
+          escalate(
+            `worker failed to the rework cap (${config.reworkCap} attempts) with no PR, and auto-recovery of its claim ref failed: ${e.message}. ` +
+              `Recover by hand: \`${deleteRefCommand(issue)}\` then \`${requeueCommand(issue)}\`.`,
+            `run \`${deleteRefCommand(issue)}\` then \`${requeueCommand(issue)}\` to delete the orphaned claim ref and requeue the issue`,
+          );
+          line = `herd: issue #${issue} -> escalated (auto-recovery failed: ${e.message})`;
+        }
+      } else {
+        escalate(
+          `worker failed and reached the rework cap (${config.reworkCap} attempts) — not retrying. Log tail:\n\n${tailLog(entry.logFile, tailLines)}`,
+          "inspect the log and decide manually; the automated retry budget is exhausted",
+        );
+        line = `herd: issue #${issue} -> escalated (reworkCap ${config.reworkCap} reached after ${decision.attempts} attempts)`;
+      }
     } else {
       const resume = buildResume(config, entry, issue);
       if (!resume) {
