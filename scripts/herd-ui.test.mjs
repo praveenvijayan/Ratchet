@@ -45,6 +45,8 @@ import {
   tailFrom,
   createDashboardServer,
   listenOrFail,
+  bindDashboard,
+  PORT_SCAN_SPAN,
   parsePort,
   run,
   PAGE_HTML,
@@ -125,9 +127,9 @@ function sseCollect(url, until, timeoutMs = 3000) {
 // --- Criterion 1: serves on a local port (flag-overridable default), prints
 // the URL on start. -----------------------------------------------------------
 {
-  assert.equal(parsePort([]), DEFAULT_PORT, "no flag -> default port");
-  assert.equal(parsePort(["--port", "0"]), 0, "--port overrides the default");
-  assert.equal(parsePort(["--port", "nope"]), DEFAULT_PORT, "a bad --port falls back to the default");
+  assert.deepEqual(parsePort([]), { port: DEFAULT_PORT, explicit: false }, "no flag -> default port, not explicit");
+  assert.deepEqual(parsePort(["--port", "0"]), { port: 0, explicit: true }, "--port pins the port explicitly");
+  assert.deepEqual(parsePort(["--port", "nope"]), { port: DEFAULT_PORT, explicit: false }, "a bad --port falls back to the default, not explicit");
 
   const logs = [];
   const { server, port } = await run(["--port", "0"], { log: (m) => logs.push(m) });
@@ -1851,6 +1853,146 @@ await inTempDir(async (dir) => {
   assert.equal(markers.length, unique.size, "each #406 criterion tested exactly once (no duplicate markers)");
   assert.equal(markers.length, CRITERIA_COUNT, `one test per #406 acceptance criterion (${CRITERIA_COUNT})`);
   for (let n = 1; n <= CRITERIA_COUNT; n++) assert.ok(unique.has(n), `#406 criterion ${n} has a test`);
+}
+
+// =============================================================================
+// Issue #413 — the dashboard auto-picks a free port when the default is taken,
+// so two herds in different repos don't both die on 4780. Bind an unpinned port
+// and it scans upward for the first free one; a pinned --port stays fatal. ----
+// -----------------------------------------------------------------------------
+
+// Bind a throwaway server to `preferred` so that port is busy for the duration
+// of a test; returns the bound port and a close().
+async function occupyPort413(preferred = 0) {
+  const server = createDashboardServer({ config: CONFIG });
+  const port = await listenOrFail(server, preferred);
+  return { port, close: () => new Promise((r) => server.close(r)) };
+}
+
+// --- #413 Criterion 1: with no --port flag and the default port free, the
+// dashboard binds that default port as today. ---------------------------------
+{
+  // Probe a free port and treat it as the "default": an unpinned bind must
+  // return exactly that port when it is free, with no scan.
+  const probe = await occupyPort413(0);
+  const free = probe.port;
+  await probe.close();
+  const server = createDashboardServer({ config: CONFIG });
+  try {
+    const bound = await bindDashboard(server, { port: free, explicit: false });
+    assert.equal(bound, free, "a free default port is bound as-is, no scan");
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+}
+
+// --- #413 Criterion 2: with no --port flag and the default port busy, the
+// dashboard binds the next free port and serves normally. ---------------------
+{
+  const busy = await occupyPort413(0);
+  const server = createDashboardServer({ config: CONFIG });
+  try {
+    const bound = await bindDashboard(server, { port: busy.port, explicit: false });
+    assert.notEqual(bound, busy.port, "the busy default is skipped");
+    assert.ok(
+      bound > busy.port && bound <= busy.port + PORT_SCAN_SPAN - 1,
+      "bound to a port inside the scan range above the busy default",
+    );
+    const page = await fetchText(`http://127.0.0.1:${bound}/`);
+    assert.equal(page.status, 200, "the fallback port serves the dashboard");
+  } finally {
+    await new Promise((r) => server.close(r));
+    await busy.close();
+  }
+}
+
+// --- #413 Criterion 3: on startup the dashboard prints the URL with the
+// actually bound port, so the operator always knows where it is. --------------
+{
+  // Force the default busy, then run with no flag: the printed URL must carry
+  // the scanned port run() actually bound, not the default it started from.
+  let holder = createDashboardServer({ config: CONFIG });
+  try {
+    await listenOrFail(holder, DEFAULT_PORT);
+  } catch (e) {
+    // Someone else already holds the default — the precondition (default busy)
+    // still holds, so drop our holder and let run() scan past theirs.
+    if (e.code !== "EADDRINUSE") throw e;
+    await new Promise((r) => holder.close(r));
+    holder = null;
+  }
+  const logs = [];
+  const { server, port } = await run([], { log: (m) => logs.push(m) });
+  try {
+    assert.notEqual(port, DEFAULT_PORT, "run() scanned past the busy default");
+    assert.ok(
+      logs.some((l) => l.includes(`http://localhost:${port}`)),
+      "the startup line names the actually bound port",
+    );
+  } finally {
+    await new Promise((r) => server.close(r));
+    if (holder) await new Promise((r) => holder.close(r));
+  }
+}
+
+// --- #413 Criterion 4: with an explicit --port that is busy, the dashboard
+// still exits non-zero with the existing "port N is already in use" message —
+// never a silent fallback to a different port. --------------------------------
+{
+  const busy = await occupyPort413(0);
+  const server = createDashboardServer({ config: CONFIG });
+  try {
+    await assert.rejects(
+      () => bindDashboard(server, { port: busy.port, explicit: true }),
+      (e) => {
+        assert.match(e.message, /already in use/, "the pinned-port clash keeps the one-line in-use error");
+        assert.ok(e.message.includes(String(busy.port)), "the error names the pinned port");
+        return true;
+      },
+      "an explicit busy port is fatal, no fallback",
+    );
+    assert.equal(server.address(), null, "the server never bound elsewhere");
+  } finally {
+    await new Promise((r) => server.close(r));
+    await busy.close();
+  }
+}
+
+// --- #413 Criterion 5: when no free port is found within the scan range, the
+// dashboard exits non-zero with a message naming the range it tried. ----------
+{
+  const busy = await occupyPort413(0);
+  const server = createDashboardServer({ config: CONFIG });
+  try {
+    // span:1 makes the range exactly the one busy port, so the scan exhausts
+    // deterministically without having to occupy dozens of ports.
+    await assert.rejects(
+      () => bindDashboard(server, { port: busy.port, explicit: false }, { span: 1 }),
+      (e) => {
+        assert.match(e.message, /no free port/, "the exhausted-range error explains the failure");
+        assert.ok(e.message.includes(`${busy.port}-${busy.port}`), "the error names the range it scanned");
+        return true;
+      },
+      "an all-busy scan range is fatal",
+    );
+  } finally {
+    await new Promise((r) => server.close(r));
+    await busy.close();
+  }
+}
+
+// --- #413 Criterion 6: every criterion above has exactly one test named after
+// it. The plan file carried six #413 acceptance criteria; this counts its own
+// `#413 Criterion N` markers and proves there is exactly one per criterion, 1..6.
+// It counts markers in THIS file only — never reads the plan file at runtime. --
+{
+  const CRITERIA_COUNT = 6;
+  const selfText = readFileSync(fileURLToPath(import.meta.url), "utf8");
+  const markers = [...selfText.matchAll(/^\/\/ --- #413 Criterion (\d+):/gim)].map((m) => Number(m[1]));
+  const unique = new Set(markers);
+  assert.equal(markers.length, unique.size, "each #413 criterion tested exactly once (no duplicate markers)");
+  assert.equal(markers.length, CRITERIA_COUNT, `one test per #413 acceptance criterion (${CRITERIA_COUNT})`);
+  for (let n = 1; n <= CRITERIA_COUNT; n++) assert.ok(unique.has(n), `#413 criterion ${n} has a test`);
 }
 
 console.log("PASS herd-ui.test.mjs");
