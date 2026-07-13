@@ -567,9 +567,9 @@ async function runCli(argv) {
   // module-not-found error. Dynamically import the implementation so a missing
   // `herd` profile is caught here with one message, not surfaced by Node's
   // static-import resolver.
-  let ghJson, ratchetPaths, runLoop, pollOnce, scopedRun, dispatchOne, surveyReady, monitorOnce, verifyOnce, reviewOnce, retentionOnce;
+  let ghJson, ghConditional, ratchetPaths, runLoop, pollOnce, scopedRun, dispatchOne, surveyReady, monitorOnce, verifyOnce, reviewOnce, retentionOnce;
   try {
-    ({ ghJson, ratchetPaths, runLoop, pollOnce, scopedRun } = await import("./herd-survey.mjs"));
+    ({ ghJson, ghConditional, ratchetPaths, runLoop, pollOnce, scopedRun } = await import("./herd-survey.mjs"));
     ({ dispatchOne, surveyReady } = await import("./herd-dispatch.mjs"));
     ({ monitorOnce } = await import("./herd-monitor.mjs"));
     ({ verifyOnce } = await import("./herd-verify.mjs"));
@@ -656,12 +656,21 @@ async function runCli(argv) {
       process.once("SIGINT", () => releaseAndExit("SIGINT"));
       process.once("SIGTERM", () => releaseAndExit("SIGTERM"));
     }
+    // Per-endpoint ETag cache, in-memory for this supervisor process. It lives
+    // across ticks (the first tick per endpoint is unconditional) so a poll whose
+    // upstream is unchanged returns 304s and short-circuits.
+    const surveyEtags = {};
     const step = async (o) => {
       const config = resolveConfig(o.log);
       const maxWorkers = maxIdx >= 0 && Number.isInteger(Number(argv[maxIdx + 1]))
         ? Number(argv[maxIdx + 1])
         : config.maxWorkers;
-      await pollOnce({ ...o, config });
+      const poll = await pollOnce({ ...o, config, ghc: ghConditional, etags: surveyEtags });
+      // When every polled endpoint returned 304 the tick skips the reconcile,
+      // verify, and review passes — they have no new reality to act on and each
+      // costs GitHub API calls. Monitor/retention/dispatch below are local- and
+      // liveness-driven, so they still run (a worker may have exited locally).
+      const upstreamChanged = !poll?.skipped;
       // Monitor exited workers (verify / resume / escalate) before dispatching,
       // so a concluded worker frees a slot this same pass. Skipped on --dry-run,
       // which must never spawn (a resume is a spawn).
@@ -669,16 +678,18 @@ async function runCli(argv) {
         await monitorOnce({ ...o, config }).catch((e) => {
           o.log(`herd: monitor failed: ${e.message}; continuing to dispatch.`);
         });
-        // Verify PRs the monitor just handed off (may dispatch a rework, so it
-        // is a spawn — skipped on --dry-run alongside the monitor).
-        await verifyOnce({ ...o, config }).catch((e) => {
-          o.log(`herd: verify failed: ${e.message}; continuing to dispatch.`);
-        });
-        // React to review verdicts on ready-for-review PRs (a CHANGES_REQUESTED
-        // review dispatches a rework, so it too is a spawn — skipped on --dry-run).
-        await reviewOnce({ ...o, config }).catch((e) => {
-          o.log(`herd: review failed: ${e.message}; continuing to dispatch.`);
-        });
+        if (upstreamChanged) {
+          // Verify PRs the monitor just handed off (may dispatch a rework, so it
+          // is a spawn — skipped on --dry-run alongside the monitor).
+          await verifyOnce({ ...o, config }).catch((e) => {
+            o.log(`herd: verify failed: ${e.message}; continuing to dispatch.`);
+          });
+          // React to review verdicts on ready-for-review PRs (a CHANGES_REQUESTED
+          // review dispatches a rework, so it too is a spawn — skipped on --dry-run).
+          await reviewOnce({ ...o, config }).catch((e) => {
+            o.log(`herd: review failed: ${e.message}; continuing to dispatch.`);
+          });
+        }
       }
       // Bound events.jsonl / herd-escalations.md growth (mirrors pruneLogs, which
       // pollOnce runs); it only reads and rewrites local files, so — like log
