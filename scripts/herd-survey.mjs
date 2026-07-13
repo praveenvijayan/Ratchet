@@ -254,16 +254,40 @@ export function appendHerdEvent(path = EVENTS_FILE, entry, warn = console.warn) 
   }
 }
 
+// Normalize the optional claim-branch->PR-number map into a Map. Accepts a Map,
+// a plain object (headRef -> number), or nothing (legacy callers pass none).
+function normalizePrByHead(prByHead) {
+  if (prByHead instanceof Map) return prByHead;
+  if (prByHead && typeof prByHead === "object") {
+    return new Map(Object.entries(prByHead).map(([k, v]) => [k, Number(v)]));
+  }
+  return new Map();
+}
+
 // Reconcile the state file against reality instead of trusting it: an entry
 // whose tracked PR is no longer open (merged or closed), or whose worker pid is
-// no longer alive, is cleared and flagged. Returns the reconciled state plus
-// the list of changes (each an escalation candidate).
+// no longer alive, is cleared and flagged. Returns the reconciled state, the
+// list of `changes` (each an escalation candidate), and the list of `adopted`
+// entries (finished workers whose PR the supervisor rescued — see below).
+//
+// Adoption resolves the supervisor-downtime race: if the supervisor is down
+// when a worker opens its PR and exits, only the monitor's exit handler would
+// have recorded `entry.pr`, so on restart the entry has a dead pid and
+// `pr: null`. Flagging it `dead` would escalate a finished worker and prune its
+// open PR out of herd tracking. When `reality.prByHead` is supplied and a dead
+// entry with no tracked PR has an open PR on its claim branch `agent/issue-<N>`
+// — the same claim-branch lookup the monitor's `classifyExit` performs — adopt
+// it into verification instead: status `awaiting-verification`, `pr` set to that
+// PR, no `dead` change or escalation. Legacy callers that pass no `prByHead`
+// keep the exact previous behavior.
 export function reconcileState(state, reality, isAlive) {
   const openPrs = reality.openPrNumbers instanceof Set
     ? reality.openPrNumbers
     : new Set((reality.openPrNumbers || []).map(Number));
+  const prByHead = normalizePrByHead(reality.prByHead);
   const next = {};
   const changes = [];
+  const adopted = [];
   for (const [issue, entry] of Object.entries(state || {})) {
     const e = { ...entry };
     if (e.pr != null && !openPrs.has(Number(e.pr))) {
@@ -280,22 +304,36 @@ export function reconcileState(state, reality, isAlive) {
       e.status = "pr-concluded";
       e.pid = null;
     } else if (e.pid != null && !isAlive(e.pid)) {
-      changes.push({
-        issue,
-        what: `worker pid ${e.pid} is not alive`,
-        adapter: e.adapter,
-        pid: e.pid,
-        logFile: e.logFile || null,
-        attempts: e.attempts,
-        pr: e.pr,
-        status: "dead",
-      });
-      e.status = "dead";
-      e.pid = null;
+      const orphanPr = e.pr == null ? prByHead.get(`agent/issue-${issue}`) : undefined;
+      if (orphanPr != null) {
+        e.status = "awaiting-verification";
+        e.pr = Number(orphanPr);
+        e.pid = null;
+        adopted.push({
+          issue,
+          pr: Number(orphanPr),
+          adapter: e.adapter,
+          logFile: e.logFile || null,
+          attempts: e.attempts,
+        });
+      } else {
+        changes.push({
+          issue,
+          what: `worker pid ${e.pid} is not alive`,
+          adapter: e.adapter,
+          pid: e.pid,
+          logFile: e.logFile || null,
+          attempts: e.attempts,
+          pr: e.pr,
+          status: "dead",
+        });
+        e.status = "dead";
+        e.pid = null;
+      }
     }
     next[issue] = e;
   }
-  return { state: next, changes };
+  return { state: next, changes, adopted };
 }
 
 // A human-readable escalation block: timestamp, issue, what happened, the log
@@ -415,7 +453,27 @@ export async function pollOnce({
   }
 
   const openPrNumbers = new Set(reality.openPrs.map((p) => Number(p.number)));
-  const { state, changes } = reconcileState(readState(statePath), { openPrNumbers }, isAlive);
+  const prByHead = new Map(reality.openPrs.map((p) => [p.headRefName, Number(p.number)]));
+  const { state, changes, adopted } = reconcileState(readState(statePath), { openPrNumbers, prByHead }, isAlive);
+
+  // A finished worker whose PR the supervisor missed (down during its exit) is
+  // adopted into verification rather than flagged dead and pruned. Log exactly
+  // one pr-detected event per adoption — the same signal the monitor's
+  // classifyExit emits — so the verify stage and the dashboard both see it.
+  for (const a of adopted) {
+    appendHerdEvent(eventsPath, {
+      now: stamp,
+      event: "pr-detected",
+      issue: a.issue,
+      adapter: a.adapter,
+      pid: null,
+      logFile: a.logFile,
+      attempts: a.attempts,
+      pr: a.pr,
+      status: "awaiting-verification",
+    }, log);
+  }
+
   for (const c of changes) {
     appendEscalation(escalationsPath, {
       now: stamp,
@@ -570,6 +628,7 @@ export async function pollOnce({
     inProgress: reality.inProgress.length,
     openPrs: openPrNumbers.size,
     reconciled: changes.length,
+    adopted: adopted.length,
     pruned,
     terminalPruned,
     staleEscalated,
