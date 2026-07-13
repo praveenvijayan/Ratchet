@@ -93,13 +93,13 @@ inTempDir(() => {
   );
 });
 
-// Criterion 4: omitted optional fields default to maxWorkers:3, pollSeconds:60,
+// Criterion 4: omitted optional fields default to maxWorkers:3, pollSeconds:15,
 // reworkCap:2, logDir:".ratchet/logs".
 {
   const cfg = normalizeConfig({ adapters: { a: { launch: ["a"] } }, routing: { default: "a" } });
   assert.deepEqual(
     { m: cfg.maxWorkers, p: cfg.pollSeconds, r: cfg.reworkCap, l: cfg.logDir },
-    { m: 3, p: 60, r: 2, l: ".ratchet/logs" },
+    { m: 3, p: 15, r: 2, l: ".ratchet/logs" },
     "omitted fields fall back to the documented defaults",
   );
   assert.deepEqual(
