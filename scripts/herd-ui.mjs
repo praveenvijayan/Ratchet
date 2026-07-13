@@ -1404,8 +1404,13 @@ export function listenOrFail(server, port) {
   return new Promise((resolve, reject) => {
     const onError = (e) => {
       server.removeListener("listening", onListening);
-      if (e.code === "EADDRINUSE") reject(new Error(`herd-ui: port ${port} is already in use.`));
-      else reject(e);
+      if (e.code === "EADDRINUSE") {
+        // Keep the code on the rejected error so bindDashboard can tell a port
+        // clash (retry the next port) from any other listen failure (fatal).
+        const err = new Error(`herd-ui: port ${port} is already in use.`);
+        err.code = "EADDRINUSE";
+        reject(err);
+      } else reject(e);
     };
     const onListening = () => {
       server.removeListener("error", onError);
@@ -1417,22 +1422,49 @@ export function listenOrFail(server, port) {
   });
 }
 
-// Parse `--port <n>`; falls back to DEFAULT_PORT when absent or not a positive
-// integer (a bad flag never crashes the launch — it uses the default).
+// How many ports bindDashboard scans upward from the default before giving up,
+// so two herds in different repos each grab an adjacent free port instead of
+// the second one dying on "port already in use".
+export const PORT_SCAN_SPAN = 64;
+
+// Parse `--port <n>` into { port, explicit }. `explicit` is true only when the
+// operator passed a valid non-negative integer — that pins the port and makes a
+// clash fatal. Absent or bad flag yields { DEFAULT_PORT, explicit:false }, which
+// lets bindDashboard auto-scan for a free port (a bad flag never crashes the
+// launch — it falls back to the scanning default).
 export function parsePort(argv) {
   const i = argv.indexOf("--port");
   if (i >= 0) {
     const n = Number(argv[i + 1]);
-    if (Number.isInteger(n) && n >= 0) return n;
+    if (Number.isInteger(n) && n >= 0) return { port: n, explicit: true };
   }
-  return DEFAULT_PORT;
+  return { port: DEFAULT_PORT, explicit: false };
+}
+
+// Bind `server`, resolving to the actually bound port. When the port was pinned
+// (`explicit`), a clash is fatal — listenOrFail's "port N is already in use"
+// error propagates, never a silent fallback. Otherwise it scans up to `span`
+// consecutive ports from `port` and binds the first free one; if every port in
+// the range is busy it throws naming the range it tried.
+export async function bindDashboard(server, { port, explicit }, { span = PORT_SCAN_SPAN } = {}) {
+  if (explicit) return listenOrFail(server, port);
+  const last = port + span - 1;
+  for (let p = port; p <= last; p++) {
+    try {
+      return await listenOrFail(server, p);
+    } catch (e) {
+      if (e.code === "EADDRINUSE") continue;
+      throw e;
+    }
+  }
+  throw new Error(`herd-ui: no free port in range ${port}-${last}.`);
 }
 
 // The testable entrypoint: resolve config + repo slug, build the server, bind
 // it, and announce the URL. Returns the server and the bound port. Throws (via
 // listenOrFail) on a port clash so the CLI wrapper can exit non-zero.
 export async function run(argv, { log = console.log, cwd = process.cwd() } = {}) {
-  const port = parsePort(argv);
+  const spec = parsePort(argv);
   // Anchor the dashboard's files at the repo root, not the cwd, so it renders the
   // supervisor's real state from any subdirectory — and throws (caught by the CLI
   // guard below into a non-zero exit) rather than an empty dashboard when run
@@ -1448,7 +1480,7 @@ export async function run(argv, { log = console.log, cwd = process.cwd() } = {})
   const projectName = resolveProjectName({ repoSlug, root });
   const mascotsDir = join(root, "mascots");
   const server = createDashboardServer({ statePath, eventsPath, escalationsPath, resolutionsPath, routingPath, config, configPath, repoSlug, projectName, notify: createNotifier(), mascotsDir });
-  const bound = await listenOrFail(server, port);
+  const bound = await bindDashboard(server, spec);
   log(`Herd dashboard on http://localhost:${bound}  (Ctrl-C to stop)`);
   return { server, port: bound };
 }
