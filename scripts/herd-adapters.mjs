@@ -88,6 +88,46 @@ export function adapterAvailability(adapter, { env = process.env, onPath = execu
   return { available: true, reason: null };
 }
 
+// ── Adapter circuit breaker (issue #428) ────────────────────────────────────
+// A misconfigured adapter can fail identically every dispatch — exit without
+// ever claiming, or die within the claim window after claiming — yet round-robin
+// keeps routing to it, burning a full claim timeout each try. Track consecutive
+// claim failures per adapter and, once an adapter trips `adapterFailureThreshold`
+// of them, skip it in routing for the rest of the run. Framework-pure: state is
+// keyed by the adapter's *config name* only — never a CLI, model, or vendor
+// string — so the breaker knows nothing about which agent it is skipping.
+
+// Fresh breaker state: consecutive-failure counts, the set of tripped adapters,
+// and per-adapter/per-route "already escalated once" marks so a degraded adapter
+// or an exhausted route is surfaced a single time, not re-reported every tick.
+export function createBreaker() {
+  return { failures: {}, tripped: {}, degradedEscalated: {}, routeEscalated: {} };
+}
+
+// Record one dispatch outcome for `adapter`. A success (`ok` true — the worker
+// claimed and was still alive at the end of its claim window) resets the count.
+// A failure increments it; at `threshold` consecutive failures the adapter trips.
+// Returns { tripped, justTripped, failures } so the caller escalates a *fresh*
+// trip exactly once. A null adapter (no adapter was resolved) is a no-op.
+export function recordAdapterOutcome(breaker, adapter, ok, threshold) {
+  if (!breaker || !adapter) return { tripped: false, justTripped: false, failures: 0 };
+  if (ok) {
+    breaker.failures[adapter] = 0;
+    breaker.tripped[adapter] = false;
+    return { tripped: false, justTripped: false, failures: 0 };
+  }
+  const failures = (breaker.failures[adapter] || 0) + 1;
+  breaker.failures[adapter] = failures;
+  const wasTripped = !!breaker.tripped[adapter];
+  const tripped = failures >= threshold;
+  breaker.tripped[adapter] = tripped;
+  return { tripped, justTripped: tripped && !wasTripped, failures };
+}
+
+export function isAdapterTripped(breaker, adapter) {
+  return !!(breaker && breaker.tripped && breaker.tripped[adapter]);
+}
+
 // Resolve which adapter handles an issue given its labels, honoring availability
 // and the route's policy. First label (in order) with a routing entry picks its
 // route, else the default. `failover` (default): first available wins.
@@ -96,7 +136,7 @@ export function adapterAvailability(adapter, { env = process.env, onPath = execu
 // { name, adapter, source, route, tried, policy, cursorKey, nextCursor }; when
 // none is available name/adapter are null and `tried` lists each with why.
 export function resolveAdapter(config, labels = [], deps = {}) {
-  const { env = process.env, onPath = executableOnPath, cursors = {} } = deps;
+  const { env = process.env, onPath = executableOnPath, cursors = {}, breaker = null } = deps;
   // A route may be a list, a bare name, or an un-normalized `{ adapters, policy }`
   // object; coerce here so it resolves identically to a normalized one.
   const isRouteObject = (r) => r && typeof r === "object" && !Array.isArray(r) && Array.isArray(r.adapters);
@@ -126,6 +166,13 @@ export function resolveAdapter(config, labels = [], deps = {}) {
       : route.map((_, i) => i);
   for (const idx of order) {
     const name = route[idx];
+    // A tripped adapter is skipped before its (possibly still-passing) static
+    // availability is even checked: the breaker caught a *runtime* failure the
+    // availability probe cannot see, so it must not be routed to again this run.
+    if (isAdapterTripped(breaker, name)) {
+      tried.push({ name, reason: `circuit breaker open after ${breaker.failures[name]} consecutive claim failures`, tripped: true });
+      continue;
+    }
     const adapter = config.adapters[name];
     const { available, reason } = adapterAvailability(adapter, { env, onPath });
     if (available)

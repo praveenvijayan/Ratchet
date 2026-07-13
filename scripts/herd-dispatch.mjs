@@ -14,7 +14,7 @@
 import { mkdirSync, openSync, closeSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { spawn } from "node:child_process";
-import { resolveAdapter, substitute, extractUsage } from "./herd-adapters.mjs";
+import { resolveAdapter, substitute, extractUsage, recordAdapterOutcome, createBreaker } from "./herd-adapters.mjs";
 import {
   STATE_FILE,
   ESCALATIONS_FILE,
@@ -231,6 +231,28 @@ export async function waitForClaim({
 // it returns the plan without spawning. After spawning it serializes on the
 // claim window; a timeout kills the worker, marks it dispatch-failed, and
 // escalates.
+// Escalate a fully circuit-broken route exactly once per run (issue #428,
+// criterion 4). Every adapter the route resolves to has tripped, so no issue on
+// it can be dispatched; list each adapter with its consecutive-failure count so
+// the operator sees the whole picture, then never re-escalate this route —
+// affected issues simply wait rather than the supervisor spinning on retries.
+function escalateRouteExhausted(breaker, res, issueNumber, { escalationsPath, eventsPath, now, log }) {
+  if (breaker.routeEscalated[res.source]) return;
+  breaker.routeEscalated[res.source] = true;
+  const counts = res.route.map((name) => `${name} (${breaker.failures[name] || 0} consecutive claim failures)`).join(", ");
+  appendEscalation(escalationsPath, {
+    now: now(),
+    issue: issueNumber,
+    what: `every adapter in route ${res.source} [${res.route.join(", ")}] has tripped the circuit breaker — ${counts}; no worker can be dispatched for issues on this route, so dispatch is stopped for the rest of this run`,
+    adapter: null,
+    pid: null,
+    logFile: null,
+    attempts: 1,
+    status: "dispatch-failed",
+    action: "fix or replace the adapters in this route in .ratchet/herd.json, then restart the herd to re-enable dispatch",
+  }, { eventsPath, warn: log });
+}
+
 export async function dispatchOne(opts) {
   const {
     config,
@@ -264,6 +286,12 @@ export async function dispatchOne(opts) {
     // supervisor reacts without waiting for the next tick (plan 0173). Optional;
     // a listener throw is swallowed so it can never crash the worker-exit path.
     notifyExit = null,
+    // The circuit breaker shared across this run's dispatches (issue #428). The
+    // run entry (herd.mjs) creates one and threads it through every tick's
+    // supervisorStep, so a tripped adapter stays tripped for the rest of the run;
+    // a bare dispatchOne call (tests) defaults to a fresh, isolated breaker.
+    breaker = createBreaker(),
+    adapterFailureThreshold = config.adapterFailureThreshold ?? 2,
   } = opts;
 
   const state = readState(statePath);
@@ -273,12 +301,27 @@ export async function dispatchOne(opts) {
   // is unreachable even when explicitly named.
   const untracked = (ready || []).filter((i) => !(String(i.number) in state));
   const targetSet = targets == null ? null : new Set(targets);
-  const eligible = targetSet ? untracked.filter((i) => targetSet.has(i.number)) : untracked;
+  const candidates = targetSet ? untracked.filter((i) => targetSet.has(i.number)) : untracked;
+
+  const cursors = readRouting(routingPath);
+  // Drop candidates whose *entire* route is circuit-broken: routing has nothing
+  // available for them this run, so they are not dispatchable. Each such route is
+  // escalated once (breaker.routeEscalated), listing every adapter's failure
+  // count, then the affected issues simply wait — the supervisor never spins
+  // retrying a route it has already given up on (issue #428, criterion 4).
+  const eligible = [];
+  for (const i of candidates) {
+    const res = resolveAdapter(config, labelNames(i), { env, onPath, cursors, breaker });
+    if (res.name == null && res.tried.some((t) => t.tripped)) {
+      escalateRouteExhausted(breaker, res, i.number, { escalationsPath, eventsPath, now, log });
+      continue;
+    }
+    eligible.push(i);
+  }
   const issue = pickNext(eligible);
   if (!issue) return { dispatched: null, reason: "no-eligible-issue" };
 
-  const cursors = readRouting(routingPath);
-  const plan = buildDispatch(config, issue, { env, onPath, cursors });
+  const plan = buildDispatch(config, issue, { env, onPath, cursors, breaker });
 
   // No adapter in the resolved route is available: do not spawn. Record the
   // issue as dispatch-failed and escalate with the route and every adapter tried
@@ -320,6 +363,29 @@ export async function dispatchOne(opts) {
 
   const live = liveWorkers(state, isAlive);
   if (live >= maxWorkers) return { dispatched: null, reason: "at-capacity", live, maxWorkers };
+
+  // Feed this dispatch's outcome to the circuit breaker (issue #428). A failure
+  // is a worker that exits without claiming, dies within the claim window after
+  // claiming, or never spawns; a success is a live claim. When the failure that
+  // trips the adapter is the one just recorded, surface it once as degraded —
+  // subsequent failures on the same adapter return justTripped=false, so the
+  // degraded notice is never re-reported every tick (criterion 3).
+  const noteOutcome = (ok) => {
+    const r = recordAdapterOutcome(breaker, plan.adapter, ok, adapterFailureThreshold);
+    if (r.justTripped) {
+      appendEscalation(escalationsPath, {
+        now: now(),
+        issue: issue.number,
+        what: `adapter "${plan.adapter}" tripped the circuit breaker after ${r.failures} consecutive claim failures (a worker exited without claiming, or died within the claim window after claiming) — it is skipped for the rest of this run`,
+        adapter: plan.adapter,
+        pid: null,
+        logFile: plan.logFile,
+        attempts: 1,
+        status: "dispatch-failed",
+        action: "inspect this adapter's log and its launch/config in .ratchet/herd.json; restart the herd after fixing to re-enable the adapter",
+      }, { eventsPath, warn: log });
+    }
+  };
 
   // Commit to this dispatch: advance the route's round-robin cursor so the next
   // worker on the same route starts at the following adapter. Written before the
@@ -376,6 +442,7 @@ export async function dispatchOne(opts) {
       status: "dispatch-failed",
       action: "check the adapter's launch command in .ratchet/herd.json; the CLI may be missing from PATH or not executable",
     }, { eventsPath, warn: log });
+    noteOutcome(false);
     return { dispatched: issue.number, claimed: false, status: "dispatch-failed", spawnFailed: true };
   }
 
@@ -428,6 +495,10 @@ export async function dispatchOne(opts) {
         attempts: 1,
         status: "dispatched",
       }, log);
+      // The issue is genuinely claimed, but the worker died within its claim
+      // window right after claiming — the adapter is flaky, so this counts as a
+      // claim failure for the breaker even though the claim itself stands (#428).
+      noteOutcome(false);
       return { dispatched: issue.number, claimed: true, pid, adapter: plan.adapter };
     }
     const after = readState(statePath);
@@ -454,6 +525,7 @@ export async function dispatchOne(opts) {
       status: "dispatch-failed",
       action: "inspect the log for why the worker exited on startup; the adapter CLI may be crashing, misconfigured, or exiting before it can claim",
     }, { eventsPath, warn: log });
+    noteOutcome(false);
     return { dispatched: issue.number, claimed: false, status: "dispatch-failed", exited: true };
   }
 
@@ -505,8 +577,10 @@ export async function dispatchOne(opts) {
       status: "dispatch-failed",
       action,
     }, { eventsPath, warn: log });
+    noteOutcome(false);
     return { dispatched: issue.number, claimed: false, status: "dispatch-failed", staleRef: refLeft };
   }
+  noteOutcome(true);
   appendHerdEvent(eventsPath, {
     now: now(),
     event: "claim-detected",
