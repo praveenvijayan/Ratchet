@@ -567,9 +567,9 @@ async function runCli(argv) {
   // module-not-found error. Dynamically import the implementation so a missing
   // `herd` profile is caught here with one message, not surfaced by Node's
   // static-import resolver.
-  let ghJson, ratchetPaths, runLoop, pollOnce, scopedRun, dispatchOne, surveyReady, supervisorStep, monitorOnce, verifyOnce, reviewOnce, retentionOnce;
+  let ghJson, ghConditional, ratchetPaths, runLoop, pollOnce, scopedRun, dispatchOne, surveyReady, supervisorStep, monitorOnce, verifyOnce, reviewOnce, retentionOnce;
   try {
-    ({ ghJson, ratchetPaths, runLoop, pollOnce, scopedRun } = await import("./herd-survey.mjs"));
+    ({ ghJson, ghConditional, ratchetPaths, runLoop, pollOnce, scopedRun } = await import("./herd-survey.mjs"));
     ({ dispatchOne, surveyReady, supervisorStep } = await import("./herd-dispatch.mjs"));
     ({ monitorOnce } = await import("./herd-monitor.mjs"));
     ({ verifyOnce } = await import("./herd-verify.mjs"));
@@ -657,21 +657,27 @@ async function runCli(argv) {
       process.once("SIGTERM", () => releaseAndExit("SIGTERM"));
     }
     // A local worker exit registers here (via runLoop/scopedRun's onExitSignal)
-    // so the pass composed below can react immediately, dispatching the freed
-    // slot without waiting for the next tick (plan 0173). The registered handler
-    // becomes `notifyExit`, threaded into each dispatchOne so a worker's process
-    // exit fires it.
+    // so the pass composed below reacts immediately — reconciling the exit and
+    // dispatching the freed slot without waiting for the next tick (plan 0173).
+    // The registered handler becomes `notifyExit`, threaded into each dispatchOne
+    // so a worker's process exit fires it.
     let notifyExit = null;
     const onExitSignal = (fn) => {
       notifyExit = fn;
     };
-    // One kind-aware pass (plan 0173): supervisorStep runs pollOnce (heartbeat +
-    // survey/reconcile) and retention only on the periodic tick, then — every
-    // pass — reconciles exited workers / verifies / reacts to reviews and drains
-    // the dispatch queue. A scoped run hands `step` the *eligible* subset via
-    // o.targets; the open loop passes none, so it falls back to the parsed
-    // `targets` (null → the whole queue). --dry-run never spawns (monitor/verify/
-    // review/drain are skipped inside supervisorStep).
+    // Per-endpoint ETag cache, in-memory for this supervisor process. It lives
+    // across ticks (the first tick per endpoint is unconditional) so a poll whose
+    // upstream is unchanged returns 304s and short-circuits.
+    const surveyEtags = {};
+    // One kind-aware pass (plan 0173): on the periodic tick supervisorStep runs
+    // pollOnce (heartbeat + ETag-conditional survey/reconcile) and retention, and
+    // gates the upstream-driven verify/review on whether that survey saw a change;
+    // then — every pass — it reconciles exited workers (monitor) and drains the
+    // dispatch queue back-to-back. An event pass (a local worker exit) stays lean:
+    // monitor + dispatch only, no heartbeat and no upstream verify/review. A
+    // scoped run hands `step` the eligible subset via o.targets; the open loop
+    // passes none, falling back to the parsed `targets` (null → whole queue).
+    // --dry-run never spawns (monitor/verify/review/drain skipped inside step).
     const step = async (o) => {
       const config = resolveConfig(o.log);
       const maxWorkers = maxIdx >= 0 && Number.isInteger(Number(argv[maxIdx + 1]))
@@ -685,6 +691,8 @@ async function runCli(argv) {
         targets: o.targets ?? targets,
         claimTimeoutMs: config.claimTimeoutSeconds * 1000,
         notifyExit,
+        ghc: ghConditional,
+        etags: surveyEtags,
         pollOnce,
         surveyReady,
         dispatchOne,

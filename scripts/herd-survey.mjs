@@ -85,6 +85,11 @@ export const HERD_EVENT_TYPES = Object.freeze([
   // dashboard can tell "still polling" apart from "UI server merely up". Unlike
   // every other event it is not about an issue, so it carries no `issue` field.
   "heartbeat",
+  // The conditional-survey fast path could not use an ETag this tick — either a
+  // response carried no ETag header or the conditional `gh` call failed — so the
+  // supervisor fell back to a full unconditional survey. Logged (not silent) so
+  // an operator can see when the 304 short-circuit is not paying off.
+  "survey-fallback",
   // A supervisor pass (tick or event-triggered) threw and was caught: it is
   // logged here rather than crashing the loop, so a failed reactive pass is
   // visible and the next periodic tick reconciles (plan 0173). No `issue` field.
@@ -195,6 +200,108 @@ export async function surveyReality(gh) {
     gh(["pr", "list", "--state", "open", "--json", "number,headRefName", "--limit", "200"]),
   ]);
   return { ready, inProgress, openPrs };
+}
+
+// The endpoints the survey polls, in a fixed order. Each carries a stable `key`
+// (the in-memory ETag cache is keyed by it), a REST `path` for conditional
+// `gh api` requests, and a `map` that normalizes the raw REST body to the exact
+// shape `surveyReality` returns — so the downstream reconcile logic is identical
+// whether the data arrived over the conditional fast path or the fallback.
+export const SURVEY_ENDPOINTS = Object.freeze([
+  {
+    key: "ready",
+    path: "repos/{owner}/{repo}/issues?state=open&labels=state:ready&per_page=200",
+    map: (rows) => (rows || []).map((r) => ({ number: r.number, title: r.title })),
+  },
+  {
+    key: "inProgress",
+    path: "repos/{owner}/{repo}/issues?state=open&labels=state:in-progress&per_page=200",
+    map: (rows) => (rows || []).map((r) => ({ number: r.number, title: r.title })),
+  },
+  {
+    key: "openPrs",
+    path: "repos/{owner}/{repo}/pulls?state=open&per_page=200",
+    map: (rows) => (rows || []).map((p) => ({ number: p.number, headRefName: p.head?.ref })),
+  },
+]);
+
+// Default conditional caller: `gh api --include` with an optional If-None-Match
+// header, parsed into { status, etag, body }. A 304 comes back with no body; a
+// 200 returns the parsed JSON. Injected in tests so nothing hits the network —
+// exactly like `ghJson`, this default is exercised only against the live API.
+export async function ghConditional(path, etag) {
+  const args = ["api", "--include"];
+  if (etag) args.push("-H", `If-None-Match: ${etag}`);
+  args.push(path);
+  const { stdout } = await pexec("gh", args, { maxBuffer: 16 * 1024 * 1024 });
+  const text = String(stdout);
+  const sep = text.includes("\r\n\r\n") ? "\r\n\r\n" : "\n\n";
+  const cut = text.indexOf(sep);
+  const head = cut >= 0 ? text.slice(0, cut) : text;
+  const bodyText = cut >= 0 ? text.slice(cut + sep.length) : "";
+  const lines = head.split(/\r?\n/);
+  const statusMatch = /\b(\d{3})\b/.exec(lines[0] || "");
+  const status = statusMatch ? Number(statusMatch[1]) : 0;
+  let responseEtag = null;
+  for (const line of lines.slice(1)) {
+    const m = /^etag:\s*(.+)$/i.exec(line.trim());
+    if (m) { responseEtag = m[1].trim(); break; }
+  }
+  const body = status === 200 && bodyText.trim() ? JSON.parse(bodyText) : null;
+  return { status, etag: responseEtag, body };
+}
+
+// Conditional survey: probe each endpoint with its cached ETag. `etags` is the
+// in-memory cache the supervisor keeps across ticks — one entry per endpoint key
+// ({ etag, body }); the first tick per endpoint is unconditional (no cache).
+//
+//   - Every endpoint 304  -> { changed: false }: nothing upstream moved, so the
+//     caller skips the whole reconcile/verify/review pass and writes no state.
+//   - Any endpoint 200    -> { changed: true, reality }: the full pass runs. A
+//     200 body is fresh and its ETag replaces the old one; a 304 body is reused
+//     from cache (a 304 *means* the body is byte-identical to last time).
+//   - A gh failure, or a 200 with no ETag header, falls back to a full
+//     unconditional survey and logs one `survey-fallback` herd event — never a
+//     crash, never a silently skipped pass.
+export async function surveyConditional({ ghc, gh, etags, eventsPath, now, log = () => {} }) {
+  try {
+    const results = [];
+    for (const ep of SURVEY_ENDPOINTS) {
+      const cached = etags[ep.key];
+      results.push({ ep, res: await ghc(ep.path, cached?.etag ?? null) });
+    }
+    let changed = false;
+    let missingEtag = false;
+    for (const { ep, res } of results) {
+      // A 304 backed by a cached entry is genuinely unchanged: keep the cache.
+      if (res.status === 304 && etags[ep.key]) continue;
+      // Anything else (a 200, or a 304 with no prior cache) is a real body.
+      changed = true;
+      etags[ep.key] = { etag: res.etag ?? null, body: ep.map(res.body) };
+      if (!res.etag) missingEtag = true;
+    }
+    if (missingEtag) {
+      appendHerdEvent(eventsPath, { now, event: "survey-fallback", status: "no-etag" }, () => {});
+      log("herd: survey response carried no ETag; next tick will be unconditional.");
+    }
+    if (!changed) return { changed: false };
+    return {
+      changed: true,
+      reality: {
+        ready: etags.ready.body,
+        inProgress: etags.inProgress.body,
+        openPrs: etags.openPrs.body,
+      },
+    };
+  } catch (e) {
+    // The conditional call itself failed: drop the whole cache so the next tick
+    // re-primes ETags cleanly, log the fallback, and survey unconditionally via
+    // the plain `gh` boundary — the pass runs, it just costs full rate limit.
+    for (const ep of SURVEY_ENDPOINTS) delete etags[ep.key];
+    appendHerdEvent(eventsPath, { now, event: "survey-fallback", status: "gh-error" }, () => {});
+    log(`herd: conditional survey failed (${e.message}); falling back to a full survey.`);
+    return { changed: true, reality: await surveyReality(gh) };
+  }
 }
 
 // Read the state file, tolerating a missing or corrupt file by returning {} —
@@ -427,6 +534,8 @@ export function pruneLogs({ logDir, retentionDays, state, isAlive = isPidAlive, 
 // Injectable deps keep it fully offline in tests.
 export async function pollOnce({
   gh,
+  ghc = null,
+  etags = null,
   isAlive = isPidAlive,
   now,
   statePath = STATE_FILE,
@@ -449,11 +558,31 @@ export async function pollOnce({
   appendHerdEvent(eventsPath, { now: stamp, event: "heartbeat" }, () => {});
 
   let reality;
-  try {
-    reality = await surveyReality(gh);
-  } catch (e) {
-    log(`herd: gh survey failed: ${e.message}; retrying next poll.`);
-    return { ok: false };
+  if (ghc && etags) {
+    // Conditional fast path: probe each endpoint with its cached ETag. When
+    // every endpoint returns 304 the tick short-circuits here — no reconcile, no
+    // state write, no downstream verify/review (the caller keys off `skipped`),
+    // and the pass costs zero rate limit. Any 200 (or a fallback) yields the
+    // full reality below, exactly as an unconditional survey would.
+    let survey;
+    try {
+      survey = await surveyConditional({ ghc, gh, etags, eventsPath, now: stamp, log });
+    } catch (e) {
+      log(`herd: gh survey failed: ${e.message}; retrying next poll.`);
+      return { ok: false };
+    }
+    if (!survey.changed) {
+      log("herd: poll — no upstream changes (all endpoints 304); skipping survey/verify/review.");
+      return { ok: true, skipped: true };
+    }
+    reality = survey.reality;
+  } else {
+    try {
+      reality = await surveyReality(gh);
+    } catch (e) {
+      log(`herd: gh survey failed: ${e.message}; retrying next poll.`);
+      return { ok: false };
+    }
   }
 
   const openPrNumbers = new Set(reality.openPrs.map((p) => Number(p.number)));

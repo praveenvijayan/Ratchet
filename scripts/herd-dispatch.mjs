@@ -524,25 +524,28 @@ export async function dispatchOne(opts) {
 
 // One supervisor pass, kind-aware (plan 0173). It changes *when* the existing
 // passes run, never *what* they do. `kind: "tick"` is the periodic pass: it
-// emits the heartbeat and full survey/reconcile (pollOnce) and the periodic
-// retention. `kind: "event"` is a lean, locally-triggered reactive pass (a
-// worker exit) that skips the heartbeat entirely — so event-driven passes
-// neither add nor suppress heartbeats. Both kinds then reconcile exited workers
-// / verify handed-off PRs / react to reviews (the passes that free capacity),
-// then DRAIN the dispatch queue: dispatchOne is called back-to-back until it
-// reports at-capacity or no eligible issue, so N scoped targets launch as each
-// preceding claim is observed rather than one worker per tick. Each dispatchOne
-// serializes its own claim window, and this drain is strictly sequential, so it
-// never opens two claim windows at once. Every stage is injected (defaulting to
-// this module's dispatchOne/surveyReady) so the whole pass runs offline.
+// emits the heartbeat and the ETag-conditional survey/reconcile (pollOnce, which
+// returns `{ skipped }` when every endpoint 304'd), runs the periodic retention,
+// and — only when the survey saw an upstream change — the upstream-driven verify
+// and review passes. `kind: "event"` is a lean, locally-triggered reactive pass
+// (a worker exit): it skips pollOnce entirely (so event passes neither add nor
+// suppress heartbeats) and the upstream verify/review, running only the local
+// monitor reconcile. Both kinds then reconcile exited workers (monitor, which is
+// pid-liveness-driven, not upstream) and DRAIN the dispatch queue: dispatchOne is
+// called back-to-back until it reports at-capacity or no eligible issue, so N
+// scoped targets launch as each preceding claim is observed rather than one
+// worker per tick. Each dispatchOne serializes its own claim window and this
+// drain is strictly sequential, so it never opens two claim windows at once.
+// Every stage is injected (defaulting to this module's dispatchOne/surveyReady)
+// so the whole pass runs offline.
 export async function supervisorStep(o) {
   const {
     kind = "tick",
     gh,
-    config,
     dryRun = false,
     targets = null,
     log = console.log,
+    config,
     maxWorkers = config?.maxWorkers,
     pollOnce = null,
     monitorOnce = null,
@@ -552,21 +555,30 @@ export async function supervisorStep(o) {
     surveyReady: survey = surveyReady,
     dispatchOne: dispatch = dispatchOne,
   } = o;
-  if (kind === "tick") {
-    if (pollOnce) await pollOnce(o);
-    if (retentionOnce)
-      await retentionOnce(o).catch((e) => log(`herd: retention failed: ${e.message}; continuing.`));
+  // Only the periodic tick surveys upstream (pollOnce) and heartbeats. An event
+  // pass never surveys, so it treats upstream as unchanged and skips verify/review.
+  let upstreamChanged = false;
+  if (kind === "tick" && pollOnce) {
+    const poll = await pollOnce(o);
+    upstreamChanged = !poll?.skipped;
   }
-  // A resume/rework is a spawn, so the monitor/verify/review passes never run on
-  // --dry-run — same contract the pre-0173 loop held.
+  // A resume/rework/verify is a spawn or GitHub write, so none run on --dry-run.
   if (!dryRun) {
+    // Monitor reconciles exited workers off pid liveness (no upstream needed), so
+    // it runs on every pass — the core reaction to a worker-exit event.
     if (monitorOnce)
       await monitorOnce(o).catch((e) => log(`herd: monitor failed: ${e.message}; continuing to dispatch.`));
-    if (verifyOnce)
-      await verifyOnce(o).catch((e) => log(`herd: verify failed: ${e.message}; continuing to dispatch.`));
-    if (reviewOnce)
-      await reviewOnce(o).catch((e) => log(`herd: review failed: ${e.message}; continuing to dispatch.`));
+    if (upstreamChanged) {
+      if (verifyOnce)
+        await verifyOnce(o).catch((e) => log(`herd: verify failed: ${e.message}; continuing to dispatch.`));
+      if (reviewOnce)
+        await reviewOnce(o).catch((e) => log(`herd: review failed: ${e.message}; continuing to dispatch.`));
+    }
   }
+  // Retention is tick-cadence local file cleanup (events.jsonl / escalations);
+  // it runs every tick, dry-run included, and stays off the lean event path.
+  if (kind === "tick" && retentionOnce)
+    await retentionOnce(o).catch((e) => log(`herd: retention failed: ${e.message}; continuing.`));
   const ready = await survey(gh).catch((e) => {
     log(`herd: dispatch survey failed: ${e.message}; skipping dispatch this poll.`);
     return [];
@@ -581,5 +593,5 @@ export async function supervisorStep(o) {
     // (claimed or dispatch-failed both free the drain to try the next issue) and
     // stops the moment dispatchOne reports at-capacity or no-eligible-issue.
   } while (!dryRun && r && r.dispatched != null);
-  return { kind, ready: ready.length, launched };
+  return { kind, ready: ready.length, launched, upstreamChanged };
 }
