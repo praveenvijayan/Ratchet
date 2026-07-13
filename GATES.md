@@ -82,6 +82,7 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 | 4y13  | test: herd-ui-mascot-deck-live  | `node scripts/herd-ui-mascot-deck-live.test.mjs` | exit 0 |
 | 4y14  | test: herd-ui-deck-card-issue-status | `node scripts/herd-ui-deck-card-issue-status.test.mjs` | exit 0 |
 | 4y11  | test: herd-ui-vinyl-deck        | `node scripts/herd-ui-vinyl-deck.test.mjs`        | exit 0 |
+| 4y18  | test: herd-ui-mascot-stale-adapter | `node scripts/herd-ui-mascot-stale-adapter.test.mjs` | exit 0 |
 | 4y12  | test: herd-mascots-install      | `node scripts/herd-mascots-install.test.mjs`   | exit 0 |
 | 4y8   | test: herd-notify               | `node scripts/herd-notify.test.mjs`               | exit 0 |
 | 4z1   | test: state-label-exclusivity   | `node scripts/state-label-exclusivity.test.mjs`   | exit 0 |
