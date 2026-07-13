@@ -461,6 +461,10 @@
       "class": "excluded"
     },
     {
+      "path": "scripts/herd-escalation-dedup.test.mjs",
+      "class": "excluded"
+    },
+    {
       "path": "scripts/herd-survey.test.mjs",
       "class": "excluded"
     },

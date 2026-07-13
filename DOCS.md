@@ -220,6 +220,7 @@ scripts/
   herd-adapters.test.mjs        Regression test for the herd-adapters leaf extraction
   herd-survey.mjs               ratchet-herd survey/reconcile poll loop
   herd-survey.test.mjs          Regression test for herd survey loop
+  herd-escalation-dedup.test.mjs  Regression test for source-side escalation dedup
   herd-dispatch.mjs             ratchet-herd worker dispatcher
   herd-dispatch.test.mjs        Regression test for herd dispatcher
   herd-monitor.mjs              ratchet-herd worker monitor: verify/resume/escalate
