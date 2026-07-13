@@ -603,6 +603,17 @@ export function gitOriginUrl(cwd = process.cwd()) {
   }
 }
 
+// The project the dashboard is watching, named for the header (0171). When the
+// repo has a GitHub origin remote its "owner/repo" slug is the name; otherwise it
+// falls back to the repository root's directory basename. Null only when neither
+// is available, so the header hides its project line rather than showing an empty
+// one. Pure: given the resolved slug and root it always returns the same name.
+export function resolveProjectName({ repoSlug = null, root = null } = {}) {
+  if (repoSlug) return repoSlug;
+  if (root) return basename(root) || null;
+  return null;
+}
+
 // Lifecycle groups the dashboard buckets rows into, in display order: live
 // workers first, then work awaiting human review, then anything escalated for a
 // human, then finished/terminal rows, and finally a catch-all so a status with
@@ -1008,6 +1019,7 @@ export function readSnapshot({
   config,
   now = Date.now(),
   repoSlug = null,
+  projectName = null,
   checksCache = null,
   titleCache = null,
   readyQueueCache = null,
@@ -1091,7 +1103,7 @@ export function readSnapshot({
   const deck = buildDeck({ config, adapters, workers });
 
   const routing = routingActivity(config, readRouting(routingPath), events);
-  return { workers, escalations, hint, totals, heartbeat, adapters, brokenAdapters: broken, summary, deck, maxWorkers: config.maxWorkers, routing };
+  return { workers, escalations, hint, totals, heartbeat, adapters, brokenAdapters: broken, summary, deck, maxWorkers: config.maxWorkers, routing, projectName };
 }
 
 // A change key that ignores the ever-advancing clock, so the live stream pushes
@@ -1184,6 +1196,7 @@ export function createDashboardServer({
   config = { ...DEFAULTS },
   configPath = null,
   repoSlug = null,
+  projectName = null,
   now = Date.now,
   pollMs = 1000,
   fetchChecks = null,
@@ -1221,7 +1234,7 @@ export function createDashboardServer({
     }
     return liveConfig;
   };
-  const snap = () => ({ ...readSnapshot({ statePath, eventsPath, escalationsPath, resolutionsPath, routingPath, config: resolveConfig(), now: now(), repoSlug, checksCache, titleCache, readyQueueCache }), configError });
+  const snap = () => ({ ...readSnapshot({ statePath, eventsPath, escalationsPath, resolutionsPath, routingPath, config: resolveConfig(), now: now(), repoSlug, projectName, checksCache, titleCache, readyQueueCache }), configError });
 
   const server = httpCreateServer((req, res) => {
     const url = new URL(req.url, "http://localhost");
@@ -1430,8 +1443,11 @@ export async function run(argv, { log = console.log, cwd = process.cwd() } = {})
   const configPath = join(root, CONFIG_PATH);
   const config = loadConfigOrDefaults(configPath);
   const repoSlug = resolveRepoSlug(gitOriginUrl(cwd));
+  // Resolve the watched project's name once at startup and pass it into every
+  // snapshot, so the header names which repo this dashboard belongs to (0171).
+  const projectName = resolveProjectName({ repoSlug, root });
   const mascotsDir = join(root, "mascots");
-  const server = createDashboardServer({ statePath, eventsPath, escalationsPath, resolutionsPath, routingPath, config, configPath, repoSlug, notify: createNotifier(), mascotsDir });
+  const server = createDashboardServer({ statePath, eventsPath, escalationsPath, resolutionsPath, routingPath, config, configPath, repoSlug, projectName, notify: createNotifier(), mascotsDir });
   const bound = await listenOrFail(server, port);
   log(`Herd dashboard on http://localhost:${bound}  (Ctrl-C to stop)`);
   return { server, port: bound };
@@ -1495,6 +1511,8 @@ export const PAGE_HTML = `<!doctype html>
   .brand { display:flex; flex-direction:column; gap:3px; }
   .brand h1 { font-family:var(--serif); font-size:30px; font-weight:400; letter-spacing:.04em; line-height:1; margin:0; }
   .brand .subhead { font-family:var(--sans); font-size:13px; font-weight:500; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-soft); line-height:1; margin:0; }
+  .brand .project { font-family:var(--mono); font-size:12px; letter-spacing:.05em; color:var(--ink-soft); line-height:1; margin:2px 0 0; }
+  .brand .project[hidden] { display:none; }
   .brand .ordinal { font-family:var(--mono); font-size:10px; letter-spacing:.28em; color:var(--ink-soft); text-transform:uppercase; }
   header .heartbeat { display:flex; align-items:center; gap:10px; margin-left:auto; font-family:var(--mono); font-size:12px; letter-spacing:.05em; color:var(--ink); }
   header .dot { width:10px; height:10px; border-radius:50%; background:var(--ink-faint); display:inline-block; }
@@ -1719,6 +1737,7 @@ export const PAGE_HTML = `<!doctype html>
   <div class="brand">
     <h1>Ratchet</h1>
     <p class="subhead">Herd Dashboard</p>
+    <p class="project" id="project" hidden></p>
   </div>
   <div class="heartbeat"><span class="dot" id="livedot"></span> <span id="livetext" class="empty">connecting…</span></div>
   <span id="fleettotals" class="fleettotals empty"></span>
@@ -2339,7 +2358,24 @@ export const PAGE_HTML = `<!doctype html>
     el.hidden = false;
     el.textContent = "herd.json is invalid — running on the last good config. " + snapshot.configError;
   }
-  function render() { renderConfigBanner(); renderSummaryStrip(); renderDeck(); renderErrCount(); renderAdapterHealth(); renderEscalations(); renderWorkers(); renderTotals(); renderHeartbeat(); }
+  // The watched project's name in the header brand block. A snapshot that
+  // carries a non-empty projectName shows it; a missing or empty one hides the
+  // element (never an empty line), so a repo with no origin and no resolvable
+  // name simply shows the product brand alone.
+  function renderProject() {
+    const el = $("project");
+    if (!el) return;
+    const name = snapshot.projectName;
+    if (typeof name === "string" && name.trim() !== "") {
+      el.textContent = name;
+      el.hidden = false;
+    } else {
+      el.textContent = "";
+      el.hidden = true;
+    }
+  }
+
+  function render() { renderProject(); renderConfigBanner(); renderSummaryStrip(); renderDeck(); renderErrCount(); renderAdapterHealth(); renderEscalations(); renderWorkers(); renderTotals(); renderHeartbeat(); }
 
   const stream = new EventSource("/api/stream");
   stream.addEventListener("snapshot", (ev) => {

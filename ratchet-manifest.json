@@ -521,6 +521,10 @@
       "class": "excluded"
     },
     {
+      "path": "scripts/herd-ui-project-name.test.mjs",
+      "class": "excluded"
+    },
+    {
       "path": "scripts/herd-ui-mascot-stale-adapter.test.mjs",
       "class": "excluded"
     },
