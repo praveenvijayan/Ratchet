@@ -260,6 +260,10 @@ export async function dispatchOne(opts) {
     heartbeatIntervalMs = (config.pollSeconds ?? 60) * 1000,
     env = process.env,
     onPath,
+    // Fired locally after recordExit when this worker's process exits, so the
+    // supervisor reacts without waiting for the next tick (plan 0173). Optional;
+    // a listener throw is swallowed so it can never crash the worker-exit path.
+    notifyExit = null,
   } = opts;
 
   const state = readState(statePath);
@@ -334,6 +338,13 @@ export async function dispatchOne(opts) {
   const onExit = (code, signal) => {
     workerExit = { code, signal };
     recordExit(statePath, issue.number, code, signal, { config, eventsPath, now, warn: log });
+    if (notifyExit) {
+      try {
+        notifyExit(issue.number, code, signal);
+      } catch {
+        /* a supervisor listener must never crash the worker-exit path */
+      }
+    }
   };
   const pid = spawnFn(plan.argv, plan.env, plan.logFile, onExit);
 
@@ -507,4 +518,67 @@ export async function dispatchOne(opts) {
     status: "dispatched",
   }, log);
   return { dispatched: issue.number, claimed: true, pid, adapter: plan.adapter };
+}
+
+// One supervisor pass, kind-aware (plan 0173) — it changes *when* passes run,
+// never *what* they do. `kind: "tick"` heartbeats + surveys upstream (pollOnce,
+// which returns `{ skipped }` on an all-304 tick), runs retention, and — only
+// when the survey saw a change — the upstream verify/review. `kind: "event"` is
+// the lean reactive pass a local worker exit fires: no pollOnce (so it neither
+// adds nor suppresses heartbeats) and no upstream verify/review. Both kinds run
+// the pid-liveness monitor and then DRAIN dispatch — dispatchOne back-to-back
+// until at-capacity or no eligible issue, so N targets launch as each preceding
+// claim is observed, not one per tick. The drain is sequential and each
+// dispatchOne serializes its own claim window, so two never overlap. Every stage
+// is injected (defaulting to this module's dispatchOne/surveyReady) for offline
+// tests.
+export async function supervisorStep(o) {
+  const {
+    kind = "tick",
+    gh,
+    dryRun = false,
+    targets = null,
+    log = console.log,
+    config,
+    maxWorkers = config?.maxWorkers,
+    pollOnce = null,
+    monitorOnce = null,
+    verifyOnce = null,
+    reviewOnce = null,
+    retentionOnce = null,
+    surveyReady: survey = surveyReady,
+    dispatchOne: dispatch = dispatchOne,
+  } = o;
+  // Only a tick surveys upstream; an event pass treats upstream as unchanged.
+  let upstreamChanged = false;
+  if (kind === "tick" && pollOnce) upstreamChanged = !(await pollOnce(o))?.skipped;
+  if (!dryRun) {
+    // Monitor is pid-liveness-driven (no upstream), so it runs every pass — the
+    // core reaction to a worker exit. Verify/review are upstream, tick-gated.
+    if (monitorOnce)
+      await monitorOnce(o).catch((e) => log(`herd: monitor failed: ${e.message}; continuing to dispatch.`));
+    if (upstreamChanged) {
+      if (verifyOnce)
+        await verifyOnce(o).catch((e) => log(`herd: verify failed: ${e.message}; continuing to dispatch.`));
+      if (reviewOnce)
+        await reviewOnce(o).catch((e) => log(`herd: review failed: ${e.message}; continuing to dispatch.`));
+    }
+  }
+  // Retention is tick-cadence local cleanup (dry-run included); off the event path.
+  if (kind === "tick" && retentionOnce)
+    await retentionOnce(o).catch((e) => log(`herd: retention failed: ${e.message}; continuing.`));
+  const ready = await survey(gh).catch((e) => {
+    log(`herd: dispatch survey failed: ${e.message}; skipping dispatch this poll.`);
+    return [];
+  });
+  // Drain: dispatch while the last call did something (claimed or dispatch-failed
+  // both free the next issue); stop on at-capacity/no-eligible. --dry-run previews
+  // one plan (dispatched: null) and stops.
+  let r;
+  let launched = 0;
+  do {
+    r = await dispatch({ ...o, ready, dryRun, targets, maxWorkers });
+    if (r && r.claimed) launched += 1;
+  } while (!dryRun && r && r.dispatched != null);
+  return { kind, ready: ready.length, launched, upstreamChanged };
 }
