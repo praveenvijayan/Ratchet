@@ -12,7 +12,7 @@
 ![open issues](https://img.shields.io/github/issues/praveenvijayan/Ratchet?style=for-the-badge&logo=github&labelColor=15191e&color=ea8f3c)
 ![open pull requests](https://img.shields.io/github/issues-pr/praveenvijayan/Ratchet?style=for-the-badge&logo=github&labelColor=15191e&color=ea8f3c)
 ![license](https://img.shields.io/github/license/praveenvijayan/Ratchet?style=for-the-badge&labelColor=15191e&color=8b97a3)
-![framework version](https://img.shields.io/badge/framework-v5.0.2-ea8f3c?style=for-the-badge&labelColor=15191e)
+![framework version](https://img.shields.io/badge/framework-v5.1.0-ea8f3c?style=for-the-badge&labelColor=15191e)
 
 [Install](#install) · [The loop](#the-loop) · [Memory](#memory-so-it-scales-to-multi-year-projects) · [Updating](#updating-ratchet) · [Continuous execution](#hands-off-continuous-execution-opt-in) · [Cross-tool](#why-its-cross-tool) · [The PAT](#the-pat-read-this) · [License](LICENSE)
 
