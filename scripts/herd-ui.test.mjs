@@ -37,6 +37,7 @@ import {
   heartbeatStatus,
   lifecycleGroup,
   LIFECYCLE_GROUPS,
+  ALWAYS_SHOWN_GROUPS,
   groupWorkers,
   createTitleCache,
   readSnapshot,
@@ -653,14 +654,20 @@ await inTempDir(async (dir) => {
   });
 });
 
-// --- #179 Criterion 3: an empty group renders nothing — no empty header taking
-// space. -----------------------------------------------------------------------
+// --- #179 Criterion 3: an empty live/other group renders nothing — no empty
+// header taking space. (#406 keeps the pipeline stages awaiting-review/escalated/
+// terminal always visible; live and other still collapse when empty.) ----------
 {
   const groups = groupWorkers([
     { issue: 1, group: "live" },
     { issue: 2, group: "live" },
   ]);
-  assert.deepEqual(groups.map((g) => g.key), ["live"], "only the non-empty group is returned — no awaiting-review/escalated/terminal headers");
+  assert.ok(!groups.some((g) => g.key === "other"), "an empty other group is omitted — no empty header taking space");
+  assert.deepEqual(
+    groups.map((g) => g.key),
+    ["live", "awaiting-review", "escalated", "terminal"],
+    "the populated live group shows, the pipeline stages stay (see #406), empty other is omitted",
+  );
 }
 await inTempDir(async (dir) => {
   const statePath = join(dir, "s.json");
@@ -671,10 +678,10 @@ await inTempDir(async (dir) => {
   writeFileSync(escalationsPath, "");
   await withServer({ statePath, eventsPath, escalationsPath }, async (base) => {
     const page = (await fetchText(`${base}/`)).body;
-    // The served page ships an empty #workers container — groups are created only
-    // when rows exist, so an empty group has no static header reserving space.
-    assert.match(page, /<div id="workers"><\/div>/, "no group sections are pre-rendered; empty groups occupy no space");
-    assert.match(page, /if \(!rows \|\| !rows\.length\) continue/, "the renderer skips a group with no rows");
+    // The served page ships an empty #workers container — groups are rendered
+    // client-side, so no group section is pre-rendered into the static HTML.
+    assert.match(page, /<div id="workers"><\/div>/, "no group sections are pre-rendered into the static page");
+    assert.match(page, /if \(!rows\.length && !ALWAYS_SHOWN\.has\(key\)\) continue/, "the renderer collapses only empty live/other groups (#406 keeps the pipeline stages)");
   });
 });
 
@@ -687,8 +694,10 @@ await inTempDir(async (dir) => {
 
   assert.equal(lifecycleGroup("some-brand-new-status"), "other", "an unmapped status maps to the catch-all group");
   const grouped = groupWorkers([{ issue: 9, group: lifecycleGroup("wat") }]);
-  assert.deepEqual(grouped.map((g) => g.key), ["other"], "an unknown-status row appears in the Other group");
-  assert.equal(grouped[0].rows[0].issue, 9, "the unknown-status row is not dropped");
+  // #406 keeps the pipeline stages present; the unknown-status row still lands
+  // in a visible Other group alongside them.
+  assert.ok(grouped.some((g) => g.key === "other"), "an unknown-status row appears in the Other group");
+  assert.equal(grouped.find((g) => g.key === "other").rows[0].issue, 9, "the unknown-status row is not dropped");
   // Even a group key outside LIFECYCLE_GROUPS keeps its row (drift guard).
   const drift = groupWorkers([{ issue: 3, group: "nonexistent-group" }]);
   assert.ok(drift.some((g) => g.rows.some((r) => r.issue === 3)), "a group key outside the known set still keeps its row visible");
@@ -1758,6 +1767,90 @@ await inTempDir(async (dir) => {
   assert.equal(markers.length, unique.size, "each #333 criterion is tested exactly once (no duplicate markers)");
   assert.equal(markers.length, CRITERIA_COUNT, `one test per #333 acceptance criterion (${CRITERIA_COUNT})`);
   for (let n = 1; n <= CRITERIA_COUNT; n++) assert.ok(unique.has(n), `#333 criterion ${n} has a test`);
+}
+
+// --- #406 Criterion 1: with zero workers the dashboard renders the headers
+// Awaiting review, Escalated, and Terminal, each with an empty-state note
+// describing what lands in the stage. --------------------------------------------
+{
+  const groups = groupWorkers([]);
+  const byKey = Object.fromEntries(groups.map((g) => [g.key, g]));
+  for (const key of ["awaiting-review", "escalated", "terminal"]) {
+    assert.ok(byKey[key], `the ${key} stage header is present with no workers`);
+    assert.equal(byKey[key].rows.length, 0, `the empty ${key} stage carries no rows`);
+    assert.match(byKey[key].emptyNote || "", /lands? here\.$/, `the empty ${key} stage describes what lands in it`);
+  }
+  assert.deepEqual(
+    groups.map((g) => g.label),
+    ["Awaiting review", "Escalated", "Terminal"],
+    "the three pipeline stage headers render in lifecycle order",
+  );
+  // The browser renders those notes with the same dashed pattern as the Live
+  // Workers deck note (the `deckempty` class), from the mirrored STAGE_EMPTY_NOTE.
+  assert.ok(PAGE_HTML.includes("STAGE_EMPTY_NOTE[key]"), "the renderer draws an empty stage's note from STAGE_EMPTY_NOTE");
+  assert.ok(PAGE_HTML.includes('deckempty'), "the empty-stage note reuses the dashed deckempty box");
+  for (const g of groups) assert.ok(PAGE_HTML.includes(g.emptyNote), `the client mirrors the ${g.key} empty-state note text`);
+}
+
+// --- #406 Criterion 2: an empty live group renders no extra header/note — the
+// Live Workers deck header and its own empty note already cover that stage. -----
+{
+  assert.ok(!ALWAYS_SHOWN_GROUPS.includes("live"), "live is not an always-shown stage");
+  assert.ok(!groupWorkers([]).some((g) => g.key === "live"), "no live group is rendered when nothing is live");
+  // A single terminal worker leaves live empty; still no live header appears.
+  const groups = groupWorkers([{ issue: 8, group: "terminal" }]);
+  assert.ok(!groups.some((g) => g.key === "live"), "an empty live group is omitted even while other stages have rows");
+}
+
+// --- #406 Criterion 3: the `other` drift-guard group appears only when a worker
+// carries an unknown status key, never as an empty header. ----------------------
+{
+  assert.ok(!ALWAYS_SHOWN_GROUPS.includes("other"), "other is not an always-shown stage");
+  assert.ok(!groupWorkers([]).some((g) => g.key === "other"), "no empty other header is rendered with zero workers");
+  const withUnknown = groupWorkers([{ issue: 9, group: lifecycleGroup("brand-new-status") }]);
+  assert.ok(withUnknown.some((g) => g.key === "other"), "the other group appears once a worker carries an unknown status");
+  assert.equal(withUnknown.find((g) => g.key === "other").rows[0].issue, 9, "the unknown-status row lands in the other group");
+}
+
+// --- #406 Criterion 4: a stage holding rows renders its rows, not the empty-
+// state note. -------------------------------------------------------------------
+{
+  const groups = groupWorkers([{ issue: 5, group: "awaiting-review" }]);
+  const stage = groups.find((g) => g.key === "awaiting-review");
+  assert.equal(stage.rows[0].issue, 5, "a populated stage keeps its rows");
+  assert.equal(stage.emptyNote, undefined, "a populated stage carries no empty-state note");
+  // The browser picks rows over the note for a non-empty stage: the body is a
+  // `rows.length ? <rows> : <deckempty note>` ternary.
+  assert.match(PAGE_HTML, /const body = rows\.length[\s\S]*?deckempty/, "the renderer shows rows when the stage has any, else the note");
+}
+
+// --- #406 Criterion 5: groupWorkers([]) returns the always-shown stages with
+// empty row lists and omits live/other, keeping server grouping in sync with
+// browser rendering. ------------------------------------------------------------
+{
+  const groups = groupWorkers([]);
+  assert.deepEqual(
+    groups.map((g) => g.key),
+    ALWAYS_SHOWN_GROUPS.slice(),
+    "an empty fleet yields exactly the always-shown pipeline stages, in order",
+  );
+  assert.ok(groups.every((g) => Array.isArray(g.rows) && g.rows.length === 0), "each always-shown stage has an empty row list");
+  assert.ok(!groups.some((g) => g.key === "live" || g.key === "other"), "live and other are omitted from an empty fleet");
+}
+
+// --- #406 Criterion 6: every criterion above has exactly one test named after
+// it. The plan file carried six #406 acceptance criteria; this counts its own
+// `#406 Criterion N` markers and proves there is exactly one per criterion, 1..6.
+// It counts markers in THIS file only — never reads the plan file at runtime, so
+// archiving the closed plan issue can never break it. --------------------------
+{
+  const CRITERIA_COUNT = 6;
+  const selfText = readFileSync(fileURLToPath(import.meta.url), "utf8");
+  const markers = [...selfText.matchAll(/^\/\/ --- #406 Criterion (\d+):/gim)].map((m) => Number(m[1]));
+  const unique = new Set(markers);
+  assert.equal(markers.length, unique.size, "each #406 criterion tested exactly once (no duplicate markers)");
+  assert.equal(markers.length, CRITERIA_COUNT, `one test per #406 acceptance criterion (${CRITERIA_COUNT})`);
+  for (let n = 1; n <= CRITERIA_COUNT; n++) assert.ok(unique.has(n), `#406 criterion ${n} has a test`);
 }
 
 console.log("PASS herd-ui.test.mjs");

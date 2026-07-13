@@ -610,11 +610,18 @@ export function gitOriginUrl(cwd = process.cwd()) {
 // browser renders the same ordered, labelled sections the server classifies to.
 export const LIFECYCLE_GROUPS = Object.freeze([
   { key: "live", label: "Live" },
-  { key: "awaiting-review", label: "Awaiting review" },
-  { key: "escalated", label: "Escalated" },
-  { key: "terminal", label: "Terminal" },
+  { key: "awaiting-review", label: "Awaiting review", emptyNote: "Work with an open PR waiting for a human review lands here." },
+  { key: "escalated", label: "Escalated", emptyNote: "Runs that need a human — failures, conflicts, and stale claims — land here." },
+  { key: "terminal", label: "Terminal", emptyNote: "Finished runs — dead workers and concluded PRs — land here." },
   { key: "other", label: "Other" },
 ]);
+
+// The lifecycle stages whose header stays on screen even with no rows, each
+// showing its emptyNote so an operator always sees the pipeline's shape. "live"
+// and "other" are deliberately omitted: an empty live group is already covered
+// by the Live Workers deck's own empty note, and "other" is a drift guard that
+// should surface only when a worker actually carries an unknown status key.
+export const ALWAYS_SHOWN_GROUPS = Object.freeze(["awaiting-review", "escalated", "terminal"]);
 
 // Status → lifecycle group. Covers the full status vocabulary the supervisor
 // writes (dispatch/monitor/verify/survey); "stale-claim" is grouped as escalated
@@ -698,11 +705,16 @@ export function buildWorkers({ state, events, config, now = Date.now(), repoSlug
   return rows;
 }
 
-// Bucket issue-sorted worker rows into lifecycle groups for display: only
-// non-empty groups, in LIFECYCLE_GROUPS order, each keeping its rows' issue
-// order. A group key outside LIFECYCLE_GROUPS (should never happen — lifecycleGroup
-// only emits known keys) is still appended so no row can ever disappear. Pure;
-// the browser renders the identical structure so server and client never drift.
+// Bucket issue-sorted worker rows into lifecycle groups for display, in
+// LIFECYCLE_GROUPS order, each keeping its rows' issue order. The three pipeline
+// stages in ALWAYS_SHOWN_GROUPS are always returned — with an empty `rows` array
+// and their `emptyNote` when nothing is in flight — so the dashboard keeps every
+// stage header on screen. "live" and "other" are returned only when populated
+// (live's empty state is the Live Workers deck note; "other" is an unknown-status
+// drift guard). A group key outside LIFECYCLE_GROUPS (should never happen —
+// lifecycleGroup only emits known keys) is still appended so no row can ever
+// disappear. Pure; the browser renders the identical structure so server and
+// client never drift.
 export function groupWorkers(workers) {
   const buckets = new Map();
   for (const w of workers || []) {
@@ -711,10 +723,14 @@ export function groupWorkers(workers) {
     buckets.get(g).push(w);
   }
   const known = LIFECYCLE_GROUPS.map((g) => g.key);
+  const alwaysShown = new Set(ALWAYS_SHOWN_GROUPS);
   const out = [];
-  for (const { key, label } of LIFECYCLE_GROUPS) {
-    const rows = buckets.get(key);
-    if (rows && rows.length) out.push({ key, label, rows });
+  for (const { key, label, emptyNote } of LIFECYCLE_GROUPS) {
+    const rows = buckets.get(key) || [];
+    if (!rows.length && !alwaysShown.has(key)) continue; // live/other collapse when empty
+    const group = { key, label, rows };
+    if (!rows.length && emptyNote) group.emptyNote = emptyNote; // a stage with rows shows rows, not the note
+    out.push(group);
   }
   for (const key of [...buckets.keys()].filter((k) => !known.includes(k)).sort()) {
     out.push({ key, label: key, rows: buckets.get(key) });
@@ -1988,6 +2004,15 @@ export const PAGE_HTML = `<!doctype html>
   // LIFECYCLE_GROUPS. "other" is the catch-all so an unmapped status is always
   // shown, never dropped.
   const GROUP_ORDER = [["live", "Live"], ["awaiting-review", "Awaiting review"], ["escalated", "Escalated"], ["terminal", "Terminal"], ["other", "Other"]];
+  // Mirrors the server's ALWAYS_SHOWN_GROUPS / LIFECYCLE_GROUPS emptyNotes: the
+  // pipeline stages keep their header + a dashed empty-state note when idle;
+  // live/other collapse when empty (see groupWorkers).
+  const ALWAYS_SHOWN = new Set(["awaiting-review", "escalated", "terminal"]);
+  const STAGE_EMPTY_NOTE = {
+    "awaiting-review": "Work with an open PR waiting for a human review lands here.",
+    "escalated": "Runs that need a human — failures, conflicts, and stale claims — land here.",
+    "terminal": "Finished runs — dead workers and concluded PRs — land here.",
+  };
 
   // One vitals cell (adapter lifetime counts on the character card). Zero keeps
   // its cell with the faint treatment so a fresh adapter still reads all three.
@@ -2072,10 +2097,6 @@ export const PAGE_HTML = `<!doctype html>
 
   function renderWorkers() {
     const host = $("workers");
-    if (!snapshot.workers.length) {
-      host.innerHTML = snapshot.hint ? '<div class="hint">' + esc(snapshot.hint) + "</div>" : '<div class="hint">No workers.</div>';
-      return;
-    }
     // Bucket rows by lifecycle group. snapshot.workers is issue-sorted, so each
     // bucket stays in issue order without re-sorting.
     const buckets = new Map();
@@ -2089,14 +2110,21 @@ export const PAGE_HTML = `<!doctype html>
     // Known groups in fixed order, then any unforeseen group appended (a drift
     // guard so a row can never disappear even if a new group key reaches here).
     const order = GROUP_ORDER.map(([k]) => k).concat([...buckets.keys()].filter((k) => !known.has(k)).sort());
-    let html = "";
+    // A cold, activity-free instance still shows its one-line hint above the
+    // stages so a first-time operator knows how to start the herd.
+    let html = snapshot.hint ? '<div class="hint">' + esc(snapshot.hint) + "</div>" : "";
     for (const key of order) {
-      const rows = buckets.get(key);
-      if (!rows || !rows.length) continue; // an empty group renders nothing
+      const rows = buckets.get(key) || [];
+      // Pipeline stages keep their header + a dashed empty-state note when idle;
+      // live/other render nothing when empty (mirrors groupWorkers).
+      if (!rows.length && !ALWAYS_SHOWN.has(key)) continue;
+      const body = rows.length
+        ? '<div class="rows">' + rows.map(rowHtml).join("") + "</div>"
+        : '<div class="deckempty">' + esc(STAGE_EMPTY_NOTE[key] || "") + "</div>";
       html += '<section class="lifecycle-group" data-group="' + esc(key) + '">' +
         '<div class="sec"><h2 class="group-head">' + esc(labelOf(key)) + "</h2>" +
         '<span class="tally">' + rows.length + '</span><span class="rule"></span></div>' +
-        '<div class="rows">' + rows.map(rowHtml).join("") + "</div></section>";
+        body + "</section>";
     }
     host.innerHTML = html;
     host.querySelectorAll("[data-issue]").forEach((row) => row.addEventListener("click", () => select(Number(row.dataset.issue))));
