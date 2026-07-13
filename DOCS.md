@@ -248,6 +248,7 @@ scripts/
   herd-ui-vinyl-deck.test.mjs   Regression test for the vinyl-figure pop-out deck revision
   herd-ui-mascot-deck-live.test.mjs Regression test for deck cards tracking live workers
   herd-ui-deck-card-issue-status.test.mjs Regression test for deck card worked-issue number and worker status
+  herd-ui-project-name.test.mjs Regression test for the header project-name resolution and hide-when-absent rule
   herd-ui-mascot-stale-adapter.test.mjs Regression test for the mascot card fallback when an adapter is renamed after dispatch
   herd-ui-supervisor-status.test.mjs Regression test for the supervisor-status header strip
   herd-ui-supervisor-heartbeat-dedup.test.mjs Regression test for the single heartbeat indicator
