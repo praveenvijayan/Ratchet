@@ -437,6 +437,10 @@
       "class": "excluded"
     },
     {
+      "path": "scripts/map-onboarding.test.mjs",
+      "class": "excluded"
+    },
+    {
       "path": "scripts/herd-avatar.test.mjs",
       "class": "excluded"
     },
@@ -458,6 +462,10 @@
     },
     {
       "path": "scripts/herd-review.test.mjs",
+      "class": "excluded"
+    },
+    {
+      "path": "scripts/herd-escalation-dedup.test.mjs",
       "class": "excluded"
     },
     {

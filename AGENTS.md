@@ -24,6 +24,7 @@ Every deferred concern routes to a file path, not a skill invocation. Read it.
 
 | Concern | Read this file |
 |---|---|
+| Orient before exploring the codebase (read first, if present) | `MAP.md` |
 | Plan or report a bug/idea (→ `plan/*.md` + planning PR) | `.agents/skills/ratchet-plan/SKILL.md` |
 | Plan-file format & criteria rules | `plan/README.md` |
 | Advance or rework after a human decision | `.agents/skills/ratchet-next/SKILL.md` |

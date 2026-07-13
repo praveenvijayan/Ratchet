@@ -475,23 +475,139 @@ export function reconcileState(state, reality, isAlive) {
   return { state: next, changes, adopted };
 }
 
+// Normalize the free-form `what` text of an escalation into a stable reason
+// string, so repeated escalations with the same root cause (but different pids,
+// PR numbers, issue numbers, or log tails) map to one dedup key. The first line
+// is the reason; variable parts are placeholdered; multi-line log tails and
+// delete commands are dropped (they vary per occurrence). Shared by the writer
+// (herd-survey) and the dashboard (herd-ui) so both agree on what "same reason"
+// means; herd-ui re-exports it for its existing callers.
+export function escalationReason(what) {
+  if (!what) return "";
+  let s = String(what).split("\n")[0].trim();
+  s = s.replace(/agent\/issue-\d+/g, "agent/issue-N");
+  s = s.replace(/\bpid \d+\b/g, "pid N");
+  s = s.replace(/PR #\d+/g, "PR #N");
+  s = s.replace(/issue #\d+/gi, "issue #N");
+  s = s.replace(/\(\d+ attempts\)/g, "(N attempts)");
+  s = s.replace(/adapter "[^"]*"/g, 'adapter "…"');
+  s = s.replace(/resume spawn failed:.*/, "resume spawn failed");
+  s = s.replace(/Delete it[^:]*:.*$/, "").trim();
+  s = s.replace(/tried \d+ adapter\(s\):.*$/, "tried N adapter(s)");
+  s = s.replace(/\.?\s*Log tail:?\s*$/, "").trim();
+  return s;
+}
+
+// Low-level parse of the escalation log into file-order blocks, each carrying its
+// character span (start/end) so a single block can be rewritten in place without
+// disturbing its neighbours. This is the shared primitive; herd-ui.parseEscalations
+// wraps it (adding newest-first order) for the dashboard. Anything unrecognised is
+// ignored, never fatal.
+export function parseEscalationsRaw(md) {
+  const blocks = [];
+  const re = /^##\s+(\S+)\s+—\s+issue #(\d+)\s*$/gim;
+  const heads = [];
+  let m;
+  while ((m = re.exec(md)) !== null) heads.push({ ts: m[1], issue: Number(m[2]), index: m.index, end: re.lastIndex });
+  for (let i = 0; i < heads.length; i++) {
+    const start = heads[i].index;
+    const end = i + 1 < heads.length ? heads[i + 1].index : md.length;
+    const body = md.slice(heads[i].end, end);
+    const field = (label) => {
+      const fm = new RegExp(`^-\\s*${label}:\\s*(.*)$`, "im").exec(body);
+      return fm ? fm[1].trim() : null;
+    };
+    const occ = field("Occurrences");
+    blocks.push({
+      ts: heads[i].ts,
+      issue: heads[i].issue,
+      what: field("What happened") || "",
+      logFile: field("Log file"),
+      action: field("Suggested action"),
+      occurrences: occ != null && /^\d+$/.test(occ) ? Number(occ) : 1,
+      start,
+      end,
+    });
+  }
+  return blocks;
+}
+
 // A human-readable escalation block: timestamp, issue, what happened, the log
-// file to inspect, and a suggested next action. Kept factual — the supervisor
-// escalates; the human decides.
-export function formatEscalation({ now, issue, what, logFile, action }) {
+// file to inspect, a suggested next action, and an occurrence count. The heading
+// timestamp is the *last-seen* time — the deduplicating writer bumps it (and the
+// count) each time the same cause recurs, so a persistent problem stays one
+// entry that reads as newest. Kept factual — the supervisor escalates; the human
+// decides.
+export function formatEscalation({ now, issue, what, logFile, action, occurrences = 1 }) {
   const ts = new Date(now).toISOString();
   return [
     `## ${ts} — issue #${issue}`,
     `- What happened: ${what}`,
     `- Log file: ${logFile || "(none)"}`,
     `- Suggested action: ${action || "review the log and re-queue the issue if its work is unfinished"}`,
+    `- Occurrences: ${occurrences}`,
     "",
   ].join("\n");
 }
 
-export function appendEscalation(path, entry, { eventsPath = EVENTS_FILE, warn = console.warn } = {}) {
+// Deduplicate at the source. Every escalation call path (survey, dispatch,
+// monitor, reconcile, review) funnels through here, so one gate governs the whole
+// file: an escalation whose (issue, reason-class) matches an existing *unresolved*
+// entry bumps that entry's occurrence count and last-seen timestamp in place; a
+// new reason-class, or the same reason for a different issue, appends a fresh
+// block. "Unresolved" means the matching (issue, reason) has not been
+// acknowledged — a recurrence of an acknowledged problem starts a fresh alert.
+// The append-only file stays the record: a merge rewrites only the one matching
+// block, never another entry's history. A malformed existing file never throws —
+// the entry is appended and a warning is logged. Returns true on merge, false on
+// append (or on any failure that falls back to append).
+function mergeEscalation(path, entry, { acknowledged, warn }) {
+  if (!existsSync(path)) return false;
+  let md;
+  try {
+    md = readFileSync(path, "utf8");
+    const reason = escalationReason(entry.what);
+    const blocks = parseEscalationsRaw(md);
+    // Non-empty content that yields no parseable block is corrupt (the file is
+    // only ever written by this function): don't lose the escalation — append a
+    // fresh entry and warn so an operator can inspect the damaged log.
+    if (blocks.length === 0) {
+      if (md.trim() !== "") {
+        warn(`herd: escalation log ${path} is unparseable; appending a new entry.`);
+      }
+      return false;
+    }
+    // Newest matching, still-unresolved block (last in file order = newest).
+    let target = null;
+    for (const b of blocks) {
+      if (String(b.issue) !== String(entry.issue)) continue;
+      if (escalationReason(b.what) !== reason) continue;
+      if (acknowledged.has(`${b.issue}\t${escalationReason(b.what)}`)) continue;
+      target = b;
+    }
+    if (!target) return false;
+    const rewritten = formatEscalation({
+      now: entry.now,
+      issue: target.issue,
+      what: target.what,
+      logFile: target.logFile,
+      action: target.action,
+      occurrences: target.occurrences + 1,
+    });
+    writeFileSync(path, md.slice(0, target.start) + rewritten + md.slice(target.end));
+    return true;
+  } catch (err) {
+    // A torn or unreadable file must never lose an escalation: fall through to
+    // append, but surface the reason so an operator can see the file needs care.
+    warn(`herd: could not dedup escalation for issue #${entry.issue} (${err.message}); appending a new entry.`);
+    return false;
+  }
+}
+
+export function appendEscalation(path, entry, { eventsPath = EVENTS_FILE, warn = console.warn, acknowledged = new Set() } = {}) {
   mkdirSync(dirname(path), { recursive: true });
-  appendFileSync(path, formatEscalation(entry) + "\n");
+  const merged = mergeEscalation(path, entry, { acknowledged, warn });
+  if (!merged) appendFileSync(path, formatEscalation({ ...entry, occurrences: 1 }) + "\n");
   appendHerdEvent(
     eventsPath,
     {

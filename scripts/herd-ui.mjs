@@ -19,7 +19,12 @@ import { fileURLToPath } from "node:url";
 import { realpathSync } from "node:fs";
 
 import { join, basename, extname, sep } from "node:path";
-import { readState, STATE_FILE, EVENTS_FILE, ESCALATIONS_FILE, ROUTING_FILE, STALE_CLAIM_STATUS, readRouting, resolveRepoRoot, ratchetPaths } from "./herd-survey.mjs";
+import { readState, STATE_FILE, EVENTS_FILE, ESCALATIONS_FILE, ROUTING_FILE, STALE_CLAIM_STATUS, readRouting, resolveRepoRoot, ratchetPaths, escalationReason, parseEscalationsRaw } from "./herd-survey.mjs";
+
+// escalationReason and parseEscalationsRaw now live in herd-survey (the lower
+// module the deduplicating escalation writer shares with this dashboard).
+// Re-export escalationReason so existing importers from herd-ui keep working.
+export { escalationReason };
 import { DEFAULTS, CONFIG_PATH, loadConfig, HerdConfigError } from "./herd.mjs";
 import { defaultAvatarFor } from "./herd-avatars.mjs";
 import { TERMINAL_STATUS } from "./herd-monitor.mjs";
@@ -77,62 +82,30 @@ export function parseEscalations(mdOrPath = ESCALATIONS_FILE, { isPath = true } 
       return [];
     }
   }
-  const blocks = [];
-  const re = /^##\s+(\S+)\s+—\s+issue #(\d+)\s*$/gim;
-  const heads = [];
-  let m;
-  while ((m = re.exec(md)) !== null) heads.push({ ts: m[1], issue: Number(m[2]), index: m.index, end: re.lastIndex });
-  for (let i = 0; i < heads.length; i++) {
-    const body = md.slice(heads[i].end, i + 1 < heads.length ? heads[i + 1].index : md.length);
-    const field = (label) => {
-      const fm = new RegExp(`^-\\s*${label}:\\s*(.*)$`, "im").exec(body);
-      return fm ? fm[1].trim() : null;
-    };
-    blocks.push({
-      ts: heads[i].ts,
-      issue: heads[i].issue,
-      what: field("What happened") || "",
-      logFile: field("Log file"),
-      action: field("Suggested action"),
-    });
-  }
-  return blocks.reverse(); // newest escalations first, above the worker list
+  // Drop the per-block char spans the raw parser carries for in-place rewrites;
+  // the dashboard only needs the fields, newest first (above the worker list).
+  return parseEscalationsRaw(md)
+    .map(({ start, end, ...b }) => b)
+    .reverse();
 }
 
-// Normalize the free-form `what` text of an escalation into a stable reason
-// string, so repeated escalations with the same root cause (but different pids,
-// PR numbers, issue numbers, or log tails) map to one dedup key. The first line
-// is the reason; variable parts are placeholdered; multi-line log tails and
-// delete commands are dropped (they vary per occurrence).
-export function escalationReason(what) {
-  if (!what) return "";
-  let s = String(what).split("\n")[0].trim();
-  s = s.replace(/agent\/issue-\d+/g, "agent/issue-N");
-  s = s.replace(/\bpid \d+\b/g, "pid N");
-  s = s.replace(/PR #\d+/g, "PR #N");
-  s = s.replace(/issue #\d+/gi, "issue #N");
-  s = s.replace(/\(\d+ attempts\)/g, "(N attempts)");
-  s = s.replace(/adapter "[^"]*"/g, 'adapter "…"');
-  s = s.replace(/resume spawn failed:.*/, "resume spawn failed");
-  s = s.replace(/Delete it[^:]*:.*$/, "").trim();
-  s = s.replace(/tried \d+ adapter\(s\):.*$/, "tried N adapter(s)");
-  s = s.replace(/\.?\s*Log tail:?\s*$/, "").trim();
-  return s;
-}
-
-// Group escalations by (issue, reason), counting occurrences. The input is
+// Group escalations by (issue, reason), summing occurrences. The input is
 // newest-first (from parseEscalations); the first block seen for a key is the
 // newest, so its ts/what/action/logFile are kept as the group's display data.
-// Returns a new array with an added `reason` and `occurrences` count per block.
+// Each block's own `occurrences` (1 for legacy blocks, N for a block the
+// deduplicating writer has bumped) is summed, so a file mixing pre-dedup
+// duplicate blocks with a post-dedup counted block reports the right total.
+// Returns a new array with an added `reason` and summed `occurrences` per group.
 export function dedupEscalations(blocks) {
   const map = new Map();
   for (const b of blocks) {
     const reason = escalationReason(b.what);
     const key = `${b.issue}\t${reason}`;
+    const count = b.occurrences ?? 1;
     if (!map.has(key)) {
-      map.set(key, { ...b, reason, occurrences: 1 });
+      map.set(key, { ...b, reason, occurrences: count });
     } else {
-      map.get(key).occurrences += 1;
+      map.get(key).occurrences += count;
     }
   }
   return [...map.values()];
