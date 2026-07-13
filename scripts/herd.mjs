@@ -575,10 +575,10 @@ async function runCli(argv) {
   // module-not-found error. Dynamically import the implementation so a missing
   // `herd` profile is caught here with one message, not surfaced by Node's
   // static-import resolver.
-  let ghJson, ghConditional, ratchetPaths, runLoop, pollOnce, scopedRun, dispatchOne, surveyReady, monitorOnce, verifyOnce, reviewOnce, retentionOnce;
+  let ghJson, ghConditional, ratchetPaths, runLoop, pollOnce, scopedRun, dispatchOne, surveyReady, supervisorStep, monitorOnce, verifyOnce, reviewOnce, retentionOnce;
   try {
     ({ ghJson, ghConditional, ratchetPaths, runLoop, pollOnce, scopedRun } = await import("./herd-survey.mjs"));
-    ({ dispatchOne, surveyReady } = await import("./herd-dispatch.mjs"));
+    ({ dispatchOne, surveyReady, supervisorStep } = await import("./herd-dispatch.mjs"));
     ({ monitorOnce } = await import("./herd-monitor.mjs"));
     ({ verifyOnce } = await import("./herd-verify.mjs"));
     ({ reviewOnce } = await import("./herd-review.mjs"));
@@ -664,55 +664,42 @@ async function runCli(argv) {
       process.once("SIGINT", () => releaseAndExit("SIGINT"));
       process.once("SIGTERM", () => releaseAndExit("SIGTERM"));
     }
-    // Per-endpoint ETag cache, in-memory for this supervisor process. It lives
-    // across ticks (the first tick per endpoint is unconditional) so a poll whose
-    // upstream is unchanged returns 304s and short-circuits.
+    // A local worker exit registers here (runLoop/scopedRun's onExitSignal); the
+    // handler becomes `notifyExit`, threaded into each dispatchOne so a worker's
+    // process exit fires an immediate reactive pass (plan 0173).
+    let notifyExit = null;
+    const onExitSignal = (fn) => {
+      notifyExit = fn;
+    };
+    // Per-endpoint ETag cache, in-memory for this supervisor process; lives across
+    // ticks so a poll whose upstream is unchanged returns 304s and short-circuits.
     const surveyEtags = {};
+    // supervisorStep runs the kind-aware pass (plan 0173). A scoped run hands
+    // `step` the eligible subset via o.targets; the open loop passes none, falling
+    // back to the parsed `targets` (null → whole queue). --dry-run never spawns.
     const step = async (o) => {
       const config = resolveConfig(o.log);
       const maxWorkers = maxIdx >= 0 && Number.isInteger(Number(argv[maxIdx + 1]))
         ? Number(argv[maxIdx + 1])
         : config.maxWorkers;
-      const poll = await pollOnce({ ...o, config, ghc: ghConditional, etags: surveyEtags });
-      // When every polled endpoint returned 304 the tick skips the reconcile,
-      // verify, and review passes — they have no new reality to act on and each
-      // costs GitHub API calls. Monitor/retention/dispatch below are local- and
-      // liveness-driven, so they still run (a worker may have exited locally).
-      const upstreamChanged = !poll?.skipped;
-      // Monitor exited workers (verify / resume / escalate) before dispatching,
-      // so a concluded worker frees a slot this same pass. Skipped on --dry-run,
-      // which must never spawn (a resume is a spawn).
-      if (!dryRun) {
-        await monitorOnce({ ...o, config }).catch((e) => {
-          o.log(`herd: monitor failed: ${e.message}; continuing to dispatch.`);
-        });
-        if (upstreamChanged) {
-          // Verify PRs the monitor just handed off (may dispatch a rework, so it
-          // is a spawn — skipped on --dry-run alongside the monitor).
-          await verifyOnce({ ...o, config }).catch((e) => {
-            o.log(`herd: verify failed: ${e.message}; continuing to dispatch.`);
-          });
-          // React to review verdicts on ready-for-review PRs (a CHANGES_REQUESTED
-          // review dispatches a rework, so it too is a spawn — skipped on --dry-run).
-          await reviewOnce({ ...o, config }).catch((e) => {
-            o.log(`herd: review failed: ${e.message}; continuing to dispatch.`);
-          });
-        }
-      }
-      // Bound events.jsonl / herd-escalations.md growth (mirrors pruneLogs, which
-      // pollOnce runs); it only reads and rewrites local files, so — like log
-      // pruning — it runs every poll, dry-run included.
-      await retentionOnce({ ...o, config }).catch((e) => {
-        o.log(`herd: retention failed: ${e.message}; continuing to dispatch.`);
+      await supervisorStep({
+        ...o,
+        config,
+        dryRun,
+        maxWorkers,
+        targets: o.targets ?? targets,
+        claimTimeoutMs: config.claimTimeoutSeconds * 1000,
+        notifyExit,
+        ghc: ghConditional,
+        etags: surveyEtags,
+        pollOnce,
+        surveyReady,
+        dispatchOne,
+        monitorOnce: dryRun ? null : monitorOnce,
+        verifyOnce: dryRun ? null : verifyOnce,
+        reviewOnce: dryRun ? null : reviewOnce,
+        retentionOnce,
       });
-      const ready = await surveyReady(o.gh).catch((e) => {
-        o.log(`herd: dispatch survey failed: ${e.message}; skipping dispatch this poll.`);
-        return [];
-      });
-      // A scoped run hands `step` the *eligible* subset via o.targets (see
-      // scopedRun); the open loop passes none, so it falls back to the parsed
-      // `targets` (null → the whole queue).
-      await dispatchOne({ ...o, config, ready, dryRun, targets: o.targets ?? targets, maxWorkers, claimTimeoutMs: config.claimTimeoutSeconds * 1000 });
     };
     const onLoopError = (e) => {
       lock.release();
@@ -725,7 +712,7 @@ async function runCli(argv) {
       // any closed/blocked/not-ready/already-tracked issue), then poll only until
       // every eligible target has finished. Its exit code carries the outcome —
       // 0 when the targets ran, SCOPED_NO_ELIGIBLE_EXIT when none were runnable.
-      scopedRun({ gh: ghJson, log: console.log, ...paths, targets, once, dryRun, pollSeconds: config.pollSeconds, step }).then(
+      scopedRun({ gh: ghJson, log: console.log, ...paths, targets, once, dryRun, pollSeconds: config.pollSeconds, step, onExitSignal: once ? null : onExitSignal }).then(
         (r) => {
           lock.release();
           process.exit(r.exitCode);
@@ -733,7 +720,7 @@ async function runCli(argv) {
         onLoopError,
       );
     } else {
-      runLoop({ gh: ghJson, log: console.log, ...paths, once, pollSeconds: config.pollSeconds, step }).then(
+      runLoop({ gh: ghJson, log: console.log, ...paths, once, pollSeconds: config.pollSeconds, step, onExitSignal: once ? null : onExitSignal }).then(
         () => {
           lock.release();
           process.exit(0);

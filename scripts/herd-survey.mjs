@@ -90,6 +90,10 @@ export const HERD_EVENT_TYPES = Object.freeze([
   // supervisor fell back to a full unconditional survey. Logged (not silent) so
   // an operator can see when the 304 short-circuit is not paying off.
   "survey-fallback",
+  // A supervisor pass (tick or event-triggered) threw and was caught: it is
+  // logged here rather than crashing the loop, so a failed reactive pass is
+  // visible and the next periodic tick reconciles (plan 0173). No `issue` field.
+  "supervisor-pass-error",
 ]);
 
 // Statuses the pipeline has already resolved — a stage escalated or handed them
@@ -769,16 +773,92 @@ export async function pollOnce({
 
 const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// The poll loop. `--once` (once: true) runs a single pass and returns; the
-// default keeps polling every pollSeconds. `step` is the per-pass work
-// (defaulting to pollOnce; the dispatcher composes survey + dispatch into it),
-// and `sleep` is injectable so tests can bound the otherwise-infinite loop.
+// Serialize supervisor passes so no two overlap — the guarantee that keeps two
+// claim windows from opening at once (plan 0173, AGENTS.md §2). Only one pass
+// runs at a time; a tick or event arriving mid-pass sets a pending flag and is
+// coalesced into one follow-up pass, a pending tick (heartbeat) winning over a
+// pending event so heartbeats are never dropped nor doubled. A throwing pass is
+// routed to onError and never propagates. `tick()`/`event()` return the batch's
+// settle promise; `idle()` awaits the current batch.
+export function createSupervisorPump({ runPass, onError = null }) {
+  let running = false;
+  let pendingTick = false;
+  let pendingEvent = false;
+  let chain = Promise.resolve();
+  const drive = () => {
+    if (running) return chain;
+    running = true;
+    chain = (async () => {
+      try {
+        for (;;) {
+          let kind;
+          if (pendingTick) {
+            pendingTick = false;
+            kind = "tick";
+          } else if (pendingEvent) {
+            pendingEvent = false;
+            kind = "event";
+          } else break;
+          try {
+            await runPass(kind);
+          } catch (e) {
+            if (onError) await onError(e, kind);
+            else throw e;
+          }
+        }
+      } finally {
+        running = false;
+      }
+    })();
+    return chain;
+  };
+  return {
+    tick() {
+      pendingTick = true;
+      return drive();
+    },
+    event() {
+      pendingEvent = true;
+      return drive();
+    },
+    idle() {
+      return chain;
+    },
+  };
+}
+
+// Pump onError: log a failed pass as a herd event and swallow it, so a throw in
+// an event pass never crashes the supervisor — the next tick reconciles (plan
+// 0173). A tick pass rethrows, preserving the pre-0173 "unexpected error stops
+// the loop" contract (herd.mjs's onLoopError surfaces it).
+function passErrorHandler({ eventsPath = EVENTS_FILE, log = console.log, now = () => Date.now() } = {}) {
+  return (e, kind) => {
+    appendHerdEvent(eventsPath, { now: now(), event: "supervisor-pass-error", kind, message: e.message }, () => {});
+    log(`herd: ${kind} pass failed: ${e.message}; continuing — the next tick reconciles.`);
+    if (kind !== "event") throw e;
+  };
+}
+
+// The poll loop. `--once` runs one pass and returns; the default polls every
+// pollSeconds. `step` is the per-pass work (defaulting to pollOnce; the
+// dispatcher composes survey + dispatch into it, receiving the pass `kind`),
+// `sleep` bounds the loop in tests, and `onExitSignal(fn)` registers a worker-
+// exit listener so a local exit fires an immediate reactive pass. The tick
+// metronome is independent of event passes, so a reaction never shifts cadence.
 export async function runLoop(opts) {
-  const { once = false, pollSeconds = 15, sleep = defaultSleep, step = pollOnce } = opts;
+  const { once = false, pollSeconds = 15, sleep = defaultSleep, step = pollOnce, onExitSignal = null } = opts;
+  const pump = createSupervisorPump({
+    runPass: (kind) => step({ ...opts, kind }),
+    onError: passErrorHandler(opts),
+  });
+  if (onExitSignal) onExitSignal(() => pump.event());
+  await pump.tick();
+  await pump.idle();
+  if (once) return;
   for (;;) {
-    await step(opts);
-    if (once) return;
     await sleep(pollSeconds * 1000);
+    await pump.tick();
+    await pump.idle();
   }
 }
 
@@ -918,6 +998,7 @@ export async function scopedRun(opts) {
     pollSeconds = 15,
     sleep = defaultSleep,
     now = () => Date.now(),
+    onExitSignal = null,
     ...rest
   } = opts;
 
@@ -955,29 +1036,46 @@ export async function scopedRun(opts) {
       "will exit once every target has finished.",
   );
   const completed = new Set();
-  for (;;) {
-    await step({ gh, statePath, escalationsPath, eventsPath, log, once, pollSeconds, sleep, ...rest, targets: eligible });
+  let finished = false;
+  const result = () => ({ exitCode: 0, spawned: eligible.length, eligible, ineligible, completed: [...completed] });
+  // After each settled pass, re-survey the targets and accumulate the finished
+  // ones — accumulating makes completion robust to pollOnce's terminal-entry
+  // prune, and a concluding target is reported (why), never a silent drop.
+  const checkComplete = async () => {
     const passInfo = await surveyTargets(gh, eligible).catch(() => ({}));
     const st = readState(statePath);
     const before = new Set(completed);
     markScopedComplete(eligible, st, passInfo, completed);
-    // Report each newly-finished target (why it finished — a closed issue or a
-    // scoped-done state-file status), so a target concluding mid-run is never a
-    // silent drop.
     for (const n of eligible) {
       if (before.has(n) || !completed.has(n)) continue;
       const closed = (passInfo[n] || passInfo[String(n)] || {}).state === "CLOSED";
       log(`herd: scoped target #${n} finished (${closed ? "issue closed" : st[String(n)]?.status ?? "terminal"}).`);
     }
     if (eligible.every((n) => completed.has(n))) {
-      log(
-        `herd: all scoped targets finished (${eligible.map((n) => `#${n}`).join(", ")}). Exiting.`,
-      );
-      return { exitCode: 0, spawned: eligible.length, eligible, ineligible, completed: [...completed] };
+      finished = true;
+      log(`herd: all scoped targets finished (${eligible.map((n) => `#${n}`).join(", ")}). Exiting.`);
     }
-    // `--once`/`--dry-run`: a single pass was requested, so stop even if targets
-    // have not all finished — the caller only asked to survey/dispatch once.
-    if (once) return { exitCode: 0, spawned: eligible.length, eligible, ineligible, completed: [...completed] };
+  };
+  const pump = createSupervisorPump({
+    runPass: async (kind) => {
+      await step({ gh, statePath, escalationsPath, eventsPath, log, once, pollSeconds, sleep, ...rest, kind, targets: eligible });
+      await checkComplete();
+    },
+    onError: passErrorHandler({ eventsPath, log, now }),
+  });
+  // A local worker exit drives an immediate reactive pass; the moment it carries
+  // the final target to a terminal state the run exits, even between ticks.
+  if (onExitSignal) onExitSignal(() => pump.event());
+  await pump.tick();
+  await pump.idle();
+  // `--once`/`--dry-run`: a single pass was requested, so stop even if targets
+  // have not all finished — the caller only asked to survey/dispatch once.
+  if (finished || once) return result();
+  for (;;) {
     await sleep(pollSeconds * 1000);
+    if (finished) return result(); // an event pass completed the run during the sleep
+    await pump.tick();
+    await pump.idle();
+    if (finished) return result();
   }
 }

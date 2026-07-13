@@ -12,8 +12,8 @@ import assert from "node:assert/strict";
 import { readFileSync, writeFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pickNext, buildDispatch, spawnWorker, waitForClaim, dispatchOne } from "./herd-dispatch.mjs";
-import { readState } from "./herd-survey.mjs";
+import { pickNext, buildDispatch, spawnWorker, waitForClaim, dispatchOne, supervisorStep } from "./herd-dispatch.mjs";
+import { readState, createSupervisorPump } from "./herd-survey.mjs";
 
 const NOW = Date.UTC(2026, 6, 9, 12, 0, 0); // fixed clock — no Date.now dependence
 
@@ -830,4 +830,75 @@ await inTempDir(async () => {
   assert.equal(capped.reason, "at-capacity", "without --max the config maxWorkers (3) cap holds under targeting");
 });
 
-console.log("PASS herd-dispatch.test.mjs (8 checks for #105/#126 + 3 for #127 + 1 for #138 + 1 for #151 + 1 for #156 + 3 for #285 + 4 for #286 + 5 for #350 dispatch filter)");
+// ── issue #419 (plan 0173): event-driven local dispatch. The supervisor reacts
+// to local worker events instead of waiting for the poll tick. One test per
+// acceptance criterion, named after it. ──
+
+// #419 criterion 1: a worker exit immediately triggers the monitor/reconcile
+// pass for that issue and, when capacity and eligible targets remain, the next
+// dispatch — from the exit event alone, without waiting for a tick.
+await inTempDir(async () => {
+  const calls = [];
+  // The reactive pass the supervisor runs on a worker exit: pollOnce (heartbeat)
+  // only on a tick, monitor + drain-dispatch on every pass.
+  const runPass = (kind) =>
+    supervisorStep({
+      kind, gh: async () => [], config: mkConfig(), maxWorkers: 3,
+      statePath: "s.json", escalationsPath: "e.md", eventsPath: "ev.jsonl",
+      pollOnce: async () => calls.push("heartbeat"),
+      monitorOnce: async () => calls.push("monitor"),
+      surveyReady: async () => [],
+      dispatchOne: async () => (calls.push("dispatch"), { dispatched: null, reason: "no-eligible-issue" }),
+      log: () => {},
+    });
+  const pump = createSupervisorPump({ runPass });
+  // A worker's process exit fires notifyExit; the supervisor wires that to an
+  // immediate reactive (event) pass.
+  writeFileSync("s.json", "{}");
+  let onExitCb;
+  const spawn = (argv, env, logFile, cb) => ((onExitCb = cb), 4242);
+  const ready = [{ number: 5, createdAt: "2026-01-01", labels: [{ name: "priority:medium" }] }];
+  await dispatchOne({
+    config: mkConfig(), ready, statePath: "s.json", escalationsPath: "e.md", eventsPath: "ev.jsonl",
+    gh: async (a) => (a[0] === "api" ? {} : []), spawn, isAlive: () => true, onPath: () => true,
+    now: () => NOW, sleep: async () => {}, log: () => {}, notifyExit: () => pump.event(),
+  });
+  assert.ok(onExitCb, "the dispatched worker's exit handler is wired");
+  calls.length = 0; // watch only the reaction, not the dispatch that spawned it
+  onExitCb(0, null); // the worker process exits
+  await pump.idle();
+  assert.ok(calls.includes("monitor"), "a worker exit triggers the monitor/reconcile pass from the exit event alone");
+  assert.ok(calls.includes("dispatch"), "and the next dispatch, without waiting for the tick");
+  assert.ok(!calls.includes("heartbeat"), "the exit-driven pass runs no pollOnce/heartbeat (it is an event pass)");
+});
+
+// Shared offline harness for the drain checks below: claim ref always present,
+// spawn/liveness/adapter-availability all stubbed so dispatchOne drains for real.
+const readyList = (...ns) => ns.map((n) => ({ number: n, createdAt: "2026-01-01", labels: [{ name: "priority:medium" }] }));
+const stepBase = { gh: async (a) => (a[0] === "api" ? {} : []), statePath: "s.json", escalationsPath: "e.md", eventsPath: "ev.jsonl", isAlive: () => true, onPath: () => true, now: () => NOW, sleep: async () => {}, log: () => {} };
+
+// #419 criterion 2: with 3 scoped targets and maxWorkers 3, all three workers
+// launch in a single drained pass as each preceding claim is observed, not one
+// per tick.
+await inTempDir(async () => {
+  let pid = 100;
+  const r = await supervisorStep({ ...stepBase, kind: "tick", config: mkConfig({ maxWorkers: 3 }), maxWorkers: 3, surveyReady: async () => readyList(1, 2, 3), spawn: () => ++pid });
+  assert.equal(r.launched, 3, "all three workers launch in one pass, not one per tick");
+  assert.deepEqual(Object.keys(readState("s.json")).sort(), ["1", "2", "3"], "each of the three targets has a worker after the single pass");
+});
+
+// #419 criterion 3: an event-driven dispatch attempt while at maxWorkers, or for
+// an issue that already has a worker, launches nothing.
+await inTempDir(async () => {
+  writeFileSync("s.json", JSON.stringify({
+    7: { adapter: "claude", pid: 111, logFile: "a.log", attempts: 1, pr: null, status: "dispatched" },
+    8: { adapter: "claude", pid: 112, logFile: "b.log", attempts: 1, pr: null, status: "dispatched" },
+  }));
+  let spawns = 0;
+  const r = await supervisorStep({ ...stepBase, kind: "event", config: mkConfig({ maxWorkers: 2 }), maxWorkers: 2, surveyReady: async () => readyList(7, 8, 9), spawn: () => (spawns++, 999) });
+  assert.equal(spawns, 0, "an event-driven dispatch at maxWorkers spawns nothing");
+  assert.equal(r.launched, 0, "no worker is launched");
+  assert.deepEqual(Object.keys(readState("s.json")).sort(), ["7", "8"], "issue #9 is held at capacity and the already-tracked #7/#8 get no second worker");
+});
+
+console.log("PASS herd-dispatch.test.mjs (8 checks for #105/#126 + 3 for #127 + 1 for #138 + 1 for #151 + 1 for #156 + 3 for #285 + 4 for #286 + 5 for #350 dispatch filter + 3 for #419 event-driven dispatch)");
