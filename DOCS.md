@@ -213,6 +213,7 @@ scripts/
   gh-api-migration.test.mjs     Guard: sweep/label/conflict scripts use the shared client
   gates-coverage.mjs            Guard: every *.test.mjs runs in a GATES.md row
   gates-coverage.test.mjs       Regression test for the coverage guard
+  map-onboarding.test.mjs       Guard: MAP.md exists, is current, tolerates absence
   gates-table.mjs               Shared parser for the GATES.md markdown table
   herd.mjs                      ratchet-herd config loader, validator, init
   herd.test.mjs                 Regression test for herd config
@@ -220,6 +221,7 @@ scripts/
   herd-adapters.test.mjs        Regression test for the herd-adapters leaf extraction
   herd-survey.mjs               ratchet-herd survey/reconcile poll loop
   herd-survey.test.mjs          Regression test for herd survey loop
+  herd-escalation-dedup.test.mjs  Regression test for source-side escalation dedup
   herd-dispatch.mjs             ratchet-herd worker dispatcher
   herd-dispatch.test.mjs        Regression test for herd dispatcher
   herd-monitor.mjs              ratchet-herd worker monitor: verify/resume/escalate
