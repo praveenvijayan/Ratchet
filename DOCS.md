@@ -945,12 +945,12 @@ configuration, not committed framework.
   "adapters": {
     "claude": {
       "launch": ["claude", "-p", "--dangerously-skip-permissions", "{prompt}"],
-      "promptTemplate": "Issue {issue} is your entire assignment: take only issue {issue} to a PR, following AGENTS.md. Skip AGENTS.md's pick step — do not survey the ready queue, and never claim, work on, or fall through to any other issue. An existing agent/issue-{issue} branch is your own prior claim on this same assignment: resume it under AGENTS.md's resume rules, never as a foreign claim to exit or fall through from. If issue {issue} already has a pull request opened by someone else, exit immediately without touching any branch, worktree, or other issue. Open the pull request only with `node scripts/ratchet-submit.mjs --issue {issue} --body-file <path>` — never `gh pr create`; the body file's first line must be exactly `Closes #{issue}`, followed by a `## Gates` section recording the GATES.md gate results, so the herd's verify stage passes instead of escalating.",
+      "promptTemplate": "Issue {issue} is your entire assignment. Read `.agents/skills/ratchet-herd/SKILL.md` for the pinned worker dispatch rules, then follow them and AGENTS.md.",
       "env": {}
     },
     "codex": {
       "launch": ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "{prompt}"],
-      "promptTemplate": "Issue {issue} is your entire assignment: take only issue {issue} to a PR, following AGENTS.md. Skip AGENTS.md's pick step — do not survey the ready queue, and never claim, work on, or fall through to any other issue. An existing agent/issue-{issue} branch is your own prior claim on this same assignment: resume it under AGENTS.md's resume rules, never as a foreign claim to exit or fall through from. If issue {issue} already has a pull request opened by someone else, exit immediately without touching any branch, worktree, or other issue. Open the pull request only with `node scripts/ratchet-submit.mjs --issue {issue} --body-file <path>` — never `gh pr create`; the body file's first line must be exactly `Closes #{issue}`, followed by a `## Gates` section recording the GATES.md gate results, so the herd's verify stage passes instead of escalating.",
+      "promptTemplate": "Issue {issue} is your entire assignment. Read `.agents/skills/ratchet-herd/SKILL.md` for the pinned worker dispatch rules, then follow them and AGENTS.md.",
       "env": {}
     }
   },
@@ -1007,6 +1007,9 @@ An adapter tells the supervisor how to start and restart one worker CLI:
   `herd init` runs** — an existing `.ratchet/herd.json` keeps whatever template
   it was created with, so update the `promptTemplate` in yours by hand to pick
   up this behaviour.
+  Keep the shared prompt prefix short and dispatch instructions tight: this
+  improves prompt-cache hit rate when staggered workers launch against the same
+  repository.
 - **`env`** (optional object) — see the env passthrough below.
 
 **Substitution is deliberately tiny: only `{prompt}` and `{issue}` are
@@ -1189,7 +1192,18 @@ These hold no matter what the config says:
 
 - **It never merges, approves, closes, or labels** a PR or an issue. Every one
   of the two human jobs — writing plans and reviewing PRs — stays with the
-  human. The supervisor only observes, dispatches, and escalates.
+  human. The supervisor only observes, dispatches, and escalates, with one
+  narrow exception below.
+- **One permitted deletion (dead-worker claim auto-recovery).** The supervisor
+  may delete exactly one thing: a claim ref `agent/issue-<N>` it watched its own
+  worker create, once that worker has died at the rework cap with no PR open on
+  the ref. It deletes that one ref and requeues the issue (the same label flip +
+  comment `ratchet-requeue` performs), so a crashed worker no longer blocks the
+  issue until a human intervenes. It never deletes a ref it did not observe its
+  own worker create — an unobserved/foreign claim ref still only escalates (the
+  survey's stale-claim path is unchanged) — and it touches nothing else: no
+  merge, approve, close, or PR-body edit. A gh failure mid-recovery escalates
+  once with the exact `gh api -X DELETE …` and `ratchet-requeue` commands.
 - **One issue, one worker.** At most `maxWorkers` run at once, and each owns a
   single issue; dispatch uses the same server-side branch-ref claim as a solo
   agent (§2), so two workers can never collide on one issue.

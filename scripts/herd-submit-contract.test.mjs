@@ -12,18 +12,29 @@
 // Zero dependencies. Run:  node scripts/herd-submit-contract.test.mjs
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { defaultConfig } from "./herd.mjs";
+import { buildDispatch } from "./herd-dispatch.mjs";
 import { run as submit } from "./ratchet-submit.mjs";
 import { verifyOnce, hasClosesRef, hasGatesSection } from "./herd-verify.mjs";
 import { readState } from "./herd-survey.mjs";
 
 const NOW = Date.UTC(2026, 6, 13, 12, 0, 0);
 const ISSUE = 425;
+const PINNED_DISPATCH_RULES = readFileSync(
+  fileURLToPath(new URL("../.agents/skills/ratchet-herd/SKILL.md", import.meta.url)),
+  "utf8",
+);
+const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
+const MIRROR_PATHS = [
+  fileURLToPath(new URL("../.claude/skills/ratchet-herd/SKILL.md", import.meta.url)),
+  fileURLToPath(new URL("../plugin/skills/ratchet-herd/SKILL.md", import.meta.url)),
+];
 
 // The body a worker writes per the contract: a `Closes #<N>` first line and a
 // `## Gates` section. ratchet-submit relays this model-authored body verbatim.
@@ -123,18 +134,19 @@ async function verifyBody(body) {
   });
 }
 
-// --- Criterion 1: the shipped default promptTemplate (both adapters) and the
-// worker contract direct workers to open the PR via ratchet-submit, never raw
-// `gh pr create`. ----------------------------------------------------------
+// --- Criterion 1: the shipped default promptTemplate (both adapters) points
+// workers at the canonical dispatch skill, whose contract directs them to open
+// the PR via ratchet-submit, never raw `gh pr create`. -----------------------
 {
   const { adapters } = defaultConfig();
   const entries = Object.entries(adapters);
   assert.ok(entries.length >= 2, "both shipped adapters are present");
   for (const [name, a] of entries) {
-    assert.match(a.promptTemplate, /node scripts\/ratchet-submit\.mjs --issue \{issue\} --body-file/, `${name}: directs the PR through ratchet-submit`);
-    assert.match(a.promptTemplate, /never `gh pr create`/, `${name}: forbids raw gh pr create`);
+    assert.match(a.promptTemplate, /\.agents\/skills\/ratchet-herd\/SKILL\.md/, `${name}: points to the canonical dispatch skill`);
     assert.doesNotMatch(a.promptTemplate, /\bgh pr create\b(?!`)/, `${name}: never instructs a bare gh pr create`);
   }
+  assert.match(PINNED_DISPATCH_RULES, /ratchet-submit\.mjs --issue/, "the dispatch skill directs the PR through ratchet-submit");
+  assert.match(PINNED_DISPATCH_RULES, /never `gh pr create`/, "the dispatch skill forbids raw gh pr create");
 }
 
 // --- Criterion 2: the PR body ratchet-submit produces (relays to GitHub) passes
@@ -192,6 +204,61 @@ async function verifyBody(body) {
   assert.equal(markers.length, unique.size, "no criterion is tested twice");
   assert.equal(markers.length, CRITERIA_COUNT, `exactly ${CRITERIA_COUNT} criteria are tested`);
   for (let n = 1; n <= CRITERIA_COUNT; n++) assert.ok(unique.has(n), `criterion ${n} has a test`);
+}
+
+// --- Issue #430 Criterion 1: pinned-dispatch rules live in the canonical
+// skill and identical setup.sh mirrors, while the public parity guard passes -
+{
+  assert.match(PINNED_DISPATCH_RULES, /Issue \{issue\} is your entire assignment/);
+  assert.match(PINNED_DISPATCH_RULES, /agent\/issue-\{issue\}.*prior claim/s);
+  assert.match(PINNED_DISPATCH_RULES, /never as a foreign\s+claim/);
+  assert.match(PINNED_DISPATCH_RULES, /opened by someone else, exit\s+immediately/);
+  for (const mirror of MIRROR_PATHS)
+    assert.equal(readFileSync(mirror, "utf8"), PINNED_DISPATCH_RULES, "setup.sh mirror matches canonical skill");
+  const parity = spawnSync("node", ["scripts/skill-parity.mjs"], { cwd: REPO_ROOT, encoding: "utf8" });
+  assert.equal(parity.status, 0, `${parity.stdout}\n${parity.stderr}`);
+}
+
+// --- Issue #430 Criterion 2: the shipped default prompt is short, names the
+// issue, and delegates the complete pinned contract to the canonical skill ---
+{
+  const prompts = Object.values(defaultConfig().adapters).map(({ promptTemplate }) => promptTemplate);
+  assert.ok(prompts.length >= 2, "the shipped default retains both adapters");
+  assert.ok(prompts.every((prompt) => prompt === prompts[0]), "all shipped adapters share one prompt");
+  assert.equal(
+    prompts[0],
+    "Issue {issue} is your entire assignment. Read `.agents/skills/ratchet-herd/SKILL.md` for the pinned worker dispatch rules, then follow them and AGENTS.md.",
+  );
+  assert.ok(prompts[0].length < 220, "the default prompt is materially shorter than the inline contract");
+}
+
+// --- Issue #430 Criterion 3: a rendered worker prompt contains the dispatched
+// issue number and the canonical skill path ----------------------------------
+{
+  const plan = buildDispatch(defaultConfig(), { number: 430, labels: [] });
+  const rendered = plan.argv.at(-1);
+  assert.match(rendered, /Issue 430 is your entire assignment/);
+  assert.match(rendered, /\.agents\/skills\/ratchet-herd\/SKILL\.md/);
+  assert.doesNotMatch(rendered, /\{issue\}/);
+}
+
+// --- Issue #430 Criterion 4: DOCS.md mirrors the default verbatim, preserves
+// the operator migration note, and documents the prompt-cache rationale ------
+{
+  const docs = readFileSync(fileURLToPath(new URL("../DOCS.md", import.meta.url)), "utf8");
+  for (const adapter of Object.values(defaultConfig().adapters))
+    assert.ok(docs.includes(`"promptTemplate": ${JSON.stringify(adapter.promptTemplate)}`), "DOCS.md matches the default prompt");
+  assert.match(docs, /update the `promptTemplate` in yours by hand/);
+  assert.match(docs, /shared prompt prefix short and dispatch instructions tight/);
+  assert.match(docs, /improves prompt-cache hit rate/);
+}
+
+// --- Issue #430 Criterion 5: this suite has exactly one test named after each
+// issue-430 criterion --------------------------------------------------------
+{
+  const self = readFileSync(fileURLToPath(import.meta.url), "utf8");
+  const markers = [...self.matchAll(/^\/\/ --- Issue #430 Criterion (\d+):/gim)].map((m) => Number(m[1]));
+  assert.deepEqual(markers, [1, 2, 3, 4, 5], "each issue-430 criterion has exactly one named test");
 }
 
 console.log("herd-submit-contract.test.mjs: all criteria passed");

@@ -129,15 +129,8 @@ export class HerdConfigError extends Error {
 // operator adds, removes, or re-flags agents without touching the framework.
 export function defaultConfig() {
   const promptTemplate =
-    "Issue {issue} is your entire assignment: take only issue {issue} to a PR, following AGENTS.md. " +
-    "Skip AGENTS.md's pick step — do not survey the ready queue, and never claim, work on, or fall " +
-    "through to any other issue. An existing agent/issue-{issue} branch is your own prior claim on " +
-    "this same assignment: resume it under AGENTS.md's resume rules, never as a foreign claim to exit " +
-    "or fall through from. If issue {issue} already has a pull request opened by someone else, exit " +
-    "immediately without touching any branch, worktree, or other issue. " +
-    "Open the pull request only with `node scripts/ratchet-submit.mjs --issue {issue} --body-file <path>` — " +
-    "never `gh pr create`; the body file's first line must be exactly `Closes #{issue}`, followed by a " +
-    "`## Gates` section recording the GATES.md gate results, so the herd's verify stage passes instead of escalating.";
+    "Issue {issue} is your entire assignment. Read `.agents/skills/ratchet-herd/SKILL.md` for the pinned " +
+    "worker dispatch rules, then follow them and AGENTS.md.";
   return {
     maxWorkers: DEFAULTS.maxWorkers,
     pollSeconds: DEFAULTS.pollSeconds,
