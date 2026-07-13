@@ -228,6 +228,7 @@ scripts/
   herd-retention.test.mjs       Regression test for herd retention
   herd-verify.mjs               ratchet-herd PR verifier: conflict rework/escalate
   herd-verify.test.mjs          Regression test for herd PR verify
+  herd-submit-contract.test.mjs Regression test for the worker submit-through-ratchet-submit contract
   herd-review.mjs               ratchet-herd review-verdict reactor: changes-requested rework/escalate
   herd-review.test.mjs          Regression test for herd review reactor
   herd-ui.mjs                   ratchet-herd local web dashboard (node:http + SSE)
@@ -942,12 +943,12 @@ configuration, not committed framework.
   "adapters": {
     "claude": {
       "launch": ["claude", "-p", "--dangerously-skip-permissions", "{prompt}"],
-      "promptTemplate": "Issue {issue} is your entire assignment: take only issue {issue} to a PR, following AGENTS.md. Skip AGENTS.md's pick step — do not survey the ready queue, and never claim, work on, or fall through to any other issue. An existing agent/issue-{issue} branch is your own prior claim on this same assignment: resume it under AGENTS.md's resume rules, never as a foreign claim to exit or fall through from. If issue {issue} already has a pull request opened by someone else, exit immediately without touching any branch, worktree, or other issue.",
+      "promptTemplate": "Issue {issue} is your entire assignment: take only issue {issue} to a PR, following AGENTS.md. Skip AGENTS.md's pick step — do not survey the ready queue, and never claim, work on, or fall through to any other issue. An existing agent/issue-{issue} branch is your own prior claim on this same assignment: resume it under AGENTS.md's resume rules, never as a foreign claim to exit or fall through from. If issue {issue} already has a pull request opened by someone else, exit immediately without touching any branch, worktree, or other issue. Open the pull request only with `node scripts/ratchet-submit.mjs --issue {issue} --body-file <path>` — never `gh pr create`; the body file's first line must be exactly `Closes #{issue}`, followed by a `## Gates` section recording the GATES.md gate results, so the herd's verify stage passes instead of escalating.",
       "env": {}
     },
     "codex": {
       "launch": ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "{prompt}"],
-      "promptTemplate": "Issue {issue} is your entire assignment: take only issue {issue} to a PR, following AGENTS.md. Skip AGENTS.md's pick step — do not survey the ready queue, and never claim, work on, or fall through to any other issue. An existing agent/issue-{issue} branch is your own prior claim on this same assignment: resume it under AGENTS.md's resume rules, never as a foreign claim to exit or fall through from. If issue {issue} already has a pull request opened by someone else, exit immediately without touching any branch, worktree, or other issue.",
+      "promptTemplate": "Issue {issue} is your entire assignment: take only issue {issue} to a PR, following AGENTS.md. Skip AGENTS.md's pick step — do not survey the ready queue, and never claim, work on, or fall through to any other issue. An existing agent/issue-{issue} branch is your own prior claim on this same assignment: resume it under AGENTS.md's resume rules, never as a foreign claim to exit or fall through from. If issue {issue} already has a pull request opened by someone else, exit immediately without touching any branch, worktree, or other issue. Open the pull request only with `node scripts/ratchet-submit.mjs --issue {issue} --body-file <path>` — never `gh pr create`; the body file's first line must be exactly `Closes #{issue}`, followed by a `## Gates` section recording the GATES.md gate results, so the herd's verify stage passes instead of escalating.",
       "env": {}
     }
   },

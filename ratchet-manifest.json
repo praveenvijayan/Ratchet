@@ -541,6 +541,10 @@
       "class": "excluded"
     },
     {
+      "path": "scripts/herd-submit-contract.test.mjs",
+      "class": "excluded"
+    },
+    {
       "path": "scripts/herd.test.mjs",
       "class": "excluded"
     },
