@@ -355,4 +355,23 @@ const memory = read("memory/MEMORY.md");
   }
 }
 
-console.log("PASS docs-refresh.test.mjs (6 #60 criteria + 4 #191 criteria + 4 #91 criteria + 3 #233 criteria + 2 #268 criteria + 7 #347 criteria)");
+// #421 AC4: the herd config reference in DOCS.md states the new default
+// pollSeconds and why a short tick is affordable (conditional/ETag requests).
+// This is the docs criterion of the lower-poll-interval plan (0175), mapped —
+// per the plan — to this docs-consistency check rather than a separate suite.
+{
+  const { DEFAULTS } = await import("./herd.mjs");
+  assert.equal(DEFAULTS.pollSeconds, 15, "sanity: the shipped default poll interval is 15s");
+  assert.match(
+    docs,
+    /"pollSeconds":\s*15/,
+    "DOCS herd config reference must state the new 15s pollSeconds default",
+  );
+  assert.match(
+    docs,
+    /"pollSeconds":\s*15[^\n]*(conditional|ETag|304)/i,
+    "DOCS must explain why the short tick is affordable (conditional/ETag requests cost no rate limit)",
+  );
+}
+
+console.log("PASS docs-refresh.test.mjs (6 #60 criteria + 4 #191 criteria + 4 #91 criteria + 3 #233 criteria + 2 #268 criteria + 7 #347 criteria + 1 #421 criterion)");

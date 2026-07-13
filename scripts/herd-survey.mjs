@@ -774,7 +774,7 @@ const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // (defaulting to pollOnce; the dispatcher composes survey + dispatch into it),
 // and `sleep` is injectable so tests can bound the otherwise-infinite loop.
 export async function runLoop(opts) {
-  const { once = false, pollSeconds = 60, sleep = defaultSleep, step = pollOnce } = opts;
+  const { once = false, pollSeconds = 15, sleep = defaultSleep, step = pollOnce } = opts;
   for (;;) {
     await step(opts);
     if (once) return;
@@ -915,7 +915,7 @@ export async function scopedRun(opts) {
     step = pollOnce,
     once = false,
     dryRun = false,
-    pollSeconds = 60,
+    pollSeconds = 15,
     sleep = defaultSleep,
     now = () => Date.now(),
     ...rest
