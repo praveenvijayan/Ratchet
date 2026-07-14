@@ -34,6 +34,7 @@ import { verifyOnce } from "./herd-verify.mjs";
 import { normalizeConfig } from "./herd.mjs";
 
 const NOW = Date.UTC(2026, 6, 9, 12, 0, 0); // fixed clock — no Date.now dependence
+const MIN = 60 * 1000; // one minute in ms, for advancing the fixed clock between polls
 
 // Minimal supervisor config for the dispatch-side integration check below.
 const mkConfig = () => ({
@@ -494,13 +495,15 @@ await inTempDir(async () => {
   assert.match(esc, /gh api -X DELETE.*agent\/issue-77/, "the escalation includes the delete command");
 });
 
-// #173 AC2) A stale ref whose issue is closed does not create a worker row in
-// the state file.
+// #173 AC2) A stale ref whose issue is closed records a suppression sentinel,
+// not a live worker row: the entry carries the stale-claim status with pid null
+// (issue #441 — the sentinel is what makes the ref escalate exactly once).
 await inTempDir(async () => {
   const gh = fakeGhWithRefs({ claimRefs: [77], closedIssues: [77] });
   await pollOnce({ gh, isAlive: () => false, now: NOW, statePath: "s.json", escalationsPath: "e.md", log: () => {} });
   const state = JSON.parse(readFileSync("s.json", "utf8"));
-  assert.ok(!("77" in state), "no worker row in the state file for a closed-issue stale ref");
+  assert.equal(state["77"]?.status, "stale-claim", "a stale-claim sentinel, not a worker row, is recorded for a closed-issue stale ref");
+  assert.equal(state["77"].pid, null, "the sentinel tracks no live worker");
 });
 
 // #173 AC3) A stale ref whose issue is still open keeps the existing escalation
@@ -539,6 +542,70 @@ await inTempDir(async () => {
   for (const ac of ["AC1", "AC2", "AC3", "AC4"]) {
     const hits = (self.match(new RegExp(`#173 ${ac}\\)`, "g")) || []).length;
     assert.equal(hits, 1, `#173 ${ac} has exactly one test named after it`);
+  }
+}
+
+// --- Issue #441: a stale claim ref on a closed issue is escalated once, not
+// every poll. One test per acceptance criterion, named after it. ---
+
+// #441 AC1) A stale ref whose issue is closed is escalated exactly once: a later
+// poll with the ref still present writes no escalation entry, bumps no
+// occurrence count, and makes no issue-state API call for it.
+await inTempDir(async () => {
+  const calls = [];
+  const inner = fakeGhWithRefs({ claimRefs: [77], closedIssues: [77] });
+  const gh = async (a) => { calls.push(a); return inner(a); };
+
+  const r1 = await pollOnce({ gh, isAlive: () => false, now: NOW, statePath: "s.json", escalationsPath: "e.md", log: () => {} });
+  assert.equal(r1.staleEscalated, 1, "the closed-issue stale ref is escalated on the first poll");
+  const afterFirst = readFileSync("e.md", "utf8");
+
+  calls.length = 0;
+  const r2 = await pollOnce({ gh, isAlive: () => false, now: NOW + MIN, statePath: "s.json", escalationsPath: "e.md", log: () => {} });
+  assert.equal(r2.staleEscalated, 0, "a later poll does not re-escalate the same closed-issue ref");
+  assert.equal(readFileSync("e.md", "utf8"), afterFirst, "no escalation entry is written and no occurrence count is bumped on the later poll");
+  assert.ok(!calls.some((a) => a[0] === "issue" && a[1] === "view"), "no issue-state API call is made for the already-escalated closed ref");
+});
+
+// #441 AC2) The per-poll summary counts only stale refs newly escalated this
+// pass: a ref escalated on an earlier poll no longer appears in the count, even
+// as a brand-new stale ref is escalated alongside it.
+await inTempDir(async () => {
+  const gh1 = fakeGhWithRefs({ claimRefs: [77], closedIssues: [77] });
+  const r1 = await pollOnce({ gh: gh1, isAlive: () => false, now: NOW, statePath: "s.json", escalationsPath: "e.md", log: () => {} });
+  assert.equal(r1.staleEscalated, 1, "the first closed ref is counted on its first poll");
+
+  // Next poll: #77 still lingers (already escalated), #78 is newly stale.
+  const gh2 = fakeGhWithRefs({ claimRefs: [77, 78], closedIssues: [77, 78] });
+  const r2 = await pollOnce({ gh: gh2, isAlive: () => false, now: NOW + MIN, statePath: "s.json", escalationsPath: "e.md", log: () => {} });
+  assert.equal(r2.staleEscalated, 1, "the summary counts only the newly escalated ref, not the one escalated on an earlier poll");
+});
+
+// #441 AC3) Once the stale ref is deleted from origin its suppression is
+// cleared, so a genuine recurrence of the same ref escalates again.
+await inTempDir(async () => {
+  const escd = fakeGhWithRefs({ claimRefs: [77], closedIssues: [77] });
+  const r1 = await pollOnce({ gh: escd, isAlive: () => false, now: NOW, statePath: "s.json", escalationsPath: "e.md", log: () => {} });
+  assert.equal(r1.staleEscalated, 1, "the closed ref is escalated when it first appears");
+
+  // The ref is deleted from origin: the sentinel is cleared this poll.
+  const gone = fakeGhWithRefs({ claimRefs: [], closedIssues: [77] });
+  await pollOnce({ gh: gone, isAlive: () => false, now: NOW + MIN, statePath: "s.json", escalationsPath: "e.md", log: () => {} });
+  const cleared = JSON.parse(readFileSync("s.json", "utf8"));
+  assert.ok(!("77" in cleared), "the suppression sentinel is cleared once the ref is gone");
+
+  // The same ref reappears: with suppression cleared, it escalates again.
+  const back = fakeGhWithRefs({ claimRefs: [77], closedIssues: [77] });
+  const r3 = await pollOnce({ gh: back, isAlive: () => false, now: NOW + 2 * MIN, statePath: "s.json", escalationsPath: "e.md", log: () => {} });
+  assert.equal(r3.staleEscalated, 1, "a genuine recurrence of the same ref escalates again");
+});
+
+// #441 AC4) Every criterion above has exactly one test named after it.
+{
+  const self = readFileSync(new URL("./herd-survey.test.mjs", import.meta.url), "utf8");
+  for (const ac of ["AC1", "AC2", "AC3"]) {
+    const hits = (self.match(new RegExp(`#441 ${ac}\\)`, "g")) || []).length;
+    assert.equal(hits, 1, `#441 ${ac} has exactly one test named after it`);
   }
 }
 
@@ -1290,4 +1357,4 @@ await inTempDir(async () => {
   assert.match(esc, /stale claim ref agent\/issue-88 on origin/, "the escalation names the foreign ref for a human");
 });
 
-console.log("PASS herd-survey.test.mjs (7 criteria + issue #137: 4 criteria + issue #143: 5 criteria + issue #138: 5 criteria + issue #139: 3 criteria + issue #163: 3 criteria + issue #169: 4 criteria + issue #170: 4 criteria + issue #173: 5 criteria + issue #357: 3 criteria + issue #405: 5 criteria + issue #419: 4 criteria + issue #420: 5 criteria + issue #427: 1 criterion + 1 test note)");
+console.log("PASS herd-survey.test.mjs (7 criteria + issue #137: 4 criteria + issue #143: 5 criteria + issue #138: 5 criteria + issue #139: 3 criteria + issue #163: 3 criteria + issue #169: 4 criteria + issue #170: 4 criteria + issue #173: 5 criteria + issue #441: 4 criteria + issue #357: 3 criteria + issue #405: 5 criteria + issue #419: 4 criteria + issue #420: 5 criteria + issue #427: 1 criterion + 1 test note)");
