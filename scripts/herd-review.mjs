@@ -46,17 +46,27 @@ import { STATE_FILE, ESCALATIONS_FILE, EVENTS_FILE, readState, writeState, appen
 import { spawnWorker, recordExit } from "./herd-dispatch.mjs";
 import { isConflicting } from "./herd-verify.mjs";
 
-// The rework a changes-requested PR gets: read the review feedback and address it
-// on the existing branch, then push and hand the issue back to review. {issue}/{pr}
-// are filled in before the adapter argv is rendered. Unlike a fresh dispatch this
-// points the worker at the PR's review, and unlike the conflict rework it directs
-// the AGENTS.md step 6 flip back to state:in-review so this stage stays label-free.
+// The rework a changes-requested PR gets: read the review feedback, triage it by
+// scope, and act by type before pushing the issue back to review. A Request Changes
+// review is not always an in-scope fix — reviewers also ask for new features or
+// behaviour the issue never scoped, and building those straight into the PR breaks
+// AGENTS.md's one-issue-one-PR scope rule. So the worker classifies each point: an
+// in-scope fix lands as a commit on this PR's existing branch, while out-of-scope or
+// new-feature work is NOT implemented here but routed through the ratchet-plan
+// protocol (a plan/*.md on the planning PR) to become its own reviewed issue.
+// {issue}/{pr} are filled in before the adapter argv is rendered. Unlike a fresh
+// dispatch this points the worker at the PR's review, and unlike the conflict rework
+// it directs the AGENTS.md step 6 flip back to state:in-review so this stage stays
+// label-free.
 export const REVIEW_REWORK_PROMPT =
   "PR #{pr} for issue #{issue} received a Request Changes review. In its worktree (../wt/issue-{issue}), " +
-  "read the PR's review feedback (the review summary and every line comment), address each point with " +
-  "focused commits, re-run the GATES.md gates fail-fast (never push red), and push to update the existing " +
-  "PR — do not open a new one. Reply to each review comment with the commit that resolves it, then set the " +
-  "issue back to state:in-review for re-review.";
+  "read the PR's review feedback (the review summary and every line comment) and classify each point as an " +
+  "in-scope fix or out-of-scope, new-feature work before acting. Address every in-scope point with focused " +
+  "commits on this PR's existing branch — no new PR, no plan file. Do NOT implement any out-of-scope or " +
+  "new-feature point in this PR; instead file it through the ratchet-plan protocol (a plan/*.md on the planning " +
+  "PR) and reply to that review comment pointing to the plan. Re-run the GATES.md gates fail-fast (never push " +
+  "red), and push to update the existing PR — do not open a new one. Reply to each review comment with the " +
+  "commit that resolves it (or the plan that will handle it), then set the issue back to state:in-review for re-review.";
 
 // The rework a PR that is BOTH changes-requested AND conflicting gets. A PR that
 // was mergeable at verify time can go dirty once main advances under it; if it
@@ -65,14 +75,21 @@ export const REVIEW_REWORK_PROMPT =
 // with no herd stage ever sending it back through conflict resolution. This prompt
 // folds herd-verify's conflict wording ("merge origin/main, resolve every
 // conflict") into the review rework, so a successful rework leaves the PR
-// mergeable, not dirty. Like REVIEW_REWORK_PROMPT it flips the issue back to
-// state:in-review, keeping this stage label-free.
+// mergeable, not dirty. It carries the same scope triage as REVIEW_REWORK_PROMPT:
+// in-scope fixes land as commits on the existing branch alongside the conflict
+// resolution so both reach the same PR, while out-of-scope or new-feature work is
+// routed through the ratchet-plan protocol instead of built here. Like
+// REVIEW_REWORK_PROMPT it flips the issue back to state:in-review, keeping this
+// stage label-free.
 export const REVIEW_CONFLICT_REWORK_PROMPT =
   "PR #{pr} for issue #{issue} received a Request Changes review and now conflicts with main. In its worktree (../wt/issue-{issue}), " +
-  "merge origin/main, resolve every conflict, then read the PR's review feedback (the review summary and every line comment) and address each point with " +
-  "focused commits, re-run the GATES.md gates fail-fast (never push red), and push to update the existing " +
-  "PR — do not open a new one. A successful rework leaves the PR mergeable, not dirty. Reply to each review comment with the commit that resolves it, then set the " +
-  "issue back to state:in-review for re-review.";
+  "merge origin/main, resolve every conflict, then read the PR's review feedback (the review summary and every line comment) and " +
+  "classify each point as an in-scope fix or out-of-scope, new-feature work before acting. Address every in-scope point with focused " +
+  "commits on this PR's existing branch, alongside the conflict resolution, so the fix and the conflict resolution land in the same PR — " +
+  "no new PR, no plan file. Do NOT implement any out-of-scope or new-feature point in this PR; instead file it through the ratchet-plan " +
+  "protocol (a plan/*.md on the planning PR) and reply to that review comment pointing to the plan. Re-run the GATES.md gates fail-fast " +
+  "(never push red), and push to update the existing PR — do not open a new one. A successful rework leaves the PR mergeable, not dirty. " +
+  "Reply to each review comment with the commit that resolves it (or the plan that will handle it), then set the issue back to state:in-review for re-review.";
 
 // Decide a tracked ready-for-review PR's fate from its review decision and the
 // identity of its latest rejection versus the one this stage last acted on. Pure
