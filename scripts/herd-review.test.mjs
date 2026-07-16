@@ -10,8 +10,13 @@ import { readFileSync, writeFileSync, existsSync, mkdtempSync, rmSync } from "no
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { reviewOnce } from "./herd-review.mjs";
+import { reviewOnce, REVIEW_REWORK_PROMPT, REVIEW_CONFLICT_REWORK_PROMPT } from "./herd-review.mjs";
 import { readState } from "./herd-survey.mjs";
+
+// A pr-list survey row carrying mergeability alongside the review decision, the way
+// herd-review reads it now — used by the #445 conflict-aware tests.
+const prsMerge = (decision, { mergeable, mergeStateStatus } = {}) => () =>
+  [{ number: 42, headRefName: "agent/issue-7", reviewDecision: decision, mergeable, mergeStateStatus }];
 
 const NOW = Date.UTC(2026, 6, 10, 12, 0, 0);
 const noSpawn = (msg) => () => { throw new Error(msg); };
@@ -169,6 +174,100 @@ const self = readFileSync(fileURLToPath(import.meta.url), "utf8");
 for (const ac of ["AC1", "AC2", "AC3", "AC4"]) {
   const hits = (self.match(new RegExp(`#444 ${ac}:`, "g")) || []).length;
   assert.equal(hits, 1, `#444 ${ac} has exactly one test named after it`);
+}
+
+// #445 AC1: when herd dispatches a rework for a changes-requested PR that is also
+// conflicting (mergeable CONFLICTING or merge-state DIRTY), the rework instruction
+// directs the worker to merge origin/main and resolve every conflict in addition to
+// addressing the review feedback, then push — leaving the PR mergeable, not dirty.
+await inTempDir(async () => {
+  writeStateFile("s.json", { 7: entry({ attempts: 1 }) });
+  const spawns = [];
+  const spawn = (argv, env, logFile) => { spawns.push({ argv, env, logFile }); return 4321; };
+  const calls = [];
+  await reviewOnce({
+    config: mkConfig(), statePath: "s.json", escalationsPath: "esc.md",
+    gh: mkGh({ prs: prsMerge("CHANGES_REQUESTED", { mergeable: "CONFLICTING" }), reviews: reviewWith("R1"), calls }),
+    isAlive: () => false, spawn, now: () => NOW, log: () => {},
+  });
+  assert.equal(spawns.length, 1, "a conflicting changes-requested PR dispatches exactly one rework");
+  const argv = spawns[0].argv.join(" ");
+  assert.match(argv, /merge origin\/main/, "the rework directs the worker to merge origin/main");
+  assert.match(argv, /resolve every conflict/, "the rework directs the worker to resolve every conflict");
+  assert.match(argv, /review feedback/, "the rework still directs the worker to address the review feedback");
+  assert.match(argv, /mergeable, not dirty/, "the rework's goal is a mergeable, not dirty, PR");
+  assert.match(argv, /#42/, "the prompt names the PR under review");
+  const s = readState("s.json")["7"];
+  assert.equal(s.attempts, 2, "the conflict rework counts one attempt toward reworkCap");
+  assert.equal(s.status, "reworking");
+});
+
+// #445 AC2: when the same PR is not conflicting, the rework instruction is the
+// review-only prompt, unchanged from today — no conflict-resolution wording.
+await inTempDir(async () => {
+  writeStateFile("s.json", { 7: entry({ attempts: 1 }) });
+  const spawns = [];
+  const spawn = (argv, env, logFile) => { spawns.push({ argv, env, logFile }); return 4321; };
+  const calls = [];
+  await reviewOnce({
+    config: mkConfig(), statePath: "s.json", escalationsPath: "esc.md",
+    gh: mkGh({ prs: prsMerge("CHANGES_REQUESTED", { mergeable: "MERGEABLE" }), reviews: reviewWith("R1"), calls }),
+    isAlive: () => false, spawn, now: () => NOW, log: () => {},
+  });
+  assert.equal(spawns.length, 1, "a clean changes-requested PR still dispatches one rework");
+  const argv = spawns[0].argv.join(" ");
+  const reviewOnly = REVIEW_REWORK_PROMPT.replaceAll("{pr}", "42").replaceAll("{issue}", "7");
+  assert.ok(argv.includes(reviewOnly), "a non-conflicting PR gets the unchanged review-only prompt");
+  assert.doesNotMatch(argv, /resolve every conflict/, "the review-only prompt carries no conflict-resolution wording");
+});
+
+// #445 AC3: the conflict-and-review rework counts against the same reworkCap as
+// other reworks, and at the cap it escalates exactly once, naming that the PR is
+// both conflicting and changes-requested. reworkCap 2: R1 dispatches the conflict
+// rework that reaches the cap; a new rejection R2 (still conflicting) then escalates
+// once, naming both conditions, and is not re-escalated.
+await inTempDir(async () => {
+  writeStateFile("s.json", { 7: entry({ attempts: 1 }) });
+  const calls = [];
+  let reviews = reviewWith("R1");
+  const spawn = () => 5555;
+  const conflicted = () => prsMerge("CHANGES_REQUESTED", { mergeStateStatus: "DIRTY" })();
+  // Pass 1: a fresh conflicting rejection dispatches the rework that lifts attempts
+  // to the cap — a conflict rework spends one attempt exactly like a review rework.
+  await reviewOnce({
+    config: mkConfig(), statePath: "s.json", escalationsPath: "esc.md",
+    gh: mkGh({ prs: conflicted, reviews: () => reviews(), calls }),
+    isAlive: () => false, spawn, now: () => NOW, log: () => {},
+  });
+  assert.equal(readState("s.json")["7"].attempts, 2, "the conflict rework counts toward reworkCap, reaching it");
+  const mid = readState("s.json"); mid["7"].status = "ready-for-review"; mid["7"].pid = null; writeStateFile("s.json", mid);
+  // Pass 2: a genuinely new rejection (R2), still conflicting, at the cap escalates once.
+  reviews = reviewWith("R2", "2026-07-11T00:00:00Z");
+  const r2 = await reviewOnce({
+    config: mkConfig(), statePath: "s.json", escalationsPath: "esc.md",
+    gh: mkGh({ prs: conflicted, reviews: () => reviews(), calls }),
+    isAlive: () => false, spawn: noSpawn("at the cap the reactor escalates, never re-dispatches"),
+    now: () => NOW, log: () => {},
+  });
+  assert.equal(r2.transitions[0].action, "escalate-review-capped", "a new conflicting rejection at the cap escalates");
+  const esc = readFileSync("esc.md", "utf8");
+  assert.match(esc, /Request Changes review and conflicts with main/, "the escalation names both conditions");
+  assert.match(esc, /reworkCap 2/, "the escalation names reworkCap");
+  // Pass 3: R2 unchanged — no second escalation for the same rejection.
+  await reviewOnce({
+    config: mkConfig(), statePath: "s.json", escalationsPath: "esc.md",
+    gh: mkGh({ prs: conflicted, reviews: () => reviews(), calls }),
+    isAlive: () => false, spawn: noSpawn("the escalated entry is never revisited"),
+    now: () => NOW, log: () => {},
+  });
+  assert.equal((readFileSync("esc.md", "utf8").match(/reworkCap 2 reached/g) || []).length, 1, "the conflict-and-review cap escalates exactly once");
+});
+
+// #445 AC4: every criterion above has exactly one test named after it — AC1–AC3
+// once each, no padding.
+for (const ac of ["AC1", "AC2", "AC3"]) {
+  const hits = (self.match(new RegExp(`#445 ${ac}:`, "g")) || []).length;
+  assert.equal(hits, 1, `#445 ${ac} has exactly one test named after it`);
 }
 
 console.log("PASS herd-review.test.mjs");

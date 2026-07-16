@@ -44,6 +44,7 @@
 import { substitute } from "./herd-adapters.mjs";
 import { STATE_FILE, ESCALATIONS_FILE, EVENTS_FILE, readState, writeState, appendEscalation, appendHerdEvent, isPidAlive } from "./herd-survey.mjs";
 import { spawnWorker, recordExit } from "./herd-dispatch.mjs";
+import { isConflicting } from "./herd-verify.mjs";
 
 // The rework a changes-requested PR gets: read the review feedback and address it
 // on the existing branch, then push and hand the issue back to review. {issue}/{pr}
@@ -57,12 +58,28 @@ export const REVIEW_REWORK_PROMPT =
   "PR — do not open a new one. Reply to each review comment with the commit that resolves it, then set the " +
   "issue back to state:in-review for re-review.";
 
+// The rework a PR that is BOTH changes-requested AND conflicting gets. A PR that
+// was mergeable at verify time can go dirty once main advances under it; if it
+// then draws a Request Changes review, the review-only prompt above would push
+// fixes onto a branch still behind main and leave the PR `mergeable_state: dirty`
+// with no herd stage ever sending it back through conflict resolution. This prompt
+// folds herd-verify's conflict wording ("merge origin/main, resolve every
+// conflict") into the review rework, so a successful rework leaves the PR
+// mergeable, not dirty. Like REVIEW_REWORK_PROMPT it flips the issue back to
+// state:in-review, keeping this stage label-free.
+export const REVIEW_CONFLICT_REWORK_PROMPT =
+  "PR #{pr} for issue #{issue} received a Request Changes review and now conflicts with main. In its worktree (../wt/issue-{issue}), " +
+  "merge origin/main, resolve every conflict, then read the PR's review feedback (the review summary and every line comment) and address each point with " +
+  "focused commits, re-run the GATES.md gates fail-fast (never push red), and push to update the existing " +
+  "PR — do not open a new one. A successful rework leaves the PR mergeable, not dirty. Reply to each review comment with the commit that resolves it, then set the " +
+  "issue back to state:in-review for re-review.";
+
 // Decide a tracked ready-for-review PR's fate from its review decision and the
 // identity of its latest rejection versus the one this stage last acted on. Pure
 // and total. `reworkCap` bounds the shared automation-attempt budget
 // (`entry.attempts`, which dispatch/monitor/verify also count): a review rework is
 // one more attempt.
-export function classifyReview(issue, entry, { reviewDecision, latestReviewId, reworkCap }) {
+export function classifyReview(issue, entry, { reviewDecision, latestReviewId, reworkCap, conflicting = false }) {
   // Only a Request Changes verdict acts; APPROVED / COMMENTED / null (no required
   // review, or GitHub still computing) dispatch nothing.
   if (reviewDecision !== "CHANGES_REQUESTED") return { action: "noop" };
@@ -75,8 +92,12 @@ export function classifyReview(issue, entry, { reviewDecision, latestReviewId, r
   // `reviewDecision` is still CHANGES_REQUESTED but the review id is unchanged.
   if (entry.reviewedAt === latestReviewId) return { action: "noop" };
   const attempts = Number.isInteger(entry.attempts) ? entry.attempts : 1;
-  if (attempts >= reworkCap) return { action: "escalate-review-capped", attempts };
-  return { action: "rework", attempts: attempts + 1 };
+  // `conflicting` rides through the decision so the dispatch picks the combined
+  // conflict+review prompt and the cap escalation names both conditions. It is a
+  // second signal on the same rejection, never a second attempt: a conflict rework
+  // counts against `reworkCap` exactly like a review-only rework.
+  if (attempts >= reworkCap) return { action: "escalate-review-capped", attempts, conflicting };
+  return { action: "rework", attempts: attempts + 1, conflicting };
 }
 
 // Fetch the identity of a PR's latest CHANGES_REQUESTED review — its node id,
@@ -98,13 +119,16 @@ export async function latestReviewIdentity(gh, pr) {
 
 // The rework dispatch for a changes-requested PR: the adapter's `resume` argv
 // (falling back to `launch`) carrying the review-rework prompt, its env, and the
-// same log file. Returns null when the entry's adapter is gone from the config —
-// caller escalates.
-export function buildReviewRework(config, entry, issue, pr) {
+// same log file. When the PR is also conflicting it carries the combined
+// conflict+review prompt so the reworked PR ends up mergeable, not dirty; when it
+// is not, the review-only prompt, unchanged. Returns null when the entry's adapter
+// is gone from the config — caller escalates.
+export function buildReviewRework(config, entry, issue, pr, conflicting = false) {
   const adapter = config.adapters[entry.adapter];
   if (!adapter) return null;
   const command = Array.isArray(adapter.resume) && adapter.resume.length ? adapter.resume : adapter.launch;
-  const prompt = REVIEW_REWORK_PROMPT.replaceAll("{pr}", String(pr)).replaceAll("{issue}", String(issue));
+  const template = conflicting ? REVIEW_CONFLICT_REWORK_PROMPT : REVIEW_REWORK_PROMPT;
+  const prompt = template.replaceAll("{pr}", String(pr)).replaceAll("{issue}", String(issue));
   return {
     argv: substitute(command, { prompt, issue, model: adapter.model }),
     env: adapter.env || {},
@@ -132,17 +156,20 @@ export async function reviewOnce(opts) {
     log = console.log,
   } = opts;
 
-  // Read the review decision of every open PR. A failed read leaves all entries
+  // Read the review decision AND mergeability of every open PR in the one survey.
+  // Mergeability rides along so a PR that turned dirty after promotion to
+  // ready-for-review is sent back through conflict resolution as part of its review
+  // rework — no herd stage else revisits it. A failed read leaves all entries
   // untouched (retried next poll) rather than risk acting on a stale verdict.
   let openPrs;
   try {
-    openPrs = await gh(["pr", "list", "--state", "open", "--json", "number,headRefName,reviewDecision", "--limit", "200"]);
+    openPrs = await gh(["pr", "list", "--state", "open", "--json", "number,headRefName,reviewDecision,mergeable,mergeStateStatus", "--limit", "200"]);
   } catch (e) {
     log(`herd: review PR survey failed: ${e.message}; skipping review this poll.`);
     return { ok: false };
   }
   const reviewByHead = new Map(
-    (openPrs || []).map((p) => [p.headRefName, { pr: Number(p.number), reviewDecision: p.reviewDecision }]),
+    (openPrs || []).map((p) => [p.headRefName, { pr: Number(p.number), reviewDecision: p.reviewDecision, mergeable: p.mergeable, mergeStateStatus: p.mergeStateStatus }]),
   );
 
   const state = readState(statePath);
@@ -170,10 +197,15 @@ export async function reviewOnce(opts) {
       continue;
     }
 
+    // A PR that was mergeable at verify time can go dirty once main advances under
+    // it; fold that signal into the rework so review fixes don't land on a branch
+    // still behind main and leave the PR unmergeable with nothing to rescue it.
+    const conflicting = isConflicting(review);
     const decision = classifyReview(issue, entry, {
       reviewDecision: review.reviewDecision,
       latestReviewId,
       reworkCap: config.reworkCap,
+      conflicting,
     });
     if (decision.action === "noop") continue;
     // Mark this rejection handled before acting so the same review id never fires
@@ -199,14 +231,20 @@ export async function reviewOnce(opts) {
     let line;
 
     if (decision.action === "escalate-review-capped") {
+      // At the cap a conflicting PR is named as both conflicting and
+      // changes-requested, so the human knows the branch still needs a merge as
+      // well as review fixes; a clean PR keeps the review-only wording.
+      const conflictClause = decision.conflicting ? " and conflicts with main" : "";
       escalate(
-        `PR #${review.pr} still has a Request Changes review after ${decision.attempts} attempt(s) — reworkCap ${config.reworkCap} reached, not re-dispatching.`,
-        `address the review feedback on PR #${review.pr}'s branch by hand, then re-review`,
+        `PR #${review.pr} still has a Request Changes review${conflictClause} after ${decision.attempts} attempt(s) — reworkCap ${config.reworkCap} reached, not re-dispatching.`,
+        decision.conflicting
+          ? `resolve the conflicts and address the review feedback on PR #${review.pr}'s branch by hand, then re-review`
+          : `address the review feedback on PR #${review.pr}'s branch by hand, then re-review`,
       );
-      line = `herd: issue #${issue} -> escalated (PR #${review.pr} changes-requested; reworkCap ${config.reworkCap} reached after ${decision.attempts} attempts)`;
+      line = `herd: issue #${issue} -> escalated (PR #${review.pr} changes-requested${decision.conflicting ? "+conflicting" : ""}; reworkCap ${config.reworkCap} reached after ${decision.attempts} attempts)`;
     } else {
       // rework
-      const rework = buildReviewRework(config, entry, issue, review.pr);
+      const rework = buildReviewRework(config, entry, issue, review.pr, decision.conflicting);
       if (!rework) {
         escalate(
           `PR #${review.pr} has a Request Changes review but adapter "${entry.adapter}" is no longer in the config — cannot dispatch a rework.`,
@@ -239,7 +277,7 @@ export async function reviewOnce(opts) {
             pr: review.pr,
             status: entry.status,
           }, log);
-          line = `herd: issue #${issue} -> rework (PR #${review.pr} changes-requested; attempt ${decision.attempts}/${config.reworkCap}, ${entry.adapter} pid ${pid})`;
+          line = `herd: issue #${issue} -> rework (PR #${review.pr} changes-requested${decision.conflicting ? "+conflicting" : ""}; attempt ${decision.attempts}/${config.reworkCap}, ${entry.adapter} pid ${pid})`;
         }
       }
     }
