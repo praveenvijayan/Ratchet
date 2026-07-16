@@ -501,6 +501,10 @@
       "class": "excluded"
     },
     {
+      "path": "scripts/herd-ui-milestone-sound.test.mjs",
+      "class": "excluded"
+    },
+    {
       "path": "scripts/herd-ui-summary-strip.test.mjs",
       "class": "excluded"
     },

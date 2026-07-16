@@ -1143,6 +1143,38 @@ export function loadConfigOrDefaults(path) {
   }
 }
 
+// --- milestone sound cues (0187) ---------------------------------------------
+
+// The five worker-lifecycle milestones an operator wants to hear without
+// watching the window, each mapped to a distinct WebAudio cue. The keys are
+// herd-survey's HERD_EVENT_TYPES members; every other event type on the stream
+// is absent here and so chimes nothing. Each cue carries a distinct base
+// frequency and waveform, so the five are audibly different from one another.
+// This object is the single source of truth: it is serialised verbatim into the
+// page below, so the browser and the tests agree on which events chime and how.
+export const MILESTONE_CUES = Object.freeze({
+  "dispatch": { freq: 523.25, wave: "sine", durMs: 120 },
+  "claim-detected": { freq: 659.25, wave: "triangle", durMs: 120 },
+  "pr-detected": { freq: 783.99, wave: "square", durMs: 140 },
+  "worker-exit": { freq: 329.63, wave: "sawtooth", durMs: 160 },
+  "escalation": { freq: 880.0, wave: "square", durMs: 220 },
+});
+
+// Stable identity of one event on the stream, so its cue plays at most once even
+// if the event is re-delivered (a reconnect that replays the backlog, a rotated
+// file re-sent as a delta). ts is unique per append; event and issue
+// disambiguate two same-instant appends for different issues.
+export function eventKey(e) {
+  return [e && e.ts, e && e.event, e && e.issue != null ? e.issue : ""].join("|");
+}
+
+// All events oldest-first by ts (a missing ts sorts first), the order the
+// dashboard replays a burst in. Mirrors timelineEvents' ordering without the
+// per-issue filter — the sound stream is fleet-wide.
+export function orderedEvents(events) {
+  return (events || []).slice().sort((a, b) => String((a && a.ts) || "").localeCompare(String((b && b.ts) || "")));
+}
+
 // --- HTTP server -------------------------------------------------------------
 
 const SSE_HEADERS = {
@@ -1345,6 +1377,39 @@ export function createDashboardServer({
         if (events.length > sentCount) {
           const delta = events.slice(sentCount);
           res.write(`event: timeline\ndata: ${JSON.stringify(delta)}\n\n`);
+          sentCount = events.length;
+        }
+      };
+      tick();
+      const timer = setInterval(tick, pollMs);
+      req.on("close", () => clearInterval(timer));
+      return;
+    }
+
+    // Fleet-wide event stream for audible milestone cues. On connect it replays
+    // the whole existing log as one `backlog` frame — the client seeds its
+    // seen-set from it and chimes nothing, so opening the dashboard is silent
+    // regardless of history size. After that, only newly-appended events are
+    // pushed as `milestone` frames, which the client may chime. Malformed lines
+    // are skipped by readEvents; a truncated or rotated file resets the cursor
+    // and re-sends events the client already knows, which it dedupes silently —
+    // never a crash, never a double chime.
+    if (url.pathname === "/api/events") {
+      res.writeHead(200, SSE_HEADERS);
+      let sentCount = 0;
+      let sentBacklog = false;
+      const tick = () => {
+        const events = orderedEvents(readEvents(eventsPath));
+        if (events.length < sentCount) sentCount = 0; // truncated/rotated
+        if (!sentBacklog) {
+          sentBacklog = true;
+          sentCount = events.length;
+          res.write(`event: backlog\ndata: ${JSON.stringify(events)}\n\n`);
+          return;
+        }
+        if (events.length > sentCount) {
+          const delta = events.slice(sentCount);
+          res.write(`event: milestone\ndata: ${JSON.stringify(delta)}\n\n`);
           sentCount = events.length;
         }
       };
@@ -1787,6 +1852,7 @@ export const PAGE_HTML = `<!doctype html>
     </aside>
   </div>
 </main>
+<div id="soundhint" hidden style="position:fixed;bottom:12px;left:12px;z-index:50;padding:8px 12px;border-radius:8px;background:#1f2937;color:#e5e7eb;font-size:13px;box-shadow:0 2px 8px rgba(0,0,0,.35)">🔇 Click anywhere to enable milestone sound cues.</div>
 <script>
   const $ = (id) => document.getElementById(id);
   let selected = null, logSource = null, timelineSource = null, logBuffer = "", timelineBuffer = [], gotSnapshot = false;
@@ -2387,6 +2453,91 @@ export const PAGE_HTML = `<!doctype html>
     snapshot = JSON.parse(ev.data);
     gotSnapshot = true;
     render();
+  });
+
+  // --- audible milestone cues (0187) ---------------------------------------
+  // A distinct short tone per worker-lifecycle milestone, so an operator in
+  // another window hears an agent dispatch, claim, open a PR, exit, or escalate
+  // without looking. The cue table is injected from the server's single source
+  // of truth so the browser and the tests agree on which events chime. This
+  // stream is deliberately separate from the snapshot stream above: any audio
+  // failure here can never stop the dashboard rendering or streaming state.
+  const MILESTONE_CUES = ${JSON.stringify(MILESTONE_CUES)};
+  const cueSeen = new Set();
+  let audioCtx = null, audioBlocked = false, nextCueAt = 0;
+
+  const cueKey = (e) => [e && e.ts, e && e.event, e && e.issue != null ? e.issue : ""].join("|");
+
+  // Show the "click to enable sound" hint at most once — never a raw error, and
+  // never one line per event. Every audio failure routes here and then goes
+  // quiet, so a browser that blocks autoplay stays silent instead of noisy.
+  function soundHintOnce() {
+    if (audioBlocked) return;
+    audioBlocked = true;
+    const el = $("soundhint");
+    if (el) el.hidden = false;
+  }
+
+  // Lazily create the AudioContext. Browsers only allow audio after a user
+  // gesture; before that the constructor may throw or the context stays
+  // suspended. Returns null on any failure and surfaces the one-time hint, so
+  // the dashboard keeps streaming silently rather than throwing per event.
+  function ensureAudio() {
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) { soundHintOnce(); return null; }
+      if (!audioCtx) audioCtx = new Ctx();
+      if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+      return audioCtx.state === "running" ? audioCtx : (soundHintOnce(), null);
+    } catch (e) { soundHintOnce(); return null; }
+  }
+
+  // Play one cue, scheduled after any cue already queued so a burst of
+  // milestones arriving in the same frame chime one after another instead of
+  // stacking into a single noise. nextCueAt walks forward from the audio clock.
+  function playCue(cue) {
+    const ctx = ensureAudio();
+    if (!ctx) return;
+    try {
+      const gap = 0.06, dur = cue.durMs / 1000;
+      const start = Math.max(ctx.currentTime, nextCueAt);
+      nextCueAt = start + dur + gap;
+      const osc = ctx.createOscillator(), gain = ctx.createGain();
+      osc.type = cue.wave;
+      osc.frequency.value = cue.freq;
+      gain.gain.setValueAtTime(0.0001, start);
+      gain.gain.exponentialRampToValueAtTime(0.2, start + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + dur);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(start);
+      osc.stop(start + dur + 0.02);
+    } catch (e) { soundHintOnce(); }
+  }
+
+  // Handle a batch of events. On the backlog replay (live=false) it only seeds
+  // the seen-set so nothing already on the page chimes. On live batches it
+  // chimes an event only when it is a known milestone type AND has not been seen
+  // before — the seen-set is the dedupe, so the same event never chimes twice.
+  function ingestEvents(batch, live) {
+    for (const e of (batch || [])) {
+      const key = cueKey(e);
+      if (cueSeen.has(key)) continue;
+      cueSeen.add(key);
+      if (!live) continue;
+      const cue = MILESTONE_CUES[e && e.event];
+      if (cue) playCue(cue);
+    }
+  }
+
+  const soundStream = new EventSource("/api/events");
+  soundStream.addEventListener("backlog", (ev) => ingestEvents(JSON.parse(ev.data), false));
+  soundStream.addEventListener("milestone", (ev) => ingestEvents(JSON.parse(ev.data), true));
+
+  // The first real user gesture unlocks/resumes audio and clears the hint.
+  window.addEventListener("click", () => {
+    if (audioCtx) audioCtx.resume().catch(() => {});
+    const el = $("soundhint");
+    if (el && !el.hidden) { el.hidden = true; audioBlocked = false; }
   });
 
   // Tick locally once a second without waiting on a server push: claim ages
