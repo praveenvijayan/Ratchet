@@ -253,15 +253,12 @@ export const SURVEY_ENDPOINTS = Object.freeze([
   },
 ]);
 
-// Default conditional caller: `gh api --include` with an optional If-None-Match
-// header, parsed into { status, etag, body }. A 304 comes back with no body; a
-// 200 returns the parsed JSON. Injected in tests so nothing hits the network —
-// exactly like `ghJson`, this default is exercised only against the live API.
-export async function ghConditional(path, etag) {
-  const args = ["api", "--include"];
-  if (etag) args.push("-H", `If-None-Match: ${etag}`);
-  args.push(path);
-  const { stdout } = await pexec("gh", args, { maxBuffer: 16 * 1024 * 1024 });
+// Parse the stdout of `gh api --include` into { status, etag, body }. Split out
+// from `ghConditional` so the 304-on-non-zero-exit behaviour is unit-testable
+// offline without spawning `gh`. A 304 comes back with no body; a 200 returns
+// the parsed JSON. Throws when the head carries no parseable HTTP status line
+// (an empty/garbled response the caller must treat as a genuine failure).
+export function parseConditionalResponse(stdout) {
   const text = String(stdout);
   const sep = text.includes("\r\n\r\n") ? "\r\n\r\n" : "\n\n";
   const cut = text.indexOf(sep);
@@ -269,7 +266,10 @@ export async function ghConditional(path, etag) {
   const bodyText = cut >= 0 ? text.slice(cut + sep.length) : "";
   const lines = head.split(/\r?\n/);
   const statusMatch = /\b(\d{3})\b/.exec(lines[0] || "");
-  const status = statusMatch ? Number(statusMatch[1]) : 0;
+  if (!statusMatch) {
+    throw new Error(`gh: unparseable conditional response head ${JSON.stringify(lines[0] ?? "")}`);
+  }
+  const status = Number(statusMatch[1]);
   let responseEtag = null;
   for (const line of lines.slice(1)) {
     const m = /^etag:\s*(.+)$/i.exec(line.trim());
@@ -277,6 +277,33 @@ export async function ghConditional(path, etag) {
   }
   const body = status === 200 && bodyText.trim() ? JSON.parse(bodyText) : null;
   return { status, etag: responseEtag, body };
+}
+
+// Default conditional caller: `gh api --include` with an optional If-None-Match
+// header, parsed into { status, etag, body }. Injected in tests so nothing hits
+// the network — exactly like `ghJson`, this default is exercised only against
+// the live API.
+//
+// Live-boundary quirk this exists to absorb: `gh api` exits non-zero on ANY
+// non-2xx response, including the `304 Not Modified` this ETag probe is designed
+// to receive, so `pexec` rejects. But with `--include` `gh` still writes the
+// full response head (and any body) to stdout before it exits, and Node hangs
+// that captured stdout on the rejection error. So we parse stdout regardless of
+// exit code; only a failure that left no parseable head — a real network/spawn
+// error — propagates as a rejection for the caller to fall back on.
+export async function ghConditional(path, etag) {
+  const args = ["api", "--include"];
+  if (etag) args.push("-H", `If-None-Match: ${etag}`);
+  args.push(path);
+  let stdout;
+  try {
+    ({ stdout } = await pexec("gh", args, { maxBuffer: 16 * 1024 * 1024 }));
+  } catch (e) {
+    const captured = e && e.stdout != null ? String(e.stdout) : "";
+    if (!captured.trim()) throw e;
+    stdout = captured;
+  }
+  return parseConditionalResponse(stdout);
 }
 
 // Conditional survey: probe each endpoint with its cached ETag. `etags` is the
@@ -303,7 +330,14 @@ export async function surveyConditional({ ghc, gh, etags, eventsPath, now, log =
     for (const { ep, res } of results) {
       // A 304 backed by a cached entry is genuinely unchanged: keep the cache.
       if (res.status === 304 && etags[ep.key]) continue;
-      // Anything else (a 200, or a 304 with no prior cache) is a real body.
+      // Only a 200 carries a fresh body we can trust. Anything else — a 5xx or
+      // 4xx (parsed off gh's non-zero exit), an unparseable status, or a 304
+      // with no cache to reuse — is not a usable conditional result, so bail to
+      // the catch-all below and fall back to a full unconditional survey rather
+      // than reconcile the reality against an empty body.
+      if (res.status !== 200) {
+        throw new Error(`gh: conditional probe for ${ep.key} returned HTTP ${res.status}`);
+      }
       changed = true;
       etags[ep.key] = { etag: res.etag ?? null, body: ep.map(res.body) };
       if (!res.etag) missingEtag = true;
