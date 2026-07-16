@@ -12,6 +12,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   surveyReality,
+  surveyConditional,
+  parseConditionalResponse,
   reconcileState,
   readState,
   formatEscalation,
@@ -1337,6 +1339,122 @@ await inTempDir(async () => {
   }
 }
 
+// --- Issue #440: `gh api` exits non-zero on any non-2xx response — including
+// the 304 the ETag probe exists to receive — so the conditional survey must
+// treat that 304 as a cache hit, not a gh failure, and still fall back on a
+// genuine failure (network/5xx/unparseable). One test per criterion, named
+// after it. ---
+
+// #440 AC1: a conditional probe whose endpoint answers 304 resolves as
+// { status: 304 } with the cached entry retained — not treated as a gh failure,
+// even though the live `gh` process exits non-zero on a 304 and its response
+// head arrives via stdout on the rejection (parsed by parseConditionalResponse).
+await inTempDir(async () => {
+  // The exact stdout `gh api --include` writes for a 304 before exiting non-zero.
+  const raw = 'HTTP/2.0 304 Not Modified\r\nEtag: W/"r"\r\nDate: today\r\n\r\n';
+  assert.deepEqual(
+    parseConditionalResponse(raw),
+    { status: 304, etag: 'W/"r"', body: null },
+    "a 304 response head resolves to { status: 304 } with no body — it does not throw",
+  );
+  const cached = { etag: 'W/"r"', body: [{ number: 3, title: "kept" }] };
+  const etags = { ready: cached, inProgress: { etag: 'W/"i"', body: [] }, openPrs: { etag: 'W/"p"', body: [] } };
+  const ghc = fakeGhc({
+    ready: [{ status: 304, etag: null, body: null }],
+    inProgress: [{ status: 304, etag: null, body: null }],
+    openPrs: [{ status: 304, etag: null, body: null }],
+  });
+  const gh = () => { throw new Error("a 304 must not be treated as a gh failure — no full survey"); };
+  const res = await surveyConditional({ ghc, gh, etags, eventsPath: "ev.jsonl", now: NOW, log: () => {} });
+  assert.equal(res.changed, false, "a 304 is a cache hit, not a change");
+  assert.deepEqual(etags.ready, cached, "the cached entry is retained unchanged on a 304");
+});
+
+// #440 AC2: a tick where every endpoint answers 304 completes on the fast path —
+// no survey-fallback event is logged, the ETag cache is unchanged, and no full
+// survey runs.
+await inTempDir(async () => {
+  const etags = {
+    ready: { etag: 'W/"r"', body: [{ number: 1, title: "a" }] },
+    inProgress: { etag: 'W/"i"', body: [] },
+    openPrs: { etag: 'W/"p"', body: [] },
+  };
+  const before = JSON.parse(JSON.stringify(etags));
+  const ghc = fakeGhc({
+    ready: [{ status: 304, etag: null, body: null }],
+    inProgress: [{ status: 304, etag: null, body: null }],
+    openPrs: [{ status: 304, etag: null, body: null }],
+  });
+  const gh = fakeGh({ ready: [{ number: 99, title: "never surveyed" }] });
+  const r = await pollOnce(pollArgs({ gh, ghc, etags }));
+  assert.equal(r.skipped, true, "an all-304 tick short-circuits on the fast path");
+  assert.equal(gh.calls.length, 0, "no full unconditional survey runs when every endpoint is 304");
+  assert.deepEqual(etags, before, "the ETag cache is unchanged across an all-304 tick");
+  const events = existsSync("ev.jsonl") ? readFileSync("ev.jsonl", "utf8") : "";
+  assert.ok(!/survey-fallback/.test(events), "no survey-fallback event is logged on the fast path");
+});
+
+// #440 AC3: a genuine gh failure (network error, 5xx, or unparseable output)
+// still falls back to the unconditional full survey with a survey-fallback herd
+// event — never a crash, never a silently skipped pass.
+await inTempDir(async () => {
+  const cases = [
+    { name: "network error", ghc: async () => { throw new Error("gh: connection reset"); } },
+    { name: "5xx", ghc: fakeGhc({
+      ready: [{ status: 502, etag: null, body: null }],
+      inProgress: [{ status: 304, etag: null, body: null }],
+      openPrs: [{ status: 304, etag: null, body: null }],
+    }) },
+    { name: "unparseable output", ghc: () => { throw new Error("gh: unparseable conditional response head \"\""); } },
+  ];
+  let n = 0;
+  for (const { name, ghc } of cases) {
+    const etags = {
+      ready: { etag: 'W/"r"', body: [] },
+      inProgress: { etag: 'W/"i"', body: [] },
+      openPrs: { etag: 'W/"p"', body: [] },
+    };
+    const gh = fakeGh({ ready: [{ number: 7, title: "fallback" }] });
+    const ev = `ev-440-${n}.jsonl`;
+    const r = await pollOnce(pollArgs({ gh, ghc, etags, statePath: `s-440-${n}.json`, escalationsPath: `e-440-${n}.md`, eventsPath: ev }));
+    assert.equal(r.ok, true, `a ${name} does not crash the poll`);
+    assert.equal(r.skipped, undefined, `a ${name} falls back to a full pass, never a skip`);
+    assert.equal(r.ready, 1, `a ${name} surveys reality unconditionally via gh`);
+    const events = readFileSync(ev, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    assert.ok(events.some((e) => e.event === "survey-fallback"), `a survey-fallback event is logged for a ${name}`);
+    n += 1;
+  }
+});
+
+// #440 AC4: a 304 on an early endpoint does not abort the tick's remaining
+// endpoint probes.
+await inTempDir(async () => {
+  const etags = {
+    ready: { etag: 'W/"r"', body: [] },
+    inProgress: { etag: 'W/"i"', body: [] },
+    openPrs: { etag: 'W/"p"', body: [] },
+  };
+  // ready (the first endpoint) is 304; a later endpoint carries a fresh 200.
+  const ghc = fakeGhc({
+    ready: [{ status: 304, etag: null, body: null }],
+    inProgress: [{ status: 304, etag: null, body: null }],
+    openPrs: [{ status: 200, etag: 'W/"p2"', body: [{ number: 8, headRefName: "agent/issue-8" }] }],
+  });
+  const r = await pollOnce(pollArgs({ ghc, etags }));
+  assert.equal(ghc.calls.length, 3, "an early 304 does not abort the remaining endpoint probes — all three are polled");
+  assert.equal(r.skipped, undefined, "the later 200 still runs the full pass");
+  assert.equal(etags.openPrs.etag, 'W/"p2"', "the endpoint probed after the early 304 updates its ETag");
+});
+
+// #440 AC5: every criterion above has exactly one test named after it.
+{
+  const self = readFileSync(new URL("./herd-survey.test.mjs", import.meta.url), "utf8");
+  for (const ac of ["AC1", "AC2", "AC3", "AC4", "AC5"]) {
+    const hits = (self.match(new RegExp(`// #440 ${ac}:`, "g")) || []).length;
+    assert.equal(hits, 1, `#440 ${ac} has exactly one test named after it`);
+  }
+}
+
 // --- Criterion 3 (#427): a claim ref the supervisor did NOT observe its own
 // worker create (no live state entry backs it) is never deleted by the new
 // dead-worker auto-recovery — the survey's stale-claim path still only escalates
@@ -1357,4 +1475,4 @@ await inTempDir(async () => {
   assert.match(esc, /stale claim ref agent\/issue-88 on origin/, "the escalation names the foreign ref for a human");
 });
 
-console.log("PASS herd-survey.test.mjs (7 criteria + issue #137: 4 criteria + issue #143: 5 criteria + issue #138: 5 criteria + issue #139: 3 criteria + issue #163: 3 criteria + issue #169: 4 criteria + issue #170: 4 criteria + issue #173: 5 criteria + issue #441: 4 criteria + issue #357: 3 criteria + issue #405: 5 criteria + issue #419: 4 criteria + issue #420: 5 criteria + issue #427: 1 criterion + 1 test note)");
+console.log("PASS herd-survey.test.mjs (7 criteria + issue #137: 4 criteria + issue #143: 5 criteria + issue #138: 5 criteria + issue #139: 3 criteria + issue #163: 3 criteria + issue #169: 4 criteria + issue #170: 4 criteria + issue #173: 5 criteria + issue #441: 4 criteria + issue #357: 3 criteria + issue #405: 5 criteria + issue #419: 4 criteria + issue #420: 5 criteria + issue #440: 5 criteria + issue #427: 1 criterion + 1 test note)");
