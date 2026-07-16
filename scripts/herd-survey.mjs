@@ -848,7 +848,6 @@ export async function pollOnce({
           logFile: null,
           action: `run \`${del}\` to delete the stale claim ref, then re-queue the issue if its work is unfinished`,
         });
-        state[String(issue)] = { adapter: null, pid: null, logFile: null, attempts: 0, status: STALE_CLAIM_STATUS, pr: null };
       } else {
         appendEscalation(escalationsPath, {
           now: stamp,
@@ -860,6 +859,11 @@ export async function pollOnce({
           action: `run \`${del}\` to delete the stale claim ref`,
         });
       }
+      // Sentinel for both open and closed refs: the guard above then trips on
+      // every later poll while the ref lingers, so a closed-issue ref no longer
+      // re-queries issue state, re-escalates, or re-counts. Cleared once the ref
+      // is gone (above), so a genuine recurrence escalates again.
+      state[String(issue)] = { adapter: null, pid: null, logFile: null, attempts: 0, status: STALE_CLAIM_STATUS, pr: null };
       staleEscalated += 1;
     }
   }
