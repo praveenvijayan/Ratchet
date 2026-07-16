@@ -1175,6 +1175,39 @@ export function orderedEvents(events) {
   return (events || []).slice().sort((a, b) => String((a && a.ts) || "").localeCompare(String((b && b.ts) || "")));
 }
 
+// --- persisted mute/volume for milestone cues (0188) -------------------------
+// The dashboard remembers, across reloads, whether milestone cues are muted and
+// how loud they are. The localStorage key and the documented default live here
+// as the single source of truth and are serialised into the page, so the
+// browser and the tests agree. `volume` is a 0..1 multiplier on a cue's peak
+// gain; 0 is silence and behaves exactly like muted. The default is unmuted at
+// full volume — the same loudness 0187 shipped — so an untouched dashboard
+// sounds as before.
+export const SOUND_PREF_KEY = "ratchet-herd-sound";
+export const SOUND_PREF_DEFAULT = Object.freeze({ muted: false, volume: 1 });
+
+// Coerce any stored/parsed value into a valid preference. Anything missing,
+// corrupt, or out of range collapses to the documented default field by field,
+// so a cleared or garbage localStorage entry can never throw or yield NaN — the
+// control always renders from a sane preference. This is the twin of the page's
+// inlined normalizeSoundPref; keep the two in step.
+export function normalizeSoundPref(raw) {
+  const d = SOUND_PREF_DEFAULT;
+  if (!raw || typeof raw !== "object") return { muted: d.muted, volume: d.volume };
+  const muted = typeof raw.muted === "boolean" ? raw.muted : d.muted;
+  const v = Number(raw.volume);
+  const volume = Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : d.volume;
+  return { muted, volume };
+}
+
+// A preference is silent when explicitly muted or turned to zero volume — the
+// one predicate the page gates every cue on, so volume 0 is indistinguishable
+// from muted. Twin of the page's `soundSilent`.
+export function isSoundSilent(raw) {
+  const p = normalizeSoundPref(raw);
+  return p.muted || p.volume <= 0;
+}
+
 // --- HTTP server -------------------------------------------------------------
 
 const SSE_HEADERS = {
@@ -1811,6 +1844,12 @@ export const PAGE_HTML = `<!doctype html>
   </div>
   <div class="heartbeat"><span class="dot" id="livedot"></span> <span id="livetext" class="empty">connecting…</span></div>
   <span id="fleettotals" class="fleettotals empty"></span>
+  <div class="soundctl" id="soundctl" style="display:flex;align-items:center;gap:8px;margin-left:auto">
+    <button type="button" id="mutebtn" class="mutebtn" aria-pressed="false" title="Mute or unmute milestone cues" style="display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border-radius:8px;border:1px solid #334155;background:#1f2937;color:#e5e7eb;font-size:13px;cursor:pointer">
+      <span id="muteicon" aria-hidden="true">🔊</span> <span id="mutelabel">Sound on</span>
+    </button>
+    <input type="range" id="volslider" class="volslider" min="0" max="1" step="0.05" value="1" aria-label="Milestone cue volume" title="Milestone cue volume" style="width:96px">
+  </div>
 </header>
 <main>
   <div class="summarystrip" id="summarystrip" aria-label="Fleet summary"></div>
@@ -2464,9 +2503,51 @@ export const PAGE_HTML = `<!doctype html>
   // failure here can never stop the dashboard rendering or streaming state.
   const MILESTONE_CUES = ${JSON.stringify(MILESTONE_CUES)};
   const cueSeen = new Set();
-  let audioCtx = null, audioBlocked = false, nextCueAt = 0;
+  let audioCtx = null, masterGain = null, audioBlocked = false, nextCueAt = 0;
 
   const cueKey = (e) => [e && e.ts, e && e.event, e && e.issue != null ? e.issue : ""].join("|");
+
+  // --- persisted mute / volume (0188) --------------------------------------
+  // The operator's mute and volume choice survives a reload. It is read from
+  // localStorage synchronously below — before any event frame can arrive — so
+  // the first cue of a new session already respects the stored setting. The
+  // key and documented default come from the server's single source of truth.
+  const SOUND_PREF_KEY = ${JSON.stringify(SOUND_PREF_KEY)};
+  const SOUND_PREF_DEFAULT = ${JSON.stringify(SOUND_PREF_DEFAULT)};
+
+  // Twin of the server's normalizeSoundPref: fold any missing/corrupt/out-of-
+  // range value back to the documented default field by field, never throwing.
+  function normalizeSoundPref(raw) {
+    const d = SOUND_PREF_DEFAULT;
+    if (!raw || typeof raw !== "object") return { muted: d.muted, volume: d.volume };
+    const muted = typeof raw.muted === "boolean" ? raw.muted : d.muted;
+    const v = Number(raw.volume);
+    const volume = Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : d.volume;
+    return { muted, volume };
+  }
+
+  // Read the saved preference. A missing key, a parse error, or a thrown
+  // localStorage (private mode, storage disabled) all fall through to the
+  // documented default — the control still renders, never an error.
+  function loadSoundPref() {
+    try {
+      const raw = window.localStorage.getItem(SOUND_PREF_KEY);
+      if (raw == null) return normalizeSoundPref(null);
+      return normalizeSoundPref(JSON.parse(raw));
+    } catch (e) { return normalizeSoundPref(null); }
+  }
+
+  // Persist the current preference; a write failure is swallowed so a full or
+  // disabled storage never breaks the control.
+  function saveSoundPref() {
+    try { window.localStorage.setItem(SOUND_PREF_KEY, JSON.stringify(soundPref)); } catch (e) {}
+  }
+
+  let soundPref = loadSoundPref();
+
+  // A preference is silent when muted or at zero volume — so volume 0 plays
+  // nothing, exactly like muted. Every cue is gated on this one predicate.
+  const soundSilent = () => soundPref.muted || soundPref.volume <= 0;
 
   // Show the "click to enable sound" hint at most once — never a raw error, and
   // never one line per event. Every audio failure routes here and then goes
@@ -2487,15 +2568,30 @@ export const PAGE_HTML = `<!doctype html>
       const Ctx = window.AudioContext || window.webkitAudioContext;
       if (!Ctx) { soundHintOnce(); return null; }
       if (!audioCtx) audioCtx = new Ctx();
+      // A single master gain sits between every cue and the speakers, so mute
+      // and volume can be applied — including to already-scheduled cues — by
+      // setting one value rather than reaching each oscillator.
+      if (!masterGain) { masterGain = audioCtx.createGain(); masterGain.connect(audioCtx.destination); applySoundLevel(); }
       if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
       return audioCtx.state === "running" ? audioCtx : (soundHintOnce(), null);
     } catch (e) { soundHintOnce(); return null; }
+  }
+
+  // Push the current preference onto the master gain immediately. Muting (or
+  // volume 0) drops it to zero at the audio clock's current time, which cuts an
+  // in-flight burst as well as future cues — so toggling to muted stops all
+  // cues at once. No-op until the audio graph exists (nothing is playing yet).
+  function applySoundLevel() {
+    if (!masterGain || !audioCtx) return;
+    const g = soundSilent() ? 0 : soundPref.volume;
+    try { masterGain.gain.setValueAtTime(g, audioCtx.currentTime); } catch (e) { masterGain.gain.value = g; }
   }
 
   // Play one cue, scheduled after any cue already queued so a burst of
   // milestones arriving in the same frame chime one after another instead of
   // stacking into a single noise. nextCueAt walks forward from the audio clock.
   function playCue(cue) {
+    if (soundSilent()) return; // muted or volume 0: play nothing at all
     const ctx = ensureAudio();
     if (!ctx) return;
     try {
@@ -2508,7 +2604,7 @@ export const PAGE_HTML = `<!doctype html>
       gain.gain.setValueAtTime(0.0001, start);
       gain.gain.exponentialRampToValueAtTime(0.2, start + 0.01);
       gain.gain.exponentialRampToValueAtTime(0.0001, start + dur);
-      osc.connect(gain).connect(ctx.destination);
+      osc.connect(gain).connect(masterGain || ctx.destination);
       osc.start(start);
       osc.stop(start + dur + 0.02);
     } catch (e) { soundHintOnce(); }
@@ -2539,6 +2635,38 @@ export const PAGE_HTML = `<!doctype html>
     const el = $("soundhint");
     if (el && !el.hidden) { el.hidden = true; audioBlocked = false; }
   });
+
+  // --- header mute toggle + volume control (0188) --------------------------
+  // The toggle's icon and label reflect the effective state (muted, or silenced
+  // by zero volume); the slider reflects the stored volume. Every change writes
+  // the preference back to storage and applies the new level to the live audio
+  // graph immediately, so muting silences an in-flight burst and a reload
+  // restores the same setting before the first cue.
+  function applyMuteUI() {
+    const btn = $("mutebtn"), icon = $("muteicon"), label = $("mutelabel"), slider = $("volslider");
+    const silent = soundSilent();
+    if (btn) btn.setAttribute("aria-pressed", String(silent));
+    if (icon) icon.textContent = silent ? "🔇" : "🔊";
+    if (label) label.textContent = silent ? "Muted" : "Sound on";
+    if (slider && document.activeElement !== slider) slider.value = String(soundPref.volume);
+  }
+
+  function setMuted(muted) {
+    soundPref = normalizeSoundPref({ muted, volume: soundPref.volume });
+    saveSoundPref(); applySoundLevel(); applyMuteUI();
+  }
+
+  function setVolume(v) {
+    soundPref = normalizeSoundPref({ muted: soundPref.muted, volume: v });
+    saveSoundPref(); applySoundLevel(); applyMuteUI();
+  }
+
+  (function initSoundControls() {
+    const btn = $("mutebtn"), slider = $("volslider");
+    if (btn) btn.addEventListener("click", () => setMuted(!soundPref.muted));
+    if (slider) slider.addEventListener("input", () => setVolume(Number(slider.value)));
+    applyMuteUI();
+  })();
 
   // Tick locally once a second without waiting on a server push: claim ages
   // advance, and the heartbeat age climbs so the silent banner appears on its
