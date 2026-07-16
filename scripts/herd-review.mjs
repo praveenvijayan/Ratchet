@@ -14,17 +14,25 @@
 // Two signals gate a dispatch, and both must hold:
 //   1. the PR's `reviewDecision` is CHANGES_REQUESTED (an APPROVED/COMMENTED/absent
 //      verdict dispatches nothing), and
-//   2. the issue still carries `state:changes-requested`.
-// Signal 2 is the per-rejection dedup. `reviewDecision` stays CHANGES_REQUESTED
-// until a *new* review is submitted, so it does not change when the rework worker
-// pushes its fix — polling it alone would re-dispatch (and eventually escalate) a
-// PR that is merely awaiting re-review. The label is authoritative: the
-// review-verdict workflow (0098) sets state:changes-requested on each rejection,
-// and the rework worker flips it back to state:in-review when its rework lands
-// (AGENTS.md step 6). While the label reads changes-requested the rework is
-// outstanding; once it reads in-review this stage stands down until the next
-// rejection. A live worker on the entry is likewise left alone — a rework already
-// in flight is never dispatched twice.
+//   2. the latest CHANGES_REQUESTED review's identity is one this stage has not
+//      already acted on (`entry.reviewedAt`).
+// Signal 2 is the per-rejection dedup, and it is deliberately NOT the
+// `state:changes-requested` label. The label would be the obvious dedup, but its
+// real-time author (review-verdict, 0098) is silently skipped by GitHub on
+// conflicted PRs (`mergeable_state: dirty`) — the exact PRs that most need rework —
+// so on a dirty rejection `reviewDecision` reads CHANGES_REQUESTED while the label
+// still reads state:in-review for the whole review-verdict-sweep window, and a
+// label-gated reactor returns noop the entire time (observed on mdtohtml PR #20 /
+// issue #16). So the dedup keys on the rejection's own id instead: for a tracked,
+// ready-for-review PR already reading CHANGES_REQUESTED, this stage fetches the
+// latest CHANGES_REQUESTED review's node id and acts iff it differs from
+// `entry.reviewedAt`, the id it last acted on. `reviewDecision` stays
+// CHANGES_REQUESTED until a *new* review lands, so after the worker pushes the id
+// is unchanged and no re-dispatch fires — the dedup holds with zero read
+// dependency on the label; a genuinely new rejection carries a new id and
+// dispatches once more. review-verdict and its sweep stay the board's reconciler
+// for chat-mode users; this only removes herd's read dependency on the label. A
+// live worker on the entry is never dispatched twice.
 //
 // A rework here counts against the same `entry.attempts` / `config.reworkCap`
 // budget the monitor and verify stages share; at the cap the PR is escalated
@@ -49,21 +57,43 @@ export const REVIEW_REWORK_PROMPT =
   "PR — do not open a new one. Reply to each review comment with the commit that resolves it, then set the " +
   "issue back to state:in-review for re-review.";
 
-// Decide a tracked ready-for-review PR's fate from its review decision and whether
-// its issue still carries state:changes-requested. Pure and total. `reworkCap`
-// bounds the shared automation-attempt budget (`entry.attempts`, which
-// dispatch/monitor/verify also count): a review rework is one more attempt.
-export function classifyReview(issue, entry, { reviewDecision, changesRequested, reworkCap }) {
+// Decide a tracked ready-for-review PR's fate from its review decision and the
+// identity of its latest rejection versus the one this stage last acted on. Pure
+// and total. `reworkCap` bounds the shared automation-attempt budget
+// (`entry.attempts`, which dispatch/monitor/verify also count): a review rework is
+// one more attempt.
+export function classifyReview(issue, entry, { reviewDecision, latestReviewId, reworkCap }) {
   // Only a Request Changes verdict acts; APPROVED / COMMENTED / null (no required
   // review, or GitHub still computing) dispatch nothing.
   if (reviewDecision !== "CHANGES_REQUESTED") return { action: "noop" };
-  // The rework worker flips the issue back to state:in-review when its fix lands,
-  // so a changes-requested verdict whose label already reads in-review is an
-  // outstanding re-review, not a fresh rejection — stand down until the next one.
-  if (!changesRequested) return { action: "noop" };
+  // Can't identify the rejection (no CHANGES_REQUESTED review found, or the detail
+  // read came back empty) — don't act on an unidentifiable verdict; retry next poll.
+  if (!latestReviewId) return { action: "noop" };
+  // The per-rejection dedup, keyed on the rejection's own id rather than the label:
+  // once this stage has dispatched or escalated on a given review id, that same
+  // rejection never fires again — including after the rework worker pushes, when
+  // `reviewDecision` is still CHANGES_REQUESTED but the review id is unchanged.
+  if (entry.reviewedAt === latestReviewId) return { action: "noop" };
   const attempts = Number.isInteger(entry.attempts) ? entry.attempts : 1;
   if (attempts >= reworkCap) return { action: "escalate-review-capped", attempts };
   return { action: "rework", attempts: attempts + 1 };
+}
+
+// Fetch the identity of a PR's latest CHANGES_REQUESTED review — its node id,
+// falling back to `submittedAt` — used as the per-rejection dedup key. Called only
+// for the small set of tracked, ready-for-review PRs already reading
+// CHANGES_REQUESTED, so the extra per-PR read stays bounded. Returns null when the
+// PR carries no CHANGES_REQUESTED review (nothing to dedup on).
+export async function latestReviewIdentity(gh, pr) {
+  const data = await gh(["pr", "view", String(pr), "--json", "reviews"]);
+  const reviews = (data && data.reviews) || [];
+  let latest = null;
+  for (const r of reviews) {
+    if (r.state !== "CHANGES_REQUESTED") continue;
+    if (!latest || String(r.submittedAt || "") > String(latest.submittedAt || "")) latest = r;
+  }
+  if (!latest) return null;
+  return String(latest.id || latest.submittedAt || "");
 }
 
 // The rework dispatch for a changes-requested PR: the adapter's `resume` argv
@@ -82,12 +112,13 @@ export function buildReviewRework(config, entry, issue, pr) {
   };
 }
 
-// One review-reactor pass: read every open PR's review decision plus the set of
-// issues currently labelled state:changes-requested, then for every tracked,
-// ready-for-review PR act on the deterministic outcome (rework / escalate / noop).
-// A failed survey of either signal logs one line and leaves every entry untouched
-// for the next poll — a transient read never misreads a verdict. Returns
-// { ok, transitions }.
+// One review-reactor pass: read every open PR's review decision, then for every
+// tracked, ready-for-review PR whose verdict is CHANGES_REQUESTED, fetch the latest
+// rejection's id and act on the deterministic outcome (rework / escalate / noop)
+// keyed on that id versus the one already handled — no label read at all. A failed
+// PR survey, or a failed per-PR review-detail read, logs one line and leaves the
+// affected entry untouched for the next poll — a transient read never misreads a
+// verdict. Returns { ok, transitions }.
 export async function reviewOnce(opts) {
   const {
     config,
@@ -114,18 +145,6 @@ export async function reviewOnce(opts) {
     (openPrs || []).map((p) => [p.headRefName, { pr: Number(p.number), reviewDecision: p.reviewDecision }]),
   );
 
-  // The authoritative per-rejection signal: issues a human has rejected and whose
-  // rework has not yet flipped them back to state:in-review. A failed read is the
-  // same transient-blip case — untouched, retried next poll.
-  let crIssues;
-  try {
-    crIssues = await gh(["issue", "list", "--state", "open", "--label", "state:changes-requested", "--json", "number", "--limit", "200"]);
-  } catch (e) {
-    log(`herd: review label survey failed: ${e.message}; skipping review this poll.`);
-    return { ok: false };
-  }
-  const changesRequested = new Set((crIssues || []).map((i) => Number(i.number)));
-
   const state = readState(statePath);
   const transitions = [];
   for (const [issue, entry] of Object.entries(state)) {
@@ -136,13 +155,30 @@ export async function reviewOnce(opts) {
     if (entry.status !== "ready-for-review") continue;
     const review = reviewByHead.get(`agent/issue-${issue}`);
     if (!review) continue; // no open PR for this issue right now
+    // Bound the extra per-PR read: only a CHANGES_REQUESTED verdict is worth a
+    // review-detail fetch; every other decision dispatches nothing regardless.
+    if (review.reviewDecision !== "CHANGES_REQUESTED") continue;
+
+    // The per-rejection dedup key: the latest CHANGES_REQUESTED review's id. A
+    // failed detail read is the same transient-blip case — this entry is left
+    // untouched and retried next poll, never acted on from a stale verdict.
+    let latestReviewId;
+    try {
+      latestReviewId = await latestReviewIdentity(gh, review.pr);
+    } catch (e) {
+      log(`herd: review detail read for PR #${review.pr} failed: ${e.message}; skipping issue #${issue} this poll.`);
+      continue;
+    }
 
     const decision = classifyReview(issue, entry, {
       reviewDecision: review.reviewDecision,
-      changesRequested: changesRequested.has(Number(issue)),
+      latestReviewId,
       reworkCap: config.reworkCap,
     });
     if (decision.action === "noop") continue;
+    // Mark this rejection handled before acting so the same review id never fires
+    // again — the dedup that no longer depends on the label flipping back.
+    entry.reviewedAt = latestReviewId;
 
     const escalate = (what, action) => {
       entry.status = "escalated";

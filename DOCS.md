@@ -1176,15 +1176,25 @@ branch, its prompt pointing at the PR's review feedback. The rework counts again
 the same `reworkCap` as conflict rework and monitor resume; at the cap the PR is
 escalated naming it and the cap, never re-dispatched.
 
-The stage is detection + dispatch only — it never sets a label. The review-time
-flip to `state:changes-requested` is owned by the `review-verdict` workflow, and
-the flip back to `state:in-review` is the dispatched worker's own last step
-(AGENTS.md step 6). That label is the reactor's dedup: a `reviewDecision` stays
-`CHANGES_REQUESTED` until a new review is submitted, so it does not change when the
-rework lands; the reactor dispatches only while the issue still carries
-`state:changes-requested`, and stands down once the worker flips it back. A live
-rework worker on the entry is never dispatched twice, and a transient failure
-reading the verdict leaves every entry untouched for the next poll.
+The stage is detection + dispatch only — it never sets a label, and it never
+*reads* one either. Its per-rejection dedup is the rejection's own review id, not
+`state:changes-requested`: that label's real-time author (`review-verdict`) is
+silently skipped by GitHub on conflicted PRs (`mergeable_state: dirty`) — exactly
+the PRs that most need rework — so a label-gated reactor returns noop for the whole
+`review-verdict-sweep` window while `reviewDecision` already reads
+`CHANGES_REQUESTED` (observed live on mdtohtml PR #20 / issue #16). Instead, for a
+tracked ready-for-review PR already reading `CHANGES_REQUESTED` (which bounds the
+per-PR detail read), the stage fetches the latest `CHANGES_REQUESTED` review's node
+id and acts iff it differs from `entry.reviewedAt`, the id it last dispatched or
+escalated on. `reviewDecision` stays `CHANGES_REQUESTED` until a new review is
+submitted, so after the worker pushes its fix the id is unchanged and no
+re-dispatch fires — the dedup holds with zero dependency on the label flipping
+back; a genuinely new review carries a new id and dispatches once more.
+`review-verdict` and its sweep still own the label for chat-mode users (the flip
+back to `state:in-review` is the dispatched worker's own last step, AGENTS.md step
+6); this only removes herd's read dependency on it. A live rework worker on the
+entry is never dispatched twice, and a transient failure reading the verdict or
+the review detail leaves the affected entry untouched for the next poll.
 
 ### Supervisor invariants
 
