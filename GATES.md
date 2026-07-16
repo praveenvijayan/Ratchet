@@ -89,6 +89,7 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 | 4y18  | test: herd-ui-mascot-stale-adapter | `node scripts/herd-ui-mascot-stale-adapter.test.mjs` | exit 0 |
 | 4y12  | test: herd-mascots-install      | `node scripts/herd-mascots-install.test.mjs`   | exit 0 |
 | 4y8   | test: herd-notify               | `node scripts/herd-notify.test.mjs`               | exit 0 |
+| 4y20  | test: herd-ui-milestone-sound   | `node scripts/herd-ui-milestone-sound.test.mjs`   | exit 0 |
 | 4z1   | test: state-label-exclusivity   | `node scripts/state-label-exclusivity.test.mjs`   | exit 0 |
 | 4z2   | test: state-instructions-symmetry | `node scripts/state-instructions-symmetry.test.mjs` | exit 0 |
 | 4z3   | test: version-consistency       | `node scripts/version-consistency.test.mjs`       | exit 0 |

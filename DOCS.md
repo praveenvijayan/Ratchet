@@ -246,6 +246,7 @@ scripts/
   herd-ui-acknowledge.test.mjs  Regression test for escalation copy/acknowledge
   herd-ui-adapter-failures.test.mjs Regression test for per-adapter dispatch-failure aggregation
   herd-ui-summary-strip.test.mjs Regression test for the one-glance fleet-summary strip
+  herd-ui-milestone-sound.test.mjs Regression test for audible milestone sound cues
   herd-ui-mascot-deck.test.mjs  Regression test for the Active Agents mascot deck
   herd-ui-truthful-tally.test.mjs Regression test for truthful deck header tally and vitals
   herd-ui-vinyl-deck.test.mjs   Regression test for the vinyl-figure pop-out deck revision
