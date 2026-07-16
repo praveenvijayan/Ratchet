@@ -505,6 +505,10 @@
       "class": "excluded"
     },
     {
+      "path": "scripts/herd-ui-sound-mute-toggle.test.mjs",
+      "class": "excluded"
+    },
+    {
       "path": "scripts/herd-ui-summary-strip.test.mjs",
       "class": "excluded"
     },
