@@ -339,4 +339,82 @@ for (const ac of ["AC1", "AC2", "AC3"]) {
   assert.equal(hits, 1, `#446 ${ac} has exactly one test named after it`);
 }
 
+// #458 AC1: the review rework directs the worker, as its first board action before any
+// fix commits, to set the issue to state:changes-requested and remove state:in-review —
+// so a non-conflicting rejection's rework opens by flipping the board off
+// state:in-review, and that flip precedes reading the feedback and the closing flip back.
+await inTempDir(async () => {
+  writeStateFile("s.json", { 7: entry({ attempts: 1 }) });
+  const spawns = [];
+  const spawn = (argv, env, logFile) => { spawns.push({ argv, env, logFile }); return 4321; };
+  const calls = [];
+  await reviewOnce({
+    config: mkConfig(), statePath: "s.json", escalationsPath: "esc.md",
+    gh: mkGh({ prs: prsMerge("CHANGES_REQUESTED", { mergeable: "MERGEABLE" }), reviews: reviewWith("R1"), calls }),
+    isAlive: () => false, spawn, now: () => NOW, log: () => {},
+  });
+  assert.equal(spawns.length, 1, "a changes-requested PR dispatches exactly one rework");
+  const argv = spawns[0].argv.join(" ");
+  const flipIdx = argv.indexOf("set the issue to state:changes-requested and remove state:in-review");
+  assert.ok(flipIdx > -1, "the rework directs the opening flip to state:changes-requested, removing state:in-review");
+  assert.match(argv, /first board action before any fix commits/, "the flip is named the first board action before any fix commits");
+  assert.ok(flipIdx < argv.indexOf("read the PR's review feedback"), "the opening flip precedes reading the feedback and acting");
+  assert.ok(flipIdx < argv.lastIndexOf("state:in-review"), "the opening flip precedes the closing flip back to state:in-review");
+});
+
+// #458 AC2: the combined conflict+review rework directs the same start-of-rework flip —
+// a rejection that also conflicts with main opens by flipping the issue to
+// state:changes-requested before it merges main or touches any fix.
+await inTempDir(async () => {
+  writeStateFile("s.json", { 7: entry({ attempts: 1 }) });
+  const spawns = [];
+  const spawn = (argv, env, logFile) => { spawns.push({ argv, env, logFile }); return 4321; };
+  const calls = [];
+  await reviewOnce({
+    config: mkConfig(), statePath: "s.json", escalationsPath: "esc.md",
+    gh: mkGh({ prs: prsMerge("CHANGES_REQUESTED", { mergeStateStatus: "DIRTY" }), reviews: reviewWith("R1"), calls }),
+    isAlive: () => false, spawn, now: () => NOW, log: () => {},
+  });
+  assert.equal(spawns.length, 1, "a conflicting changes-requested PR dispatches exactly one rework");
+  const argv = spawns[0].argv.join(" ");
+  const flipIdx = argv.indexOf("set the issue to state:changes-requested and remove state:in-review");
+  assert.ok(flipIdx > -1, "the conflict rework also directs the opening flip to state:changes-requested");
+  assert.match(argv, /first board action before any fix commits/, "the conflict rework names the flip the first board action");
+  assert.ok(flipIdx < argv.indexOf("merge origin/main"), "the opening flip precedes the conflict resolution");
+});
+
+// #458 AC3: both reworks still direct the closing flip back to state:in-review after the
+// worker pushes, unchanged — the added opening flip does not remove or alter the existing
+// end-of-rework flip in either prompt.
+{
+  const closing = "then set the issue back to state:in-review for re-review.";
+  assert.ok(REVIEW_REWORK_PROMPT.endsWith(closing), "the review-only rework still ends by flipping back to state:in-review");
+  assert.ok(REVIEW_CONFLICT_REWORK_PROMPT.endsWith(closing), "the conflict rework still ends by flipping back to state:in-review");
+}
+
+// #458 AC4: the herd review stage itself still writes no labels, and its per-rejection
+// dedup still keys on the review id, not the label — a dispatch issues only read calls
+// (pr list + pr view) and records the rejection's id as the dedup key.
+await inTempDir(async () => {
+  writeStateFile("s.json", { 7: entry({ attempts: 1 }) });
+  const spawns = [];
+  const spawn = (argv, env, logFile) => { spawns.push({ argv, env, logFile }); return 4321; };
+  const calls = [];
+  await reviewOnce({
+    config: mkConfig(), statePath: "s.json", escalationsPath: "esc.md",
+    gh: mkGh({ prs: prsMerge("CHANGES_REQUESTED", { mergeable: "MERGEABLE" }), reviews: reviewWith("R1"), calls }),
+    isAlive: () => false, spawn, now: () => NOW, log: () => {},
+  });
+  const subs = calls.map((c) => `${c[0]} ${c[1]}`);
+  assert.deepEqual([...new Set(subs)].sort(), ["pr list", "pr view"], "the stage only reads pr list + pr view — no label survey, no label write");
+  assert.equal(readState("s.json")["7"].reviewedAt, "R1", "the dedup keys on the rejection's review id, not the label");
+});
+
+// #458 AC5: every criterion above has exactly one test named after it — this file
+// declares AC1–AC4 once each, no padding.
+for (const ac of ["AC1", "AC2", "AC3", "AC4"]) {
+  const hits = (self.match(new RegExp(`#458 ${ac}:`, "g")) || []).length;
+  assert.equal(hits, 1, `#458 ${ac} has exactly one test named after it`);
+}
+
 console.log("PASS herd-review.test.mjs");

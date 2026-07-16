@@ -55,11 +55,16 @@ import { isConflicting } from "./herd-verify.mjs";
 // new-feature work is NOT implemented here but routed through the ratchet-plan
 // protocol (a plan/*.md on the planning PR) to become its own reviewed issue.
 // {issue}/{pr} are filled in before the adapter argv is rendered. Unlike a fresh
-// dispatch this points the worker at the PR's review, and unlike the conflict rework
-// it directs the AGENTS.md step 6 flip back to state:in-review so this stage stays
-// label-free.
+// dispatch this points the worker at the PR's review. It carries both halves of the
+// AGENTS.md step 6 board flip the worker owns in chat mode: as its first board action
+// it flips the issue to state:changes-requested (removing state:in-review) so the
+// board reflects the rejection for the whole rework window, and after pushing it
+// flips back to state:in-review. Herd itself still writes no labels — the worker does,
+// exactly as in chat mode — so this stage stays label-free.
 export const REVIEW_REWORK_PROMPT =
   "PR #{pr} for issue #{issue} received a Request Changes review. In its worktree (../wt/issue-{issue}), " +
+  "first, as your first board action before any fix commits, set the issue to state:changes-requested and remove " +
+  "state:in-review so the board reflects the rejection while the rework runs. Then " +
   "read the PR's review feedback (the review summary and every line comment) and classify each point as an " +
   "in-scope fix or out-of-scope, new-feature work before acting. Address every in-scope point with focused " +
   "commits on this PR's existing branch — no new PR, no plan file. Do NOT implement any out-of-scope or " +
@@ -79,10 +84,14 @@ export const REVIEW_REWORK_PROMPT =
 // in-scope fixes land as commits on the existing branch alongside the conflict
 // resolution so both reach the same PR, while out-of-scope or new-feature work is
 // routed through the ratchet-plan protocol instead of built here. Like
-// REVIEW_REWORK_PROMPT it flips the issue back to state:in-review, keeping this
-// stage label-free.
+// REVIEW_REWORK_PROMPT it carries both halves of the AGENTS.md step 6 board flip: the
+// opening flip to state:changes-requested as the first board action and the closing
+// flip back to state:in-review after the push — the worker labels, this stage stays
+// label-free.
 export const REVIEW_CONFLICT_REWORK_PROMPT =
   "PR #{pr} for issue #{issue} received a Request Changes review and now conflicts with main. In its worktree (../wt/issue-{issue}), " +
+  "first, as your first board action before any fix commits, set the issue to state:changes-requested and remove " +
+  "state:in-review so the board reflects the rejection while the rework runs. Then " +
   "merge origin/main, resolve every conflict, then read the PR's review feedback (the review summary and every line comment) and " +
   "classify each point as an in-scope fix or out-of-scope, new-feature work before acting. Address every in-scope point with focused " +
   "commits on this PR's existing branch, alongside the conflict resolution, so the fix and the conflict resolution land in the same PR — " +
