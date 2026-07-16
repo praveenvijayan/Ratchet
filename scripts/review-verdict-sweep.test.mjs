@@ -11,8 +11,12 @@
 // Zero dependencies. Run: node scripts/review-verdict-sweep.test.mjs
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 import { decideReconcile, latestReviewState, main } from "./review-verdict-sweep.mjs";
+
+const readRepoFile = (rel) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), "utf8");
 
 const label = (name) => ({ name });
 const review = (state, submittedAt) => ({ state, submitted_at: submittedAt });
@@ -93,7 +97,59 @@ const review = (state, submittedAt) => ({ state, submitted_at: submittedAt });
   assert.match(logs.join("\n"), /PR #10.*could not read reviews/, "the per-PR failure is logged");
 }
 
-console.log("PASS review-verdict-sweep.test.mjs (5 criteria)");
+// === Issue #461 (plan 0190-review-verdict-sweep-cadence): tighten the sweep
+// cadence so a missed flip is reconciled within minutes, not half an hour. The
+// decision core above is untouched; these three criteria lock the new schedule,
+// its docs, and that a no-op pass stays cheap. ===============================
+
+// --- Criterion 461-1: the workflow runs on a 5-minute cron, not every 30. ---
+{
+  const wf = readRepoFile("../.github/workflows/review-verdict-sweep.yml");
+  const crons = [...wf.matchAll(/^[ \t]*-[ \t]*cron:[ \t]*["']?([^"'\n]+?)["']?[ \t]*$/gim)].map((m) => m[1].trim());
+  assert.deepEqual(crons, ["*/5 * * * *"], "the sweep must schedule exactly one 5-minute cron");
+  assert.ok(!crons.includes("*/30 * * * *"), "the old */30 cron must be gone");
+}
+
+// --- Criterion 461-2: the documented cadence (DOCS.md workflow table) matches
+// the new schedule. ----------------------------------------------------------
+{
+  const docs = readRepoFile("../DOCS.md");
+  const row = docs.split("\n").find((l) => l.includes("`review-verdict-sweep`") && l.includes("| Self-heals"));
+  assert.ok(row, "DOCS.md must document the review-verdict-sweep workflow row");
+  assert.match(row, /every 5 min/, "the documented cadence must read 'every 5 min'");
+  assert.ok(!/every 30 min/.test(row), "the stale 'every 30 min' cadence must be gone from the row");
+}
+
+// --- Criterion 461-3: a sweep pass that finds nothing to flip stays a cheap
+// no-op — no label writes, exactly one log line per skipped PR, and the
+// decision logic is unchanged. (Orchestration — driven through main().) ------
+{
+  // Two open, in-review PRs whose latest review is APPROVED: nothing to flip.
+  const { result, error, logs } = await runMain(
+    [
+      openPr(20, "agent/issue-50", "Closes #50", [review("APPROVED", "2026-07-10T10:00:00Z")]),
+      openPr(21, "agent/issue-51", "Closes #51", [review("APPROVED", "2026-07-10T11:00:00Z")]),
+    ],
+    [
+      [50, { number: 50, state: "open", labels: [label("state:in-review")] }],
+      [51, { number: 51, state: "open", labels: [label("state:in-review")] }],
+    ],
+  );
+  assert.equal(error, undefined, "a no-flip sweep must not error");
+  assert.equal(result.flipped, 0, "a no-flip sweep flips nothing");
+  assert.equal(api.puts.size, 0, "a no-flip sweep issues no label write");
+  // Exactly one log line per skipped PR (plus the single completion summary).
+  const perPr = logs.filter((l) => /^PR #\d+ -> issue #\d+:/.test(l));
+  assert.equal(perPr.length, 2, "each skipped PR logs exactly one line");
+  assert.ok(perPr.every((l) => /no label change/.test(l)), "each skip logs the no-op reason");
+  // The decision core is unchanged: APPROVED on an in-review issue is still a
+  // no-op with the same reason string the sweep logs above.
+  const d = decideReconcile({ labels: ["state:in-review"], latestReviewState: "APPROVED" });
+  assert.equal(d.flip, false, "APPROVED remains a no-op — decision logic unchanged");
+  assert.match(d.reason, /no label change/, "the unchanged decision reason is logged verbatim");
+}
+
+console.log("PASS review-verdict-sweep.test.mjs (5 + 3 criteria)");
 
 // --- shared in-memory API + harness (used by the orchestration criteria) ---
 // Defined after the tests so the decision-criteria sections read top-down with
