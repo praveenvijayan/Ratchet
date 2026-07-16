@@ -270,4 +270,73 @@ for (const ac of ["AC1", "AC2", "AC3"]) {
   assert.equal(hits, 1, `#445 ${ac} has exactly one test named after it`);
 }
 
+// #446 AC1: the review-rework instruction directs the worker to read every review
+// comment and classify each as an in-scope fix or out-of-scope/new-feature work
+// before acting — a Request Changes review is not automatically an in-scope fix.
+await inTempDir(async () => {
+  writeStateFile("s.json", { 7: entry({ attempts: 1 }) });
+  const spawns = [];
+  const spawn = (argv, env, logFile) => { spawns.push({ argv, env, logFile }); return 4321; };
+  const calls = [];
+  await reviewOnce({
+    config: mkConfig(), statePath: "s.json", escalationsPath: "esc.md",
+    gh: mkGh({ prs: prsMerge("CHANGES_REQUESTED", { mergeable: "MERGEABLE" }), reviews: reviewWith("R1"), calls }),
+    isAlive: () => false, spawn, now: () => NOW, log: () => {},
+  });
+  assert.equal(spawns.length, 1, "a changes-requested PR dispatches exactly one rework");
+  const argv = spawns[0].argv.join(" ");
+  assert.match(argv, /classify each point/, "the rework directs the worker to classify each review point");
+  assert.match(argv, /in-scope fix or out-of-scope/, "the classification names in-scope versus out-of-scope work");
+  assert.match(argv, /before acting/, "the classification happens before the worker acts on any point");
+});
+
+// #446 AC2: for in-scope feedback the instruction directs the worker to address it
+// with commits on the PR's existing branch — no new PR, no plan file — and, on a
+// conflicting PR, alongside the 0185 conflict resolution so the fix and the conflict
+// resolution land in the same PR.
+await inTempDir(async () => {
+  writeStateFile("s.json", { 7: entry({ attempts: 1 }) });
+  const spawns = [];
+  const spawn = (argv, env, logFile) => { spawns.push({ argv, env, logFile }); return 4321; };
+  const calls = [];
+  await reviewOnce({
+    config: mkConfig(), statePath: "s.json", escalationsPath: "esc.md",
+    gh: mkGh({ prs: prsMerge("CHANGES_REQUESTED", { mergeable: "CONFLICTING" }), reviews: reviewWith("R1"), calls }),
+    isAlive: () => false, spawn, now: () => NOW, log: () => {},
+  });
+  assert.equal(spawns.length, 1, "a conflicting changes-requested PR dispatches exactly one rework");
+  const argv = spawns[0].argv.join(" ");
+  assert.match(argv, /in-scope point with focused commits on this PR's existing branch/, "in-scope feedback is committed on the PR's existing branch");
+  assert.match(argv, /alongside the conflict resolution/, "the in-scope fix lands alongside the 0185 conflict resolution");
+  assert.match(argv, /land in the same PR/, "the fix and the conflict resolution share one PR");
+  assert.match(argv, /no new PR, no plan file/, "in-scope feedback opens no new PR and files no plan");
+});
+
+// #446 AC3: for out-of-scope or new-feature feedback the instruction directs the
+// worker NOT to implement it in this PR, but to file it through the ratchet-plan
+// protocol (a plan file on the planning PR) and reply on the review pointing to that
+// plan.
+await inTempDir(async () => {
+  writeStateFile("s.json", { 7: entry({ attempts: 1 }) });
+  const spawns = [];
+  const spawn = (argv, env, logFile) => { spawns.push({ argv, env, logFile }); return 4321; };
+  const calls = [];
+  await reviewOnce({
+    config: mkConfig(), statePath: "s.json", escalationsPath: "esc.md",
+    gh: mkGh({ prs: prsMerge("CHANGES_REQUESTED", { mergeable: "MERGEABLE" }), reviews: reviewWith("R1"), calls }),
+    isAlive: () => false, spawn, now: () => NOW, log: () => {},
+  });
+  const argv = spawns[0].argv.join(" ");
+  assert.match(argv, /Do NOT implement any out-of-scope or new-feature point in this PR/, "out-of-scope feedback is not built into this PR");
+  assert.match(argv, /file it through the ratchet-plan protocol \(a plan\/\*\.md on the planning PR\)/, "out-of-scope feedback is routed to a plan file on the planning PR");
+  assert.match(argv, /reply to that review comment pointing to the plan/, "the worker replies on the review pointing to the plan");
+});
+
+// #446 AC4: every criterion above has exactly one test named after it — this file
+// declares AC1–AC3 once each, no padding.
+for (const ac of ["AC1", "AC2", "AC3"]) {
+  const hits = (self.match(new RegExp(`#446 ${ac}:`, "g")) || []).length;
+  assert.equal(hits, 1, `#446 ${ac} has exactly one test named after it`);
+}
+
 console.log("PASS herd-review.test.mjs");
