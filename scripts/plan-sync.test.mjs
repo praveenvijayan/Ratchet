@@ -185,6 +185,31 @@ Body of 0096.
 - [ ] a declared estimated_lines is accepted
 `);
 
+// #471 AC2 fixtures: two complete plans whose slugs match a live branch in the
+// mock below. The unapproved one must be held at state:draft despite having
+// criteria; the one carrying `retroactive_ok` must sync as ordinary ready work.
+await writeFile(join(planDir, "0196-no-retroactive-plans.md"), `---
+title: Flag retroactive plans
+priority: medium
+blocked_by: []
+---
+Body of 0196.
+
+## Acceptance criteria
+- [ ] a plan matching a live branch is held at draft
+`);
+await writeFile(join(planDir, "0198-approved-spike.md"), `---
+title: Approved retroactive write-up
+priority: medium
+blocked_by: []
+retroactive_ok: spike landed first
+---
+Body of 0198.
+
+## Acceptance criteria
+- [ ] an approved retroactive plan syncs as ready
+`);
+
 // --- in-memory GitHub API ----------------------------------------------
 const label = (name) => ({ name });
 const issues = new Map([
