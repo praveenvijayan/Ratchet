@@ -81,6 +81,11 @@
       "profile": "core"
     },
     {
+      "path": ".github/workflows/red-main-alert.yml",
+      "class": "framework",
+      "profile": "core"
+    },
+    {
       "path": ".github/workflows/archive-closed-plans.yml",
       "class": "framework",
       "profile": "core"
@@ -226,6 +231,11 @@
     },
     {
       "path": "scripts/conflicted-prs.mjs",
+      "class": "framework",
+      "profile": "core"
+    },
+    {
+      "path": "scripts/red-main-alert.mjs",
       "class": "framework",
       "profile": "core"
     },
@@ -660,6 +670,10 @@
     },
     {
       "path": "scripts/conflicted-prs.test.mjs",
+      "class": "excluded"
+    },
+    {
+      "path": "scripts/red-main-alert.test.mjs",
       "class": "excluded"
     },
     {
