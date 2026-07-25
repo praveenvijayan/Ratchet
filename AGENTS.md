@@ -15,9 +15,10 @@ Project config lives outside it and the updater never touches it: `GATES.md`
 `MEMORY.md` agent-maintained through PRs).
 
 ## The loop
-`plan/*.md → sync → issues → pick → claim → build → verify → PR → human merge →
+`plan/*.md → sync → issues → pick → claim → build → verify → PR → tiered merge →
 unblock dependents`. Humans do two things: **write plan files** and **review
-PRs**. Everything between is mechanical.
+PRs** — and on a normal-risk PR even the merge is mechanical (step 7).
+Everything between is mechanical.
 
 ## Routing table — read the file, don't guess
 Every deferred concern routes to a file path, not a skill invocation. Read it.
@@ -133,7 +134,13 @@ commit SHA. Then set the issue back to `state:in-review` and remove
 `plan/*.md`, never this PR.
 
 ### 7. System closes the loop (no agent involved)
-A human merges; `Closes #<N>` closes the issue. `unblock-dependents` flips
+**The merge is tiered by the `risk` label your PR inherited.** A PR **without**
+`risk:high` is merged by the `auto-merge` workflow once its checks are green and
+its latest recorded review verdict is `APPROVED` — no human in the path. A PR
+**with** `risk:high` never merges on that verdict alone: it also waits for an
+`APPROVED` review from a human and a 15-minute hold since it became mergeable.
+`CHANGES_REQUESTED` never merges — that is step 6. Either way `Closes #<N>`
+closes the issue. `unblock-dependents` flips
 newly-unblocked issues to `state:ready`; `sweep-stale-claims` returns abandoned
 work across `state:in-progress`, `state:in-review`, and `state:changes-requested`,
 measuring freshness from the newest of a commit, a heartbeat
@@ -188,7 +195,10 @@ self-invoke**. It skips only the planning round trip — it still runs the
 5. <!-- ratchet:invariant:one-pr --> One issue, one branch, one PR. Rework
    updates the existing PR; never open a second.
 6. <!-- ratchet:invariant:never-merge --> You never merge, approve, close, or
-   touch `main`. The PR is your terminal action. The `ratchet-herd` supervisor
+   touch `main`. The PR is your terminal action. Finding that PR **already
+   merged by the `auto-merge` workflow with no human in the path is normal**
+   (step 7's normal-risk tier), not an anomaly to investigate — the ban is on
+   *you* merging, not on the *system* merging. The `ratchet-herd` supervisor
    is bound the same way, with one explicit exception: it may delete a single
    claim ref `agent/issue-<N>` it watched its own worker create, once that
    worker has died with no PR, and requeue that issue (dead-worker claim

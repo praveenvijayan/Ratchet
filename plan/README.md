@@ -227,6 +227,17 @@ way down: `plan-sync` labels the issue `risk:high`, and the PR handoff
 (`ratchet-submit.mjs`) copies that label onto the PR, so downstream review
 tiering reads one label instead of re-deriving the risk from a diff.
 
+**What the tier costs at merge.** The label is not decoration — it decides who
+has to be there. A **normal-risk** PR is merged by the `auto-merge` workflow as
+soon as its checks are green and its recorded review verdict is `APPROVED`: no
+human in the path, so it merges within minutes of turning green. A **`risk:
+high`** PR never merges on that verdict alone — it additionally needs an
+`APPROVED` review from a human and a minimum **15-minute hold** since it became
+mergeable, so it merges only when someone is awake to approve it. Declaring
+`risk: high` therefore buys scrutiny and pays for it in wall-clock time; that
+trade is the reason the closed list below is a *closed* list, and the reason
+over-declaring it is as wrong as under-declaring it.
+
 ```yaml
 risk: high
 ```
