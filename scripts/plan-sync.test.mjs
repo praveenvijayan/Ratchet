@@ -185,6 +185,26 @@ Body of 0096.
 - [ ] a declared estimated_lines is accepted
 `);
 
+// #471 AC2 fixtures: a plan matching a live branch is held at draft; the same
+// plan carrying a human's `retroactive_ok` approval syncs ready.
+await writeFile(join(planDir, "0196-no-retroactive-plans.md"), `---
+title: Flag retroactive plans
+priority: medium
+blocked_by: []
+---
+## Acceptance criteria
+- [ ] held at draft until a human approves it
+`);
+await writeFile(join(planDir, "0198-approved-spike.md"), `---
+title: Write up the approved spike
+priority: medium
+blocked_by: []
+retroactive_ok: spike landed first, written up on purpose
+---
+## Acceptance criteria
+- [ ] syncs ready because a human approved it
+`);
+
 // --- in-memory GitHub API ----------------------------------------------
 const label = (name) => ({ name });
 const issues = new Map([
