@@ -1,0 +1,32 @@
+name: weekly-failure-review
+
+# The repeat-failure scan on a schedule. Once a week it collects the merged
+# fix/rework PRs of the ISO week that just ended, groups them by failure class,
+# and publishes one report per week as an issue labelled `failure-review` — the
+# channel a human spends 30 minutes on, filing a plan file per repeat class
+# worth a rule. A quiet week and a broken run both publish there too, so silence
+# is never ambiguous. Logic lives in scripts/weekly-failure-review.mjs; this
+# workflow is only its trigger and env.
+
+on:
+  schedule:
+    - cron: "17 7 * * 1" # Monday morning UTC, off the top of the hour
+  workflow_dispatch: {} # allow an on-demand review
+
+permissions:
+  contents: read # actions/checkout — a non-empty block drops this by default
+  pull-requests: read # list the week's closed PRs
+  issues: write # publish and update the weekly report
+
+jobs:
+  publish-review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+      - run: node scripts/weekly-failure-review.mjs
+        env:
+          GITHUB_TOKEN: ${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}

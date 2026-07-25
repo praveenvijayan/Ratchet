@@ -91,6 +91,11 @@
       "profile": "core"
     },
     {
+      "path": ".github/workflows/weekly-failure-review.yml",
+      "class": "framework",
+      "profile": "core"
+    },
+    {
       "path": ".github/workflows/archive-closed-plans.yml",
       "class": "framework",
       "profile": "core"
@@ -246,6 +251,11 @@
     },
     {
       "path": "scripts/red-main-alert.mjs",
+      "class": "framework",
+      "profile": "core"
+    },
+    {
+      "path": "scripts/weekly-failure-review.mjs",
       "class": "framework",
       "profile": "core"
     },
@@ -693,6 +703,10 @@
     },
     {
       "path": "scripts/red-main-alert.test.mjs",
+      "class": "excluded"
+    },
+    {
+      "path": "scripts/weekly-failure-review.test.mjs",
       "class": "excluded"
     },
     {
