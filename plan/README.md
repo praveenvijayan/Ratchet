@@ -20,6 +20,7 @@ priority: high              # high | medium | low   (required)
 labels: [area]              # optional extra labels
 blocked_by: []              # other slugs like [0002-user-model], or []  (required)
 estimated_lines: 120        # hand-written changed lines you expect (max 400)
+locks: []                   # exclusive resources this plan takes  (optional)
 ---
 
 One or two sentences: what this is and why it exists.
@@ -181,6 +182,40 @@ cheap — after the code exists, an over-cap PR can only be renegotiated.
 A plan with no `estimated_lines` still syncs (existing plans are
 grandfathered), but it logs a warning naming the file. New plans declare it.
 
+## Exclusive resources — `locks`
+
+Two plans that both add a migration, both own the same route, or both rewrite
+the same file collide the moment they are picked in parallel. Declare what a
+plan takes exclusively:
+
+```yaml
+locks: [migration, route:/home, file:src/db/schema.ts]
+```
+
+**Token conventions** — a token is a name two authors agree on, nothing more:
+
+- `migration` — the plan adds or edits a database migration.
+- `route:<path>` — the plan owns a URL path, e.g. `route:/home`.
+- `file:<path>` — the plan rewrites one file, e.g. `file:src/db/schema.ts`.
+
+Invent others freely; the only rule is that both plans spell the token the same
+way. **Tokens are compared as exact strings** — no case folding, no path
+normalisation — so `route:/Home` and `route:/home` are different resources.
+
+When two plans with open issues claim the same token, the sync makes at most one
+of them `state:ready` and gives the other `state:blocked` with an ordinary
+`Blocked by #N` line naming the token and the conflicting slug. The order is
+deterministic: **priority first, then slug**. Nothing else changes — when the
+holder's issue closes, `unblock-dependents` releases the waiting issue exactly
+as it would for a `blocked_by` edge, with no manual edit. Every conflicting pair
+is named in the sync log. Where a `blocked_by` edge already serializes the two
+plans, no lock edge is added — the dependency is doing the job already.
+
+`locks` is optional. A value that is not a list of strings aborts the sync
+non-zero, naming the file and changing nothing on GitHub: a lock the compiler
+cannot read would let the plan sync as ready and collide with the very work it
+meant to exclude.
+
 ## File naming
 
 `NNNN-short-slug.md` — e.g. `0001-email-login.md`. The stem (`0001-email-login`)
@@ -214,6 +249,7 @@ priority: high              # high | medium | low   (required)
 labels: [auth, backend]     # optional extra labels
 blocked_by: [0002-user-model]   # other slugs, or []  (required, may be empty)
 estimated_lines: 120        # hand-written changed lines you expect (max 400)
+locks: [route:/login]       # exclusive resources this plan takes  (optional)
 ---
 
 One or two sentences: what this is and why it exists.
@@ -238,10 +274,16 @@ One or two sentences: what this is and why it exists.
   the offending file and value are logged with the instruction to split the
   plan. A file that omits the key syncs as before with a warning naming it.
 - **Unknown frontmatter keys are ignored with a warning.** `title`, `priority`,
-  `labels`, `blocked_by`, and `retroactive_ok` are the only keys the compiler
-  understands. Any other key is logged as `WARNING: <file> has unknown frontmatter key '<key>'`
-  `labels`, `blocked_by`, and `estimated_lines` are the only keys the compiler
-  understands.
+  `labels`, `blocked_by`, `estimated_lines`, `locks`, and `retroactive_ok` are
+  the only keys the compiler understands. Any other key is logged as
+  `WARNING: <file> has unknown frontmatter key '<key>'` and ignored; the file
+  still compiles.
+- **`locks` serializes plans that claim the same resource.** Two plans with open
+  issues claiming the same lock token are never both `state:ready`: the loser —
+  chosen by priority, then slug — gets `state:blocked` behind the winner and is
+  released by `unblock-dependents` when the winner closes. A `locks` value that
+  is not a list of strings aborts the sync before it touches GitHub, naming the
+  file. See "Exclusive resources" above.
 - **Acceptance criteria decide readiness.** A file with at least one `- [ ]`
   item under `## Acceptance criteria` becomes `state:ready`. Without criteria it
   becomes `state:draft` and no agent will pick it. If you cannot write the
