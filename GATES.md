@@ -109,6 +109,7 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 | 4z19  | test: release-pr-gates          | `node scripts/release-pr-gates.test.mjs`          | exit 0 |
 | 4z20  | test: framework-plan-check      | `node scripts/framework-plan-check.test.mjs`      | exit 0 |
 | 4z21  | test: red-main-alert            | `node scripts/red-main-alert.test.mjs`            | exit 0 |
+| 4z22  | test: debt-scan                 | `node scripts/debt-scan.test.mjs`                 | exit 0 |
 | 4r    | test-coverage                   | `node scripts/gates-coverage.mjs`                 | exit 0 |
 | 4z    | skill-parity                    | `node scripts/skill-parity.mjs`                   | exit 0 |
 | 4z10  | skill-detail                    | `node scripts/skill-detail.mjs`                   | exit 0 |
@@ -161,6 +162,26 @@ read them before writing a pattern:
 - **A pattern containing `/` is anchored at the repo root.** So `docs/report.md`
   matches only the top-level file, and `generated/**` matches everything under a
   root-level `generated/` directory.
+
+## Deferred-scope debt scan
+
+Read by `scripts/debt-scan.mjs`, which runs as a check on every PR. A merged PR
+body may declare what it left out under a `## Deferred scope` heading; each
+bullet stays red until a plan file carries `Ingests deferred scope from #<PR>`
+or the number is retired below. Full protocol: `plan/README.md`.
+
+Unlike the sections above, this config is read from the PR's own checkout, not
+the base branch — retiring an item has to be possible in the PR the check is
+failing, and the retirement is a diff line the reviewer sees.
+
+- deferral_marker: none
+- retired_deferrals: []
+
+`deferral_marker` is an optional host-owned regex that must capture the plan slug
+a source marker defers to, e.g. `DEFERRED\(([\w-]+)\)`. Left as `none` (or
+omitted) the source scan does not run: the framework assumes no `TODO`/`FIXME`
+convention of its own. `retired_deferrals` lists PR numbers whose deferred scope
+a human decided will never be built.
 
 ## Framework paths (plan protocol applies)
 

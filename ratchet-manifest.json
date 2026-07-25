@@ -240,6 +240,11 @@
       "profile": "core"
     },
     {
+      "path": "scripts/debt-scan.mjs",
+      "class": "framework",
+      "profile": "core"
+    },
+    {
       "path": "scripts/agents-kernel.test.mjs",
       "class": "excluded"
     },
@@ -674,6 +679,10 @@
     },
     {
       "path": "scripts/red-main-alert.test.mjs",
+      "class": "excluded"
+    },
+    {
+      "path": "scripts/debt-scan.test.mjs",
       "class": "excluded"
     },
     {
