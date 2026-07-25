@@ -31,6 +31,14 @@ import { fileURLToPath } from "node:url";
 const RUNNER = fileURLToPath(new URL("./run-gates.mjs", import.meta.url));
 const dir = await mkdtemp(join(tmpdir(), "run-gates-test-"));
 
+// The fixture environment for a spawned runner. BASE_GATES_FILE is stripped:
+// the pr-gates job sets it on the very step that runs this suite, every child
+// inherits it, and run-gates.mjs prefers it over GATES_FILE (#84). Left in, a
+// spawned runner reads the REAL gate table instead of the fixture — including
+// its own `test: run-gates` row — and recurses until the job times out. The
+// one test that genuinely needs it sets it explicitly (runGatesWithBase).
+const { BASE_GATES_FILE: _base, ...cleanEnv } = process.env;
+
 // Write a GATES.md fixture and run the runner against it. GITHUB_STEP_SUMMARY
 // points at a per-invocation file so we can assert on the check summary.
 let n = 0;
@@ -41,7 +49,7 @@ async function runGates(rows) {
   await writeFile(gatesFile, gatesTable(rows));
   const res = spawnSync("node", [RUNNER], {
     encoding: "utf8",
-    env: { ...process.env, GATES_FILE: gatesFile, GITHUB_STEP_SUMMARY: summaryFile },
+    env: { ...cleanEnv, GATES_FILE: gatesFile, GITHUB_STEP_SUMMARY: summaryFile },
   });
   const summary = await readFile(summaryFile, "utf8").catch(() => "");
   return { status: res.status, out: (res.stdout || "") + (res.stderr || ""), summary };
@@ -54,7 +62,7 @@ async function runGatesText(text) {
   await writeFile(gatesFile, text);
   const res = spawnSync("node", [RUNNER], {
     encoding: "utf8",
-    env: { ...process.env, GATES_FILE: gatesFile, GITHUB_STEP_SUMMARY: summaryFile },
+    env: { ...cleanEnv, GATES_FILE: gatesFile, GITHUB_STEP_SUMMARY: summaryFile },
   });
   const summary = await readFile(summaryFile, "utf8").catch(() => "");
   return { status: res.status, out: (res.stdout || "") + (res.stderr || ""), summary };
@@ -83,7 +91,7 @@ async function runGatesWithBase(baseRows, headRows) {
   await writeFile(headFile, gatesTable(headRows));
   const res = spawnSync("node", [RUNNER], {
     encoding: "utf8",
-    env: { ...process.env, GATES_FILE: headFile, BASE_GATES_FILE: baseFile, GITHUB_STEP_SUMMARY: summaryFile },
+    env: { ...cleanEnv, GATES_FILE: headFile, BASE_GATES_FILE: baseFile, GITHUB_STEP_SUMMARY: summaryFile },
   });
   const summary = await readFile(summaryFile, "utf8").catch(() => "");
   return { status: res.status, out: (res.stdout || "") + (res.stderr || ""), summary };
