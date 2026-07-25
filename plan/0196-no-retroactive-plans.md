@@ -2,7 +2,7 @@
 title: Flag retroactive plans — a plan whose code already exists on a branch needs explicit human approval
 priority: medium
 labels: [scripts, planning]
-blocked_by: [0195-debt-ingestion-gate]
+blocked_by: []
 ---
 
 Plan-before-code is invariant 1, but #229/#235 show it breaks silently for
