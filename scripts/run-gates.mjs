@@ -22,6 +22,10 @@
 //   - On failure the process exits non-zero and the failing gate's NAME is
 //     written to the CI check summary and emitted as an error annotation, so a
 //     red check names the gate that broke.
+//   - This script OWNS the gate-config trust boundary: it resolves the
+//     authoritative config itself, then strips `BASE_GATES_FILE`/`GATES_FILE`
+//     from the environment of every gate command it spawns. No gate suite may
+//     read gate config from the ambient environment (#494).
 //
 // Zero dependencies. Requires Node 20+. Run:  node scripts/run-gates.mjs
 // Override the file for testing with GATES_FILE=/path/to/GATES.md.
@@ -39,6 +43,19 @@ const GATES_FILE = process.env.GATES_FILE || "GATES.md";
 // working-tree file is used exactly as before.
 const BASE_GATES_FILE = process.env.BASE_GATES_FILE || "";
 const CONFIG_FILE = BASE_GATES_FILE || GATES_FILE;
+
+// The trust boundary stops here — at the single point where gate children are
+// created. `execSync` hands a child the ambient environment, so every gate
+// command (and everything it spawns) would otherwise inherit BASE_GATES_FILE
+// and GATES_FILE. A suite that spawns a runner or a check against its own
+// fixture config is then overruled by the leaked config, because BASE_GATES_FILE
+// outranks GATES_FILE (above) — and in CI that leaked config is the real gate
+// table, including the suite's own `test:` row, so the run recurses until the
+// job times out. Stripping both once, here, makes that impossible for every
+// suite at once instead of asking each suite to remember (#494; it replaces the
+// per-suite strips PR #492 added as a hotfix). This runner still judges by
+// CONFIG_FILE above — only what children see changes.
+const { BASE_GATES_FILE: _leakedBase, GATES_FILE: _leakedGates, ...GATE_ENV } = process.env;
 
 // Surface a line both in stdout and, when running in Actions, the check's job
 // summary. Summary writes are best-effort — a summary hiccup must never mask a
@@ -123,7 +140,7 @@ for (const { order, gate, command } of gates) {
   }
   console.log(`\n=== gate ${order} ${gate}: ${command} ===`);
   try {
-    execSync(command, { stdio: "inherit" });
+    execSync(command, { stdio: "inherit", env: GATE_ENV });
   } catch (e) {
     const code = typeof e.status === "number" ? e.status : "unknown";
     const msg = `Gate "${gate}" FAILED (command: ${command}, exit ${code}).`;
