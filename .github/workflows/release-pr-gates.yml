@@ -1,17 +1,17 @@
 name: release-pr-gates
 
-# Backstops the one PR class pr-gates deliberately ignores: the release
-# version-bump PR. `pr-gates` only runs for `agent/issue-*` heads (it verifies
-# the agent's self-reported gate checklist), so a `release/vX.Y.Z` PR — opened
-# by scripts/release.mjs — merges with zero CI checks. A partial or malformed
-# bump (some version locations updated, others not) would land unverified;
-# PR #384 (v5.0.0) shipped with no checks at all.
+# Runs the one check pr-gates doesn't carry: version-consistency for the
+# release version-bump PR opened by scripts/release.mjs. `pr-gates` now runs
+# its GATES.md suite and size check on every PR (issue #479), but that suite
+# has no notion of "do the four version strings agree" — a partial or
+# malformed bump (some version locations updated, others not) would still
+# land unverified; PR #384 (v5.0.0) shipped with no checks at all.
 #
-# This workflow closes that gap without touching pr-gates: it runs the shared
-# version-consistency check on `release/*` PRs only, and fails the moment the
-# known version locations disagree — so a drifted bump is caught before merge.
-# It never fires on `agent/issue-*` PRs, so agent gates stay exactly as they
-# are today.
+# This workflow closes that gap without folding release-specific logic into
+# pr-gates: it runs the shared version-consistency check on `release/*` PRs
+# only, and fails the moment the known version locations disagree — so a
+# drifted bump is caught before merge. It never fires on other PRs, which is
+# fine — they carry no version bump for it to check.
 
 on:
   pull_request:
