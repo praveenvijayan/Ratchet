@@ -111,6 +111,7 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 | 4z21  | test: red-main-alert            | `node scripts/red-main-alert.test.mjs`            | exit 0 |
 | 4z22  | test: debt-scan                 | `node scripts/debt-scan.test.mjs`                 | exit 0 |
 | 4z23  | test: auto-merge                | `node scripts/auto-merge.test.mjs`                | exit 0 |
+| 4z24  | test: weekly-failure-review     | `node scripts/weekly-failure-review.test.mjs`     | exit 0 |
 | 4r    | test-coverage                   | `node scripts/gates-coverage.mjs`                 | exit 0 |
 | 4z    | skill-parity                    | `node scripts/skill-parity.mjs`                   | exit 0 |
 | 4z10  | skill-detail                    | `node scripts/skill-detail.mjs`                   | exit 0 |
@@ -183,6 +184,20 @@ a source marker defers to, e.g. `DEFERRED\(([\w-]+)\)`. Left as `none` (or
 omitted) the source scan does not run: the framework assumes no `TODO`/`FIXME`
 convention of its own. `retired_deferrals` lists PR numbers whose deferred scope
 a human decided will never be built.
+
+## Weekly failure-pattern review
+
+Read by `scripts/weekly-failure-review.mjs`, the scheduled job that groups the
+week's merged fix/rework PRs by failure class. These two selectors say what
+counts as a fix/rework PR here — a PR qualifies if its title matches
+`fix_pr_title_pattern` (case-insensitive) **or** it carries any label in
+`fix_pr_labels`. Omit this section entirely and the framework's own conventions
+apply (the values below). Emptying every selector, or writing a pattern that is
+not a valid regular expression, is a config error the job publishes as that
+week's report rather than silently collecting nothing.
+
+- fix_pr_labels: [hotfix]
+- fix_pr_title_pattern: ^(fix|revert|hotfix)(\(.+\))?!?:
 
 ## Framework paths (plan protocol applies)
 
