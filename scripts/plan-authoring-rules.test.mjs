@@ -242,4 +242,26 @@ const readme = readFileSync(
   );
 }
 
-console.log("PASS plan-authoring-rules.test.mjs (5 criteria + #467/#468/#469 README docs)");
+// --- #472 Criterion 4: plan/README.md documents the `risk` closed set and the
+// rule that schema, auth, secrets, billing, `infra/**`, and `.github/**` work
+// must declare `risk: high`. Asserted here for the same reason as #467/#468
+// above: plan-sync.test.mjs writes NNNN-*.md fixtures and the #191 guard forbids
+// it from also resolving the repo's plan/ directory.
+{
+  assert.match(readme, /## Review tier — `risk`/, "plan/README.md must document the risk key");
+  assert.match(
+    readme,
+    /closed set: `high` or `normal`/,
+    "plan/README.md must state that risk is a closed set of high and normal",
+  );
+  for (const area of [/\bschema\b/, /\bauth\b/, /\bsecrets\b/, /\bbilling\b/, /`infra\/\*\*`/, /`\.github\/\*\*`/]) {
+    assert.match(readme, area, `plan/README.md must name the mandatory-high area: ${area}`);
+  }
+  assert.match(
+    readme,
+    /must declare `risk: high`/,
+    "plan/README.md must state that work in those areas must declare risk: high",
+  );
+}
+
+console.log("PASS plan-authoring-rules.test.mjs (5 criteria + #467/#468/#469/#472 README docs)");
