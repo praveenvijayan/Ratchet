@@ -111,6 +111,15 @@
       "profile": "core"
     },
     {
+      "path": "scripts/framework-plan-check.mjs",
+      "class": "framework",
+      "profile": "core"
+    },
+    {
+      "path": "scripts/framework-plan-check.test.mjs",
+      "class": "excluded"
+    },
+    {
       "path": "scripts/unblock-dependents.mjs",
       "class": "framework",
       "profile": "core"

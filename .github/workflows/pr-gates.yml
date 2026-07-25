@@ -111,3 +111,42 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+
+  # Framework work goes through plans too (#473). Deliberately NOT limited to
+  # agent/issue-* branches: the lane this closes is exactly the hand-opened
+  # "version update" PR (#190) that never had an issue at all.
+  framework-plan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write   # owns one comment recording an override
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+      # Same base-config trust boundary as the gates and size jobs (issue #84):
+      # framework_paths must come from the base branch, or a framework PR could
+      # delete its own paths from the list and go green.
+      - name: Extract base-branch GATES.md
+        id: base_gates
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          dest="$RUNNER_TEMP/base-GATES.md"
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          if git cat-file -e "$BASE_SHA:GATES.md" 2>/dev/null; then
+            git show "$BASE_SHA:GATES.md" > "$dest"
+            echo "file=$dest" >> "$GITHUB_OUTPUT"
+            echo "Judging framework paths against base $BASE_SHA."
+          else
+            echo "::warning::Base branch has no GATES.md at $BASE_SHA; judging the PR's own copy."
+          fi
+      - name: Check framework changes trace to a plan
+        run: node scripts/framework-plan-check.mjs
+        env:
+          BASE_GATES_FILE: ${{ steps.base_gates.outputs.file }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
