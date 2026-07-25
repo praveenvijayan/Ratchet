@@ -25,7 +25,9 @@ const EDITABLE_STATES = new Set(["state:ready", "state:draft"]);
 const VALID_PRIORITIES = new Set(["high", "medium", "low"]);
 // The documented frontmatter surface (see plan/README.md). Anything else is a
 // typo or an unsupported field: warned about, never silently honoured.
-const KNOWN_KEYS = new Set(["title", "priority", "labels", "blocked_by","estimated_lines", APPROVAL_KEY]);
+const KNOWN_KEYS = new Set(["title", "priority", "labels", "blocked_by", "estimated_lines", "locks", APPROVAL_KEY]);
+// Priority order used wherever plans must be sorted deterministically.
+const PRIORITY_RANK = { high: 0, medium: 1, low: 2 };
 // The plan-time size budget. The PR size gate measures the same number after the
 // code exists, which only ever produces negotiation and overrides; refusing an
 // over-cap estimate here forces the split while splitting is still free.
@@ -105,14 +107,22 @@ function sizeBudgetReason(raw) {
   return null;
 }
 
-// Detect blocked_by cycles across live plan files and marker-resolved issues.
+// `locks` names the exclusive resources a plan will take (`migration`,
+// `route:/home`, `file:src/db/schema.ts`). Only a list is meaningful: a bare
+// scalar would silently lock the one token it happens to spell, or nothing at
+// all, so it is rejected rather than coerced.
+function locksReason(raw) {
+  if (Array.isArray(raw)) return null;
+  const value = String(raw).trim();
+  return `invalid locks '${value}' — must be a list of strings, e.g. locks: [migration, route:/home]`;
+}
+
+// Dependency edges as the sync sees them: slug -> the slugs it waits on.
 // Current plan files are authoritative for their outgoing edges; marker-only
-// issues use their rendered `Blocked by #N` lines so a cycle assembled across
-// syncs is still caught. Returns one ordered slug path per distinct cycle
-// (deduped by membership); a plan blocked on itself yields a single-slug cycle.
-// DFS with a recursion stack: a back edge to a slug still on the stack closes a
-// cycle.
-function findCycles(plans, bySlug = new Map()) {
+// issues contribute their rendered `Blocked by #N` lines so an edge assembled
+// across syncs is still visible. Shared by the cycle gate and the lock resolver
+// so both reason over exactly the same graph.
+function dependencyAdjacency(plans, bySlug = new Map()) {
   const numberToSlug = new Map();
   for (const [slug, issue] of bySlug) numberToSlug.set(issue.number, slug);
 
@@ -127,6 +137,89 @@ function findCycles(plans, bySlug = new Map()) {
       .filter((s) => s && (plans.has(s) || bySlug.has(s)));
     if (edges.length) adj.set(slug, edges);
   }
+  return adj;
+}
+
+// Does `from` already wait — directly or transitively — on `to`?
+function dependsOn(adj, from, to) {
+  const seen = new Set();
+  const stack = [from];
+  while (stack.length) {
+    const v = stack.pop();
+    for (const w of adj.get(v) || []) {
+      if (w === to) return true;
+      if (!seen.has(w)) { seen.add(w); stack.push(w); }
+    }
+  }
+  return false;
+}
+
+// Serialize plans that claim the same exclusive resource. Two plans holding the
+// same lock token must never be pickable at once, so the later one waits on the
+// earlier one through the ordinary `Blocked by #N` machinery — the same edge
+// `unblock-dependents` clears when the holder closes, with no manual edit.
+// Order within a token is deterministic (priority, then slug), and claimants
+// are chained rather than all hung off the winner, so closing the head releases
+// exactly one successor instead of the whole contending set. Tokens compare as
+// exact strings: a lock is a name two authors agreed on, and guessing that
+// `route:/Home` means `route:/home` would silently block unrelated work.
+// Returns slug -> [{ token, holder, number }] for every plan that must wait.
+function resolveLockConflicts(plans, bySlug, slugToNumber, adj) {
+  const claimants = new Map();  // token -> [slug], insertion order irrelevant
+  for (const [slug, { fm }] of plans) {
+    const issue = bySlug.get(slug);
+    // A closed issue's plan is finished work: it holds nothing.
+    if (!issue || issueState(issue) === "closed") continue;
+    for (const token of new Set(fm.locks || [])) {
+      if (!claimants.has(token)) claimants.set(token, []);
+      claimants.get(token).push(slug);
+    }
+  }
+
+  const waiting = new Map();
+  const byRankThenSlug = (a, b) =>
+    PRIORITY_RANK[plans.get(a).fm.priority] - PRIORITY_RANK[plans.get(b).fm.priority] ||
+    (a < b ? -1 : a > b ? 1 : 0);
+
+  for (const token of [...claimants.keys()].sort()) {
+    const contenders = claimants.get(token);
+    if (contenders.length < 2) continue;
+    const ordered = [...contenders].sort(byRankThenSlug);
+    // Every conflicting pair is logged, not just the chained ones: the author
+    // needs to see the whole contending set to judge whether the lock is right.
+    for (let i = 0; i < ordered.length; i++) {
+      for (let j = i + 1; j < ordered.length; j++) {
+        console.log(`LOCK CONFLICT '${token}': ${ordered[i]} and ${ordered[j]} both claim it`);
+      }
+    }
+    for (let i = 1; i < ordered.length; i++) {
+      const holder = ordered[i - 1];
+      const waiter = ordered[i];
+      // An existing dependency path already serializes the pair. Adding the
+      // lock edge anyway would close a cycle — a deadlock the sync would then
+      // refuse to run at all — so the existing edge is left to do the work.
+      if (dependsOn(adj, holder, waiter) || dependsOn(adj, waiter, holder)) {
+        console.log(`LOCK '${token}': ${waiter} and ${holder} are already serialized by blocked_by — no lock edge added`);
+        continue;
+      }
+      adj.set(waiter, [...(adj.get(waiter) || []), holder]);
+      if (!waiting.has(waiter)) waiting.set(waiter, []);
+      waiting.get(waiter).push({ token, holder, number: slugToNumber.get(holder) });
+      console.log(`LOCK '${token}': ${waiter} serialized behind ${holder} (#${slugToNumber.get(holder)})`);
+    }
+  }
+  return waiting;
+}
+
+// Detect blocked_by cycles across live plan files and marker-resolved issues.
+// Current plan files are authoritative for their outgoing edges; marker-only
+// issues use their rendered `Blocked by #N` lines so a cycle assembled across
+// syncs is still caught. Returns one ordered slug path per distinct cycle
+// (deduped by membership); a plan blocked on itself yields a single-slug cycle.
+// DFS with a recursion stack: a back edge to a slug still on the stack closes a
+// cycle.
+function findCycles(plans, bySlug = new Map()) {
+  const adj = dependencyAdjacency(plans, bySlug);
   const cycles = [];
   const seen = new Set();   // membership keys already reported
   const color = new Map();  // slug -> 1 (on stack) | 2 (done); absent = unseen
@@ -167,6 +260,7 @@ async function main() {
   const plans = new Map();
   const invalidPlans = [];
   const oversizePlans = [];
+  const badLockPlans = [];
   for (const file of files) {
     const slug = file.replace(/\.md$/, "");
     const parsed = parsePlan(await readFile(join(PLAN_DIR, file), "utf8"));
@@ -189,6 +283,15 @@ async function main() {
       const reason = sizeBudgetReason(parsed.fm.estimated_lines);
       if (reason) {
         oversizePlans.push(`${file} (${reason})`);
+        continue;
+      }
+    }
+    // A lock the compiler cannot read is worse than no lock: the plan would
+    // sync as ready and collide with the work it meant to exclude.
+    if (parsed.fm.locks !== undefined) {
+      const reason = locksReason(parsed.fm.locks);
+      if (reason) {
+        badLockPlans.push(`${file} (${reason})`);
         continue;
       }
     }
@@ -222,6 +325,16 @@ async function main() {
     console.error(`(generated files excluded). Split the plan into smaller plan files — one`);
     console.error(`issue each — before writing any code, then re-sync:`);
     for (const reason of oversizePlans) console.error(`  • ${reason}`);
+    process.exit(1);
+  }
+
+  // Lock gate — same shape as the size gate, and for the same reason: it runs
+  // before any network call, so an unreadable lock changes nothing on GitHub.
+  if (badLockPlans.length) {
+    console.error("ERROR: unreadable 'locks' frontmatter in one or more files. Nothing was changed.");
+    console.error("Declare locks as a list of exact tokens — for example");
+    console.error("`locks: [migration, route:/home, file:src/db/schema.ts]` — then re-sync:");
+    for (const reason of badLockPlans) console.error(`  • ${reason}`);
     process.exit(1);
   }
 
@@ -314,6 +427,11 @@ async function main() {
     if (!seen.some((c) => (c.body || "").includes(marker))) await gh("POST", `/repos/${REPO}/issues/${number}/comments`, { body: issueAuditComment(flag, opts) });
   };
 
+  // Exclusive resources: decided after pass 2a (so every holder already has an
+  // issue number) and before any body is rendered, so a serialized plan is
+  // written out blocked on its first sync rather than a run later.
+  const lockWaits = resolveLockConflicts(plans, bySlug, slugToNumber, dependencyAdjacency(plans, bySlug));
+
   // Pass 2b: build bodies (with resolved Blocked by #N), then patch.
   const drafted = [];   // slugs that landed as state:draft (no acceptance criteria)
   const flagged = [];   // slugs held at state:draft because their work already exists
@@ -323,13 +441,22 @@ async function main() {
       console.log(`WARNING: unresolved blocker '${s}' in ${slug} — no plan file or issue has that slug; link dropped`);
     }
     const blockerNums = (fm.blocked_by || []).map((s) => slugToNumber.get(s)).filter(Boolean);
-    const blockedText = blockerNums.length ? `\n\n${blockerNums.map((n) => `Blocked by #${n}`).join("\n")}` : "";
+    // A contested lock renders as an ordinary `Blocked by #N` line — that is
+    // what makes `unblock-dependents` release it when the holder closes — with
+    // the reason and the conflicting slug spelled out for the human reading it.
+    const lockWaitsHere = (lockWaits.get(slug) || []).filter((w) => w.number && !blockerNums.includes(w.number));
+    const blockLines = [
+      ...blockerNums.map((n) => `Blocked by #${n}`),
+      ...lockWaitsHere.map((w) => `Blocked by #${w.number} (lock \`${w.token}\` is also claimed by ${w.holder})`),
+    ];
+    const blockedText = blockLines.length ? `\n\n${blockLines.join("\n")}` : "";
     const fullBody = `${body}${blockedText}\n\n${markerOf(slug)}`;
     // Blocked means blocked *now*: a closed blocker no longer blocks. Deriving
     // state from the plan file alone would re-block issues unblock-dependents
     // already flipped to ready. (A blocker missing from byNumber was created
     // in pass 2a, so it is open by definition.)
-    const openBlockers = blockerNums.filter((n) => byNumber.get(n)?.state !== "closed");
+    const openBlockers = [...blockerNums, ...lockWaitsHere.map((w) => w.number)]
+      .filter((n) => byNumber.get(n)?.state !== "closed");
     // A plan whose work already exists is not ready work, however complete its
     // criteria: held at draft until a human writes the approval into the plan
     // file. An approved plan syncs exactly as it always did.
