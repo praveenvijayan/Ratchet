@@ -123,10 +123,10 @@ lists every suite it ran (coverage at a glance). The `test-coverage` gate
 (`scripts/gates-coverage.mjs`) fails if a suite exists that no row above runs,
 so a new suite can never be added without wiring it in here.
 
-## PR size limit (agent PRs)
+## PR size limit
 
 Enforced server-side by the `pr-gates` workflow (`scripts/pr-size-check.mjs`) on
-every `agent/issue-*` PR — a PR over either threshold fails the check and the
+every PR into main — a PR over either threshold fails the check and the
 red message repeats the split-and-requeue protocol from AGENTS.md step 3. Tune
 the numbers here; they default to the manual's ~400 changed lines / ~6 files.
 

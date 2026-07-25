@@ -1,11 +1,17 @@
 name: pr-gates
 
-# Runs the GATES.md gates server-side on every agent PR, so the human
+# Runs the GATES.md gates server-side on every PR into main, so the human
 # reviewer's trust anchor is a machine-verified check — not just the agent's
 # self-reported gate checklist in the PR body. Both this workflow and the
 # local verify step (AGENTS.md step 4) invoke scripts/run-gates.mjs, which
 # parses the commands out of GATES.md, so CI and the developer machine can
 # never run a different set of gates.
+#
+# No branch-name or path carve-out (issue #479): a framework PR touching only
+# scripts/** or .github/workflows/** on a hand-pushed branch gets the exact
+# same gates and size check as an agent/issue-* PR. The 16-day CI outage that
+# preceded this treated a red check as advisory because side-branch merges
+# skipped it; the fix is that nothing skips it.
 
 on:
   pull_request:
@@ -17,9 +23,6 @@ permissions:
 
 jobs:
   gates:
-    # Only PRs coming from an agent/issue-* branch carry the self-reported
-    # checklist this backstops; skip everything else.
-    if: startsWith(github.head_ref, 'agent/issue-')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -51,12 +54,11 @@ jobs:
         env:
           BASE_GATES_FILE: ${{ steps.base_gates.outputs.file }}
 
-  # Enforce the AGENTS.md step 3 scope cap mechanically: an oversized agent PR
+  # Enforce the AGENTS.md step 3 scope cap mechanically: an oversized PR
   # is the biggest drain on review, the loop's bottleneck. Thresholds live in
   # GATES.md; the PR's size comes from the event payload. A separate job so the
   # red check reads "size" distinctly from the gate failures.
   size:
-    if: startsWith(github.head_ref, 'agent/issue-')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -81,7 +83,7 @@ jobs:
           else
             echo "::warning::Base branch has no GATES.md at $BASE_SHA; judging by the PR's own copy."
           fi
-      - name: Check agent PR size
+      - name: Check PR size
         run: node scripts/pr-size-check.mjs
         env:
           BASE_GATES_FILE: ${{ steps.base_gates.outputs.file }}
