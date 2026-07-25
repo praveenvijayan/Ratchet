@@ -258,6 +258,18 @@ locks: [route:/Home]
 - [ ] never conflicts with a token that only differs by case
 `);
 
+// --- #472 fixture: a plan declaring the high review tier. 0096-with-estimate
+// (no `risk` key) is the normal-tier half of the same criterion.
+await writeFile(join(planDir, "0116-risk-high.md"), `---
+title: Rewrites the session schema
+priority: medium
+blocked_by: []
+risk: high
+---
+## Acceptance criteria
+- [ ] the issue carries the declared risk tier
+`);
+
 // --- in-memory GitHub API ----------------------------------------------
 const label = (name) => ({ name });
 const issues = new Map([
@@ -911,5 +923,43 @@ assert.ok(/nothing was changed/i.test(badLocks.out), `the malformed-locks error 
 
 // Criterion 6 (plan/README.md documents the key) is asserted in
 // plan-authoring-rules.test.mjs, for the same reason as #467 criterion 5 above.
+
+// --- #472: the plan-declared risk tier -----------------------------------
+
+// Criterion 1: `risk` is part of the documented frontmatter surface, so a plan
+// declaring it compiles without an unknown-frontmatter-key warning; a value
+// outside the closed set aborts the sync non-zero, naming file and value.
+const riskHigh = bySlugName("0116-risk-high");
+assert.ok(riskHigh, "0116-risk-high issue was created");
+assert.ok(
+  !logs.some((l) => l.includes("unknown frontmatter key") && l.includes("risk")),
+  "a declared risk key must not be reported as an unknown frontmatter key",
+);
+const badRisk = await runSyncOn("plan-sync-badrisk-", "0117-bad-risk.md", `---
+title: Declares a tier outside the closed set
+priority: medium
+blocked_by: []
+risk: critical
+---
+Body of 0117.
+
+## Acceptance criteria
+- [ ] never created
+`);
+assert.ok(badRisk.exit !== 0, "an invalid risk must exit non-zero");
+assert.ok(
+  badRisk.out.includes("0117-bad-risk") && badRisk.out.includes("critical"),
+  `the invalid-risk error must name the file and the invalid value, got: ${badRisk.out}`,
+);
+assert.ok(/nothing was changed/i.test(badRisk.out), `the invalid-risk error must state that nothing was changed, got: ${badRisk.out}`);
+
+// Criterion 2: the issue compiled from a `risk: high` plan carries the
+// `risk:high` label; a plan that omits the key defaults to normal and carries
+// no risk label at all.
+assert.ok(names(riskHigh).includes("risk:high"), `a risk: high plan's issue must carry risk:high, got: ${names(riskHigh)}`);
+assert.ok(
+  !names(withEstimate).some((n) => n.startsWith("risk:")),
+  `a plan with no risk key must carry no risk label, got: ${names(withEstimate)}`,
+);
 
 console.log("PASS plan-sync.test.mjs");

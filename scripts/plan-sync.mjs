@@ -23,9 +23,13 @@ const gh = ghClient(token);
 const PLAN_DIR = process.env.PLAN_DIR || "plan";
 const EDITABLE_STATES = new Set(["state:ready", "state:draft"]);
 const VALID_PRIORITIES = new Set(["high", "medium", "low"]);
+// `risk` is the plan-time review tier, a closed set. Absent means normal, so
+// only `high` earns a label — the tier travels issue -> PR from there.
+const VALID_RISKS = new Set(["high", "normal"]);
+const RISK_HIGH = "risk:high";
 // The documented frontmatter surface (see plan/README.md). Anything else is a
 // typo or an unsupported field: warned about, never silently honoured.
-const KNOWN_KEYS = new Set(["title", "priority", "labels", "blocked_by", "estimated_lines", "locks", APPROVAL_KEY]);
+const KNOWN_KEYS = new Set(["title", "priority", "labels", "blocked_by", "estimated_lines", "locks", "risk", APPROVAL_KEY]);
 // Priority order used wherever plans must be sorted deterministically.
 const PRIORITY_RANK = { high: 0, medium: 1, low: 2 };
 // The plan-time size budget. The PR size gate measures the same number after the
@@ -274,6 +278,13 @@ async function main() {
       invalidPlans.push(`${file} (invalid priority '${parsed.fm.priority}', must be high, medium, or low)`);
       continue;
     }
+    // A risk value outside the closed set is a hard skip for the same reason: an
+    // unreadable tier would sync as normal and route a schema/auth/secrets change
+    // into the cheap review lane. Absent is fine — that *is* normal.
+    if (parsed.fm.risk !== undefined && !VALID_RISKS.has(parsed.fm.risk)) {
+      invalidPlans.push(`${file} (invalid risk '${parsed.fm.risk}', must be high or normal)`);
+      continue;
+    }
     // The size budget is a hard gate for the same reason the PR size cap is:
     // an over-cap plan has to become several plans, and that decision is only
     // cheap before any code exists. Absence is grandfathered with a warning.
@@ -465,7 +476,10 @@ async function main() {
     const isRetro = matches.length > 0 && !approval;
     const ready = hasCriteria && !isRetro;
     const state = openBlockers.length ? "state:blocked" : (ready ? "state:ready" : "state:draft");
-    const labels = [state, `priority:${fm.priority}`, ...usableLabels(`${slug}.md`, fm.labels || [])];
+    // The risk tier rides on the issue as a label so every downstream consumer
+    // (review tiering, the PR handoff) reads one place instead of re-deriving it.
+    const riskLabels = fm.risk === "high" ? [RISK_HIGH] : [];
+    const labels = [state, `priority:${fm.priority}`, ...riskLabels, ...usableLabels(`${slug}.md`, fm.labels || [])];
     if (state === "state:draft" && hasCriteria === false) drafted.push(slug);
     if (isRetro) flagged.push(slug);
 

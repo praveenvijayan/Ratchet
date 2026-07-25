@@ -21,6 +21,7 @@ labels: [area]              # optional extra labels
 blocked_by: []              # other slugs like [0002-user-model], or []  (required)
 estimated_lines: 120        # hand-written changed lines you expect (max 400)
 locks: []                   # exclusive resources this plan takes  (optional)
+risk: normal                # high | normal  (optional, defaults to normal)
 ---
 
 One or two sentences: what this is and why it exists.
@@ -216,6 +217,37 @@ non-zero, naming the file and changing nothing on GitHub: a lock the compiler
 cannot read would let the plan sync as ready and collide with the very work it
 meant to exclude.
 
+## Review tier — `risk`
+
+Risk is cheapest to classify **now**, at plan time, and most expensive to
+discover at merge. `risk` declares it once and the tier is inherited the whole
+way down: `plan-sync` labels the issue `risk:high`, and the PR handoff
+(`ratchet-submit.mjs`) copies that label onto the PR, so downstream review
+tiering reads one label instead of re-deriving the risk from a diff.
+
+```yaml
+risk: high
+```
+
+`risk` is a **closed set: `high` or `normal`.** The key is optional and absent
+means `normal`. Only `high` produces a label — a normal-risk plan carries no
+risk label at all. Any other value aborts the sync non-zero before it touches
+GitHub, naming the file and the invalid value, exactly like a bad `priority`:
+an unreadable tier would sync as normal and route a dangerous change into the
+cheap review lane.
+
+**Work in any of these areas must declare `risk: high`** — the closed set:
+
+- **schema** — migrations, or any change to a persisted data shape
+- **auth** — authentication, authorization, sessions, permissions
+- **secrets** — credentials, tokens, keys, or how they are stored or read
+- **billing** — payments, pricing, invoicing, quota that costs money
+- **`infra/**`** — infrastructure and deployment definitions
+- **`.github/**`** — workflows and repository automation
+
+If a plan touches one of those and does not say `risk: high`, the plan is
+wrong — fix the plan file, not the review.
+
 ## File naming
 
 `NNNN-short-slug.md` — e.g. `0001-email-login.md`. The stem (`0001-email-login`)
@@ -250,6 +282,7 @@ labels: [auth, backend]     # optional extra labels
 blocked_by: [0002-user-model]   # other slugs, or []  (required, may be empty)
 estimated_lines: 120        # hand-written changed lines you expect (max 400)
 locks: [route:/login]       # exclusive resources this plan takes  (optional)
+risk: high                  # high | normal  (optional, defaults to normal)
 ---
 
 One or two sentences: what this is and why it exists.
@@ -273,9 +306,14 @@ One or two sentences: what this is and why it exists.
   not a non-negative whole number, aborts the sync before it touches GitHub:
   the offending file and value are logged with the instruction to split the
   plan. A file that omits the key syncs as before with a warning naming it.
+- **`risk` is a closed set: `high` or `normal`.** Absent means normal. A
+  `risk: high` plan's issue carries the `risk:high` label and its PR inherits it;
+  any other value aborts the sync non-zero, naming the file and the value. Work
+  touching schema, auth, secrets, billing, `infra/**`, or `.github/**` must
+  declare `risk: high`. See "Review tier" above.
 - **Unknown frontmatter keys are ignored with a warning.** `title`, `priority`,
-  `labels`, `blocked_by`, `estimated_lines`, `locks`, and `retroactive_ok` are
-  the only keys the compiler understands. Any other key is logged as
+  `labels`, `blocked_by`, `estimated_lines`, `locks`, `risk`, and
+  `retroactive_ok` are the only keys the compiler understands. Any other key is logged as
   `WARNING: <file> has unknown frontmatter key '<key>'` and ignored; the file
   still compiles.
 - **`locks` serializes plans that claim the same resource.** Two plans with open

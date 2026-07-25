@@ -3,8 +3,9 @@
 // Bundles the preflight most often fumbled from prose: current origin/main is
 // integrated, the gates pass fail-fast, conflicted or red work is refused
 // before it can waste a review, the branch is pushed, the single PR is kept (or
-// created), and labels flip to state:in-review. The PR summary itself stays
-// model-authored — the caller supplies it via --body-file.
+// created), labels flip to state:in-review, and a `risk:high` issue passes that
+// tier on to its PR. The PR summary itself stays model-authored — the caller
+// supplies it via --body-file.
 //
 // GitHub access goes through the shared gh-api.mjs client (resolveAuth/ghClient)
 // — no private fetch client, no token resolution here. git and the gate runner
@@ -24,6 +25,10 @@ import { ghClient, resolveAuth } from "./gh-api.mjs";
 const usageErr = (msg) => Object.assign(new Error(msg), { usage: true });
 const labelNames = (labels) => (labels || []).map((l) => (typeof l === "string" ? l : l.name));
 const USAGE = "usage: ratchet-submit.mjs --issue <N> --body-file <path>";
+// The plan-time review tier (plan/README.md). Declared on the plan, labelled on
+// the issue by plan-sync, and carried onto the PR here so review tiering can
+// read it off the PR alone.
+const RISK_HIGH = "risk:high";
 
 // Parse `--issue <N> --body-file <path>`, both `--k v` and `--k=v`. Throws a
 // usage Error (exit 2) on any missing, malformed, or unknown argument.
@@ -128,19 +133,35 @@ export async function run({
     // Keep the single PR: create only when none is open for this head branch.
     const existing = await gh("GET", `/repos/${repo}/pulls?head=${owner}:${branch}&state=open`);
     let created = false;
-    if (!existing.length) {
+    let pr = existing[0];
+    if (!pr) {
       const info = await gh("GET", `/repos/${repo}/issues/${issue}`);
-      await gh("POST", `/repos/${repo}/pulls`, { title: info.title, head: branch, base: "main", body });
+      pr = await gh("POST", `/repos/${repo}/pulls`, { title: info.title, head: branch, base: "main", body });
       created = true;
     }
 
     // Flip to state:in-review — strip every state:* label, add in-review.
     const info = await gh("GET", `/repos/${repo}/issues/${issue}`);
-    const kept = labelNames(info.labels).filter((l) => !l.startsWith("state:"));
+    const issueLabels = labelNames(info.labels);
+    const kept = issueLabels.filter((l) => !l.startsWith("state:"));
     kept.push("state:in-review");
     await gh("PUT", `/repos/${repo}/issues/${issue}/labels`, { labels: kept });
 
-    return emit({ result: created ? "submitted" : "already-submitted", state: "state:in-review" }, 0);
+    // Inherit the risk tier onto the PR. Additive and idempotent — POST adds one
+    // label without touching whatever else is on the PR. A failure here must not
+    // undo a finished handoff (the PR exists, the issue is in review), so it
+    // degrades to a warning on the success line rather than a non-zero exit.
+    let warning;
+    if (issueLabels.includes(RISK_HIGH) && !labelNames(pr.labels).includes(RISK_HIGH)) {
+      try {
+        await gh("POST", `/repos/${repo}/issues/${pr.number}/labels`, { labels: [RISK_HIGH] });
+      } catch (e) {
+        warning = `could not add ${RISK_HIGH} to PR #${pr.number} (${String(e.message).split("\n")[0]}) — add it by hand`;
+        err(`WARNING: ${warning}`);
+      }
+    }
+
+    return emit({ result: created ? "submitted" : "already-submitted", state: "state:in-review", ...(warning ? { warning } : {}) }, 0);
   } catch (e) {
     return emit({ result: "error", error: String(e.message).split("\n")[0] }, 1);
   }
