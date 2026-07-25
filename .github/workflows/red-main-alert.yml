@@ -1,0 +1,34 @@
+name: red-main-alert
+
+# A scheduled pass that alerts a human when a workflow on `main` goes red — the
+# missing signal behind both multi-week outages. It keeps exactly one open alert
+# per red workflow: an issue labelled `red-main` (the default channel, which
+# needs no external service and doubles as the ledger behind alert-on-transition
+# and auto-resolve), plus an optional `RED_MAIN_ALERT_WEBHOOK` delivery whose
+# failure is recorded on that issue rather than dropped. Logic lives in
+# scripts/red-main-alert.mjs; this workflow is only its trigger and env. The
+# polling interval is the alert latency: 15 minutes.
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read   # actions/checkout — a non-empty block drops this by default
+  actions: read    # list workflow runs and their jobs on main
+  issues: write    # open, update and close the alert issues
+
+jobs:
+  alert-red-main:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+      - run: node scripts/red-main-alert.mjs
+        env:
+          GITHUB_TOKEN: ${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          RED_MAIN_ALERT_WEBHOOK: ${{ secrets.RED_MAIN_ALERT_WEBHOOK }}
