@@ -16,6 +16,14 @@ import { pickNext, buildDispatch, spawnWorker, waitForClaim, dispatchOne, superv
 import { createBreaker } from "./herd-adapters.mjs";
 import { readState, createSupervisorPump } from "./herd-survey.mjs";
 
+
+// The adapter's launch binary must actually exist on PATH for the route to
+// resolve: herd-adapters.mjs probes it with accessSync(X_OK). Naming the real
+// `claude` CLI made these fixtures pass only on machines that happen to have
+// Claude Code installed — every developer's, never a CI runner's. process.execPath
+// is always present, and it is never really spawned (spawn is stubbed throughout).
+const ADAPTER_BIN = process.execPath;
+
 const NOW = Date.UTC(2026, 6, 9, 12, 0, 0); // fixed clock — no Date.now dependence
 
 const mkConfig = (over = {}) => ({
@@ -23,7 +31,7 @@ const mkConfig = (over = {}) => ({
   pollSeconds: 60,
   reworkCap: 2,
   logDir: "logs",
-  adapters: { claude: { launch: ["claude", "-p", "{prompt}"], promptTemplate: "issue {issue}", env: {} } },
+  adapters: { claude: { launch: [ADAPTER_BIN, "-p", "{prompt}"], promptTemplate: "issue {issue}", env: {} } },
   routing: { default: "claude", labels: {} },
   ...over,
 });
@@ -62,7 +70,7 @@ async function until(pred, attempts = 80, ms = 25) {
   assert.equal(pickNext([]), null, "no ready issues -> null");
   const plan = buildDispatch(mkConfig(), { number: 2, labels: [] }, { onPath: () => true });
   assert.equal(plan.adapter, "claude", "adapter resolved via config routing");
-  assert.deepEqual(plan.argv, ["claude", "-p", "issue 2"], "prompt and issue substituted into argv");
+  assert.deepEqual(plan.argv, [ADAPTER_BIN, "-p", "issue 2"], "prompt and issue substituted into argv");
 }
 
 // Criterion 2: workers spawn detached with stdout+stderr redirected to
@@ -254,7 +262,7 @@ await inTempDir(async () => {
     spawn: noSpawn, isAlive: () => true, gh: async () => ({ labels: [] }), now: () => NOW, sleep: async () => {}, log: (m) => logs.push(m), dryRun: true,
   });
   assert.equal(r.dryRun, true, "dry-run does not dispatch");
-  assert.deepEqual(r.plan, { issue: 6, adapter: "claude", command: ["claude", "-p", "issue 6"] }, "returns the plan");
+  assert.deepEqual(r.plan, { issue: 6, adapter: "claude", command: [ADAPTER_BIN, "-p", "issue 6"] }, "returns the plan");
   assert.ok(logs.some((m) => /issue #6/.test(m) && /claude/.test(m)), "prints the plan (issue, adapter, command)");
   assert.ok(!existsSync("s.json"), "no worker spawned and no state written");
 });
@@ -303,7 +311,7 @@ await inTempDir(async () => {
   assert.equal(entry.pid, null, "its pid is cleared");
   const esc = readFileSync("esc.md", "utf8");
   assert.match(esc, /adapter "claude"/, "the escalation names the adapter");
-  assert.match(esc, /claude -p issue 8/, "the escalation names the command");
+  assert.ok(esc.includes(`${ADAPTER_BIN} -p issue 8`), "the escalation names the command");
   assert.match(esc, /issue-8\.log/, "the escalation names the log file");
 });
 
@@ -387,7 +395,7 @@ await inTempDir(async () => {
 await inTempDir(async () => {
   const config = mkConfig({
     adapters: {
-      claude: { launch: ["claude", "-p", "{prompt}"], promptTemplate: "issue {issue}", env: {}, requiresEnv: [] },
+      claude: { launch: [ADAPTER_BIN, "-p", "{prompt}"], promptTemplate: "issue {issue}", env: {}, requiresEnv: [] },
       pi: { launch: ["pi", "{prompt}"], promptTemplate: "issue {issue}", env: {}, requiresEnv: ["PI_KEY"] },
     },
     routing: { default: ["claude", "pi"], labels: {} },

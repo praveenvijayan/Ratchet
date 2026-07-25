@@ -24,6 +24,14 @@ import { run as submit } from "./ratchet-submit.mjs";
 import { verifyOnce, hasClosesRef, hasGatesSection } from "./herd-verify.mjs";
 import { readState } from "./herd-survey.mjs";
 
+
+// The adapter's launch binary must actually exist on PATH for the route to
+// resolve: herd-adapters.mjs probes it with accessSync(X_OK). Naming the real
+// `claude` CLI made these fixtures pass only on machines that happen to have
+// Claude Code installed — every developer's, never a CI runner's. process.execPath
+// is always present, and it is never really spawned (spawn is stubbed throughout).
+const ADAPTER_BIN = process.execPath;
+
 const NOW = Date.UTC(2026, 6, 13, 12, 0, 0);
 const ISSUE = 425;
 const PINNED_DISPATCH_RULES = readFileSync(
@@ -96,7 +104,7 @@ async function runSubmit(body = CONTRACT_BODY) {
 const entry = (over = {}) => ({ adapter: "claude", pid: null, logFile: "logs/issue.log", attempts: 1, status: "awaiting-verification", pr: 100, ...over });
 const mkConfig = () => ({
   maxWorkers: 3, pollSeconds: 60, reworkCap: 2, logDir: "logs",
-  adapters: { claude: { launch: ["claude", "{prompt}"], promptTemplate: "issue {issue}", env: {} } },
+  adapters: { claude: { launch: [ADAPTER_BIN, "{prompt}"], promptTemplate: "issue {issue}", env: {} } },
   routing: { default: "claude", labels: {} },
 });
 const mkGh = (view, calls) => async (args) => {
@@ -235,7 +243,18 @@ async function verifyBody(body) {
 // --- Issue #430 Criterion 3: a rendered worker prompt contains the dispatched
 // issue number and the canonical skill path ----------------------------------
 {
-  const plan = buildDispatch(defaultConfig(), { number: 430, labels: [] });
+  // defaultConfig() names the real agent CLIs, and buildDispatch resolves no
+  // route when none is installed — true on any CI runner. The prompt template
+  // is what this criterion tests, so keep the shipped config and swap only the
+  // launch binary for one that is always present.
+  const shipped = defaultConfig();
+  const available = {
+    ...shipped,
+    adapters: Object.fromEntries(
+      Object.entries(shipped.adapters).map(([name, a]) => [name, { ...a, launch: [ADAPTER_BIN, ...a.launch.slice(1)] }]),
+    ),
+  };
+  const plan = buildDispatch(available, { number: 430, labels: [] });
   const rendered = plan.argv.at(-1);
   assert.match(rendered, /Issue 430 is your entire assignment/);
   assert.match(rendered, /\.agents\/skills\/ratchet-herd\/SKILL\.md/);
