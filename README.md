@@ -191,7 +191,10 @@ With pure human merges the fallback works; the PAT makes it bulletproof.
      integrates `main`, runs the gates, and opens a single PR with `Closes #N`.
 
    Then it stops. (See DOCS.md §13 for every argument and exit code.)
-5. A **human reviews and merges**. GitHub closes the issue.
+5. The PR is **reviewed, then merged on a tier**: a normal-risk PR is merged by
+   the `auto-merge` workflow once its checks are green and its recorded review
+   verdict is `APPROVED` — no human in the path; a `risk:high` PR also waits for
+   a human approval and a 15-minute hold. GitHub closes the issue.
 6. `unblock-dependents` flips newly-unblocked issues to `state:ready`;
    `sweep-stale-claims` returns abandoned work to the queue.
 7. Repeat until the backlog is empty. New findings → new `plan/*.md`.
@@ -251,10 +254,11 @@ gh secret set ANTHROPIC_API_KEY        # the agent runtime in CI (or swap to Cod
 gh workflow run ratchet-run            # kick off the first task after planning
 ```
 
-Then every human merge triggers `ratchet-run`: it checks out the latest `main`
+Then every merge — the `auto-merge` workflow's on a normal-risk PR, yours on a
+`risk:high` one — triggers `ratchet-run`: it checks out the latest `main`
 (fresh, so the next branch is never stale), picks the top ready issue, and an
-agent works it to a PR and stops. You merge; it advances. The backlog drains one
-merge at a time, and the merge is the only thing you do.
+agent works it to a PR and stops. The backlog drains one merge at a time, and on
+normal-risk work you are not in that loop at all.
 
 It is **safe by default**: without `RATCHET_AUTO=true` the workflow exists but
 no-ops, so nothing runs or fails unexpectedly. The agent step uses Claude Code;

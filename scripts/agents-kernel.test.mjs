@@ -174,4 +174,85 @@ const INVARIANT_IDS = [
   }
 }
 
-console.log("PASS agents-kernel.test.mjs (8 criteria)");
+// --- Issue #501: the kernel and the human-facing docs state the tiered merge
+// shipped by plan 0201. "A human merges" is no longer the whole truth, so the
+// always-loaded kernel must not teach it. Each block below is named after the
+// acceptance criterion it covers.
+
+// Slice a markdown section: from its heading to the next heading of the same or
+// a shallower level. Whitespace-normalised so a wrapped phrase still matches.
+const section = (doc, heading, stopRe) => {
+  const start = doc.indexOf(heading);
+  assert.ok(start >= 0, `document must contain the section heading: ${heading}`);
+  const rest = doc.slice(start + heading.length);
+  const end = rest.search(stopRe);
+  return (heading + (end === -1 ? rest : rest.slice(0, end))).replace(/\s+/g, " ");
+};
+
+// --- Test: "the kernel states the tiered merge"
+{
+  const loop = section(agents, "## The loop", /\n## /);
+  assert.doesNotMatch(loop, /human merge/i, "the kernel's loop line must not state an unconditional human merge");
+  assert.match(loop, /tiered merge/i, "the kernel's loop line must name the tiered merge");
+
+  const step7 = section(agents, "### 7. System closes the loop", /\n#{2,3} /);
+  assert.match(step7, /tiered/i, "step 7 must say the merge is tiered");
+  assert.match(step7, /`auto-merge`/, "step 7 must name the auto-merge workflow as the merger");
+  assert.match(step7, /green/i, "step 7 must state the green-checks condition");
+  assert.match(step7, /`APPROVED`/, "step 7 must state the approving recorded verdict condition");
+  assert.match(step7, /no human in the path/i, "step 7 must say a normal-risk PR merges with no human in the path");
+  assert.match(step7, /`risk:high`[^.]*human/i, "step 7 must say a risk:high PR waits for a human");
+}
+
+// --- Test: "Hard Rule 6 keeps the agent ban and names the system merge"
+{
+  const rule6 = section(agents, "6. <!-- ratchet:invariant:never-merge -->", /\n\d+\. <!-- ratchet:invariant:/);
+  // The ban on the agent is unchanged.
+  assert.match(rule6, /never merge, approve, close, or touch `main`/i, "Hard Rule 6 must still forbid the agent merging, approving, closing, or touching main");
+  assert.match(rule6, /terminal action/i, "Hard Rule 6 must still make the PR the agent's terminal action");
+  // And it now distinguishes the system's merge from the agent's.
+  assert.match(rule6, /`auto-merge`/, "Hard Rule 6 must name the auto-merge workflow as the system merger");
+  assert.match(rule6, /normal/i, "Hard Rule 6 must tell the agent an auto-merged PR is normal");
+  assert.match(rule6, /not an anomaly/i, "Hard Rule 6 must tell the agent not to treat an auto-merged PR as an anomaly");
+}
+
+// --- Test: "the plan format documents the risk tier's merge consequence"
+{
+  const planReadme = readFileSync(resolve("plan/README.md"), "utf8");
+  const tier = section(planReadme, "## Review tier — `risk`", /\n## /);
+  // The inheritance chain the file already documented is still there…
+  assert.match(tier, /plan-sync/, "the review-tier section must still document the label inheritance");
+  // …and it no longer stops there: the merge-time cost of the tier is stated.
+  assert.match(tier, /`auto-merge`/, "the review-tier section must name what merges a normal-risk PR");
+  assert.match(tier, /no human in the path/i, "the review-tier section must say a normal-risk PR needs no human at merge");
+  assert.match(tier, /human/i, "the review-tier section must say a risk:high PR needs a human approval");
+  assert.match(tier, /15-minute hold/i, "the review-tier section must state the risk:high minimum hold");
+}
+
+// --- Test: "the README loop matches the tiered merge"
+{
+  const readme = readFileSync(resolve("README.md"), "utf8");
+  const flatReadme = readme.replace(/\s+/g, " ");
+  assert.doesNotMatch(flatReadme, /A \*\*human reviews and merges\*\*/, "the README loop must not say every PR is merged by a human");
+  assert.match(flatReadme, /merged on a tier/i, "the README loop must present the merge as tiered");
+  assert.match(flatReadme, /`auto-merge` workflow once its checks are green/i, "the README loop must state the normal-risk auto-merge condition");
+  assert.match(flatReadme, /`risk:high` PR also waits for a human approval/i, "the README loop must state that a risk:high PR still waits for a human");
+}
+
+// --- Test: "every criterion has exactly one test named after it"
+{
+  const self = readFileSync(fileURLToPath(import.meta.url), "utf8");
+  const names = [
+    "the kernel states the tiered merge",
+    "Hard Rule 6 keeps the agent ban and names the system merge",
+    "the plan format documents the risk tier's merge consequence",
+    "the README loop matches the tiered merge",
+    "every criterion has exactly one test named after it",
+  ];
+  for (const name of names) {
+    const hits = (self.match(new RegExp(`--- Test: "${name.replace(/[|\\{}()[\]^$+*?.]/g, "\\$&")}"`, "g")) || []).length;
+    assert.equal(hits, 1, `expected exactly one test block named "${name}", found ${hits}`);
+  }
+}
+
+console.log("PASS agents-kernel.test.mjs (8 criteria + 5 tiered-merge criteria)");
