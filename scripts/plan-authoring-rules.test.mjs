@@ -220,4 +220,26 @@ const readme = readFileSync(
 // NNNN-*.md fixtures, and the #191 guard forbids a test file that names plan
 // slugs from also resolving the repo's plan/ directory.
 
-console.log("PASS plan-authoring-rules.test.mjs (5 criteria + #467/#469 README docs)");
+// --- #468 Criterion 6: plan/README.md documents the `locks` key with its token
+// conventions (migration, route:<path>, file:<path>). Asserted here for the same
+// reason as #467 criterion 5: plan-sync.test.mjs writes NNNN-*.md fixtures, and
+// the #191 guard forbids a test file that names plan slugs from also resolving
+// the repo's plan/ directory.
+{
+  assert.match(readme, /## Exclusive resources — `locks`/, "plan/README.md must document the locks key");
+  for (const token of [/`migration`/, /`route:<path>`/, /`file:<path>`/]) {
+    assert.match(readme, token, `plan/README.md must document the token convention: ${token}`);
+  }
+  assert.match(
+    readme,
+    /compared as exact strings/i,
+    "plan/README.md must state that lock tokens are compared as exact strings",
+  );
+  assert.match(
+    readme,
+    /priority first, then slug/i,
+    "plan/README.md must state that the serialization order is priority then slug",
+  );
+}
+
+console.log("PASS plan-authoring-rules.test.mjs (5 criteria + #467/#468/#469 README docs)");

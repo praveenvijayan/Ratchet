@@ -185,29 +185,77 @@ Body of 0096.
 - [ ] a declared estimated_lines is accepted
 `);
 
-// #471 AC2 fixtures: two complete plans whose slugs match a live branch in the
-// mock below. The unapproved one must be held at state:draft despite having
-// criteria; the one carrying `retroactive_ok` must sync as ordinary ready work.
+// #471 AC2 fixtures: a plan matching a live branch is held at draft; the same
+// plan carrying a human's `retroactive_ok` approval syncs ready.
 await writeFile(join(planDir, "0196-no-retroactive-plans.md"), `---
 title: Flag retroactive plans
 priority: medium
 blocked_by: []
 ---
-Body of 0196.
-
 ## Acceptance criteria
-- [ ] a plan matching a live branch is held at draft
+- [ ] held at draft until a human approves it
 `);
 await writeFile(join(planDir, "0198-approved-spike.md"), `---
-title: Approved retroactive write-up
+title: Write up the approved spike
 priority: medium
 blocked_by: []
-retroactive_ok: spike landed first
+retroactive_ok: spike landed first, written up on purpose
 ---
-Body of 0198.
-
 ## Acceptance criteria
-- [ ] an approved retroactive plan syncs as ready
+- [ ] syncs ready because a human approved it
+`);
+
+// --- #468 fixtures: plans that claim the same exclusive resource ---------
+// The `migration` token is claimed twice. 0111 sorts LATER by slug but carries
+// the higher priority, so it must win — proving the order is priority first,
+// slug only as the tie-break.
+await writeFile(join(planDir, "0110-lock-second.md"), `---
+title: Also touches the migration
+priority: medium
+blocked_by: []
+locks: [migration]
+---
+## Acceptance criteria
+- [ ] serialized behind the higher-priority claimant
+`);
+await writeFile(join(planDir, "0111-lock-first.md"), `---
+title: Takes the migration first
+priority: high
+blocked_by: []
+locks: [migration]
+---
+## Acceptance criteria
+- [ ] holds the contested lock
+`);
+// Equal priority: the tie-break is slug order, so 0112 holds and 0113 waits.
+await writeFile(join(planDir, "0112-lock-tie-a.md"), `---
+title: Rebuilds the home route
+priority: low
+blocked_by: []
+locks: [route:/home]
+---
+## Acceptance criteria
+- [ ] wins the tie on slug order
+`);
+await writeFile(join(planDir, "0113-lock-tie-b.md"), `---
+title: Also rebuilds the home route
+priority: low
+blocked_by: []
+locks: [route:/home]
+---
+## Acceptance criteria
+- [ ] loses the tie on slug order
+`);
+// Tokens are compared as exact strings: route:/Home is a different resource
+// from route:/home and must not be serialized behind it.
+await writeFile(join(planDir, "0114-lock-distinct.md"), `---
+title: Rebuilds a differently-cased route
+priority: low
+blocked_by: []
+locks: [route:/Home]
+---
+## Acceptance criteria
+- [ ] never conflicts with a token that only differs by case
 `);
 
 // --- in-memory GitHub API ----------------------------------------------
@@ -234,7 +282,9 @@ globalThis.fetch = async (url, opts = {}) => {
   const method = opts.method || "GET";
   const body = opts.body ? JSON.parse(opts.body) : null;
   if (method === "GET" && pathname === "/repos/o/r/issues") {
-    return respond(Number(searchParams.get("page")) === 1 ? [...issues.values()] : []);
+    const wanted = searchParams.get("state") || "all";
+    const rows = [...issues.values()].filter((i) => wanted === "all" || i.state === wanted);
+    return respond(Number(searchParams.get("page")) === 1 ? rows : []);
   }
   // #471: the sync reads live branches and open PRs to spot retroactive plans.
   if (method === "GET" && pathname === "/repos/o/r/branches") {
@@ -255,6 +305,16 @@ globalThis.fetch = async (url, opts = {}) => {
     const issue = { number: nextNumber++, state: "open", title: body.title, body: body.body, labels: (body.labels || []).map(label) };
     issues.set(issue.number, issue);
     return respond(issue, 201);
+  }
+  // Single-issue read and label replacement: unblock-dependents drives these
+  // against the same store, so #468 criterion 3 exercises the real machinery.
+  const one = pathname.match(/^\/repos\/o\/r\/issues\/(\d+)$/);
+  if (method === "GET" && one) return respond(issues.get(Number(one[1])));
+  const labelsOn = pathname.match(/^\/repos\/o\/r\/issues\/(\d+)\/labels$/);
+  if (method === "PUT" && labelsOn) {
+    const issue = issues.get(Number(labelsOn[1]));
+    issue.labels = body.labels.map(label);
+    return respond(issue.labels);
   }
   const patch = pathname.match(/^\/repos\/o\/r\/issues\/(\d+)$/);
   if (method === "PATCH" && patch) {
@@ -763,5 +823,93 @@ Body of 0098.
 // plan-authoring-rules.test.mjs: this suite writes NNNN-*.md fixtures, and a
 // test file may not both name plan slugs and resolve the repo's plan/ dir (the
 // #191 guard in docs-refresh.test.mjs).
+
+// --- #468: plans declare exclusive resources -----------------------------
+const bySlugName = (slug) => [...issues.values()].find((i) => (i.body || "").includes(`plan-id: ${slug}`));
+const lockFirst = bySlugName("0111-lock-first");
+const lockSecond = bySlugName("0110-lock-second");
+const tieA = bySlugName("0112-lock-tie-a");
+const tieB = bySlugName("0113-lock-tie-b");
+const distinct = bySlugName("0114-lock-distinct");
+
+// Criterion 1: `locks` is part of the documented frontmatter surface — the file
+// compiles as usual and the key never draws an unknown-frontmatter-key warning.
+assert.ok(lockFirst, "0111-lock-first issue was created");
+assert.ok(
+  !logs.some((l) => l.includes("unknown frontmatter key") && l.includes("locks")),
+  "a declared locks key must not be reported as an unknown frontmatter key",
+);
+
+// Criterion 2: of two plans claiming the same token, at most one is ready; the
+// other is state:blocked and names the conflicting slug in its body. Selection
+// is priority first (0111 wins despite the later slug), then slug order (0112
+// wins its tie with 0113).
+assert.ok(names(lockFirst).includes("state:ready"), `the higher-priority claimant holds the lock, got: ${names(lockFirst)}`);
+assert.ok(names(lockSecond).includes("state:blocked"), `the other claimant must be serialized, got: ${names(lockSecond)}`);
+assert.ok(
+  lockSecond.body.includes(`Blocked by #${lockFirst.number}`) && lockSecond.body.includes("0111-lock-first"),
+  `the serialized issue must name the conflicting slug in its body, got:\n${lockSecond.body}`,
+);
+assert.ok(lockSecond.body.includes("migration"), `the serialized issue must name the contested token, got:\n${lockSecond.body}`);
+assert.ok(names(tieA).includes("state:ready"), `equal priority must tie-break on slug order, got: ${names(tieA)}`);
+assert.ok(names(tieB).includes("state:blocked"), `the later slug must be serialized, got: ${names(tieB)}`);
+
+// Criterion 4: tokens are compared as exact strings — route:/Home is a distinct
+// resource from route:/home — and every conflicting pair is logged.
+assert.ok(names(distinct).includes("state:ready"), `a token differing only by case must not conflict, got: ${names(distinct)}`);
+assert.ok(
+  logs.some((l) => l.includes("LOCK CONFLICT") && l.includes("migration") && l.includes("0110-lock-second") && l.includes("0111-lock-first")),
+  "every conflicting pair must be logged, naming the token and both slugs",
+);
+assert.ok(
+  logs.some((l) => l.includes("LOCK CONFLICT") && l.includes("route:/home") && l.includes("0112-lock-tie-a") && l.includes("0113-lock-tie-b")),
+  "the second conflicting pair must be logged too",
+);
+assert.ok(
+  !logs.some((l) => l.includes("LOCK CONFLICT") && l.includes("0114-lock-distinct")),
+  "a plan whose token matches nothing exactly must never be reported as conflicting",
+);
+
+// Criterion 3: closing the issue that holds a contested lock releases the
+// serialized issue through the EXISTING unblock machinery — no manual edit, no
+// plan-sync change. Drive the real unblock-dependents against the same store.
+{
+  lockFirst.state = "closed";
+  process.env.CLOSED_ISSUE = String(lockFirst.number);
+  const unblock = await import(new URL("./unblock-dependents.mjs", import.meta.url).href);
+  const quiet = console.log;
+  console.log = () => {};
+  try {
+    await unblock.main({ auth: () => ({ token: "test-token", repo: "o/r" }), fetchImpl: globalThis.fetch });
+  } finally {
+    console.log = quiet;
+    delete process.env.CLOSED_ISSUE;
+  }
+  assert.ok(
+    names(lockSecond).includes("state:ready"),
+    `closing the lock holder must release the serialized issue, got: ${names(lockSecond)}`,
+  );
+}
+
+// Criterion 5: a `locks` value that is not a list of strings aborts the sync
+// non-zero before any mutation, naming the offending file.
+const badLocks = await runSyncOn("plan-sync-badlocks-", "0115-bad-locks.md", `---
+title: Declares an unreadable lock
+priority: medium
+blocked_by: []
+locks: migration
+---
+Body of 0115.
+
+## Acceptance criteria
+- [ ] never created
+`);
+assert.ok(badLocks.exit !== 0, "a malformed locks value must exit non-zero");
+assert.ok(/0115-bad-locks/.test(badLocks.out), `the malformed-locks error must name the file, got: ${badLocks.out}`);
+assert.ok(/locks/i.test(badLocks.out) && /list of strings/i.test(badLocks.out), `the malformed-locks error must say what a valid value looks like, got: ${badLocks.out}`);
+assert.ok(/nothing was changed/i.test(badLocks.out), `the malformed-locks error must state that nothing was changed, got: ${badLocks.out}`);
+
+// Criterion 6 (plan/README.md documents the key) is asserted in
+// plan-authoring-rules.test.mjs, for the same reason as #467 criterion 5 above.
 
 console.log("PASS plan-sync.test.mjs");
