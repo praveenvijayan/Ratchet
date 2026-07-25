@@ -35,6 +35,14 @@ import { monitorOnce } from "./herd-monitor.mjs";
 import { verifyOnce } from "./herd-verify.mjs";
 import { normalizeConfig } from "./herd.mjs";
 
+
+// The adapter's launch binary must actually exist on PATH for the route to
+// resolve: herd-adapters.mjs probes it with accessSync(X_OK). Naming the real
+// `claude` CLI made these fixtures pass only on machines that happen to have
+// Claude Code installed — every developer's, never a CI runner's. process.execPath
+// is always present, and it is never really spawned (spawn is stubbed throughout).
+const ADAPTER_BIN = process.execPath;
+
 const NOW = Date.UTC(2026, 6, 9, 12, 0, 0); // fixed clock — no Date.now dependence
 const MIN = 60 * 1000; // one minute in ms, for advancing the fixed clock between polls
 
@@ -44,7 +52,7 @@ const mkConfig = () => ({
  pollSeconds: 60,
  reworkCap: 2,
  logDir: "logs",
- adapters: { claude: { launch: ["claude", "-p", "{prompt}"], resume: ["claude", "--resume", "{issue}", "{prompt}"], promptTemplate: "issue {issue}", env: {} } },
+ adapters: { claude: { launch: [ADAPTER_BIN, "-p", "{prompt}"], resume: [ADAPTER_BIN, "--resume", "{issue}", "{prompt}"], promptTemplate: "issue {issue}", env: {} } },
  routing: { default: "claude", labels: {} },
 });
 
@@ -679,7 +687,7 @@ await inTempDir(async () => {
 const usageRaw = {
   adapters: {
     claude: {
-      launch: ["claude", "-p", "{prompt}"],
+      launch: [ADAPTER_BIN, "-p", "{prompt}"],
       usage: { costUsd: "cost=\\$([0-9.]+)", tokensIn: "in=(\\d+)", tokensOut: "out=(\\d+)" },
     },
   },
@@ -706,7 +714,7 @@ await inTempDir(async () => {
 // Criterion (#163 AC3): an adapter that declares no usage mapping dispatches and
 // exits exactly as before — its worker-exit event omits the usage fields.
 await inTempDir(async () => {
-  const config = normalizeConfig({ adapters: { claude: { launch: ["claude", "-p", "{prompt}"] } }, routing: { default: "claude" } });
+  const config = normalizeConfig({ adapters: { claude: { launch: [ADAPTER_BIN, "-p", "{prompt}"] } }, routing: { default: "claude" } });
   assert.ok(!("usage" in config.adapters.claude), "a mapping-free adapter carries no usage field (unchanged shape)");
   mkdirSync("logs", { recursive: true });
   writeFileSync("logs/issue-71.log", "cost=$9.99 in=1 out=2\n"); // present but never consulted
