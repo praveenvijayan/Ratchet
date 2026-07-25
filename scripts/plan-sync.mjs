@@ -27,9 +27,13 @@ const VALID_PRIORITIES = new Set(["high", "medium", "low"]);
 // only `high` earns a label — the tier travels issue -> PR from there.
 const VALID_RISKS = new Set(["high", "normal"]);
 const RISK_HIGH = "risk:high";
+// `stub` says the plan knowingly ships less than a working end-to-end path.
+// A closed set, for the same reason as `risk`: `stub: yes` would read as
+// non-stub and silently skip the repayment the key exists to force.
+const VALID_STUBS = new Set(["true", "false"]);
 // The documented frontmatter surface (see plan/README.md). Anything else is a
 // typo or an unsupported field: warned about, never silently honoured.
-const KNOWN_KEYS = new Set(["title", "priority", "labels", "blocked_by", "estimated_lines", "locks", "risk", APPROVAL_KEY]);
+const KNOWN_KEYS = new Set(["title", "priority", "labels", "blocked_by", "estimated_lines", "locks", "risk", "stub", "repaid_by", APPROVAL_KEY]);
 // Priority order used wherever plans must be sorted deterministically.
 const PRIORITY_RANK = { high: 0, medium: 1, low: 2 };
 // The plan-time size budget. The PR size gate measures the same number after the
@@ -285,6 +289,12 @@ async function main() {
       invalidPlans.push(`${file} (invalid risk '${parsed.fm.risk}', must be high or normal)`);
       continue;
     }
+    // An unreadable `stub` is a hard skip too: it would compile as real work and
+    // the de-fake tax would go unrecorded, which is exactly what the key prevents.
+    if (parsed.fm.stub !== undefined && !VALID_STUBS.has(parsed.fm.stub)) {
+      invalidPlans.push(`${file} (invalid stub '${parsed.fm.stub}', must be true or false)`);
+      continue;
+    }
     // The size budget is a hard gate for the same reason the PR size cap is:
     // an over-cap plan has to become several plans, and that decision is only
     // cheap before any code exists. Absence is grandfathered with a warning.
@@ -400,6 +410,30 @@ async function main() {
     process.exit(1);
   }
 
+  // Stub-debt gate: a plan that declares itself a stub must name the plan that
+  // repays it, and that plan must actually exist — as a file in this batch or as
+  // an issue from an earlier one. "The real implementation arrives later" with
+  // nothing pointing at it is the de-fake tax this key exists to stop, so it
+  // aborts here, still before pass 2a creates anything.
+  const stubDebts = [];
+  for (const [slug, { fm }] of plans) {
+    if (fm.stub !== "true") continue;
+    const target = Array.isArray(fm.repaid_by) ? fm.repaid_by.join(", ") : (fm.repaid_by || "");
+    if (!target) {
+      stubDebts.push(`${slug}.md declares 'stub: true' but names no 'repaid_by' plan`);
+    } else if (!plans.has(target) && !bySlug.has(target)) {
+      stubDebts.push(`${slug}.md declares 'stub: true' with 'repaid_by: ${target}' — that slug resolves to no plan file and no issue`);
+    }
+  }
+  if (stubDebts.length) {
+    console.error("ERROR: a stub plan does not link the plan that repays it. Nothing was changed.");
+    console.error("A plan either delivers a working end-to-end path, or declares 'stub: true' and");
+    console.error("names a 'repaid_by' plan file created in the same planning PR. Fix these, then");
+    console.error("re-sync:");
+    for (const reason of stubDebts) console.error(`  • ${reason}`);
+    process.exit(1);
+  }
+
   // Pass 2a: create a minimal issue for every new plan BEFORE rendering any
   // body, so slugToNumber is total and a blocker can never be dropped just
   // because its file sorts later in the directory. The marker goes in now:
@@ -461,7 +495,12 @@ async function main() {
       ...lockWaitsHere.map((w) => `Blocked by #${w.number} (lock \`${w.token}\` is also claimed by ${w.holder})`),
     ];
     const blockedText = blockLines.length ? `\n\n${blockLines.join("\n")}` : "";
-    const fullBody = `${body}${blockedText}\n\n${markerOf(slug)}`;
+    // A stub's debt is written into the issue body, not just the plan file, so
+    // the outstanding work is visible (and cross-linked) on GitHub itself. The
+    // stub gate above guarantees the slug resolves, hence a number by now.
+    const repaidBy = fm.stub === "true" ? slugToNumber.get(fm.repaid_by) : undefined;
+    const repaidText = repaidBy ? `\n\nRepaid by #${repaidBy}` : "";
+    const fullBody = `${body}${blockedText}${repaidText}\n\n${markerOf(slug)}`;
     // Blocked means blocked *now*: a closed blocker no longer blocks. Deriving
     // state from the plan file alone would re-block issues unblock-dependents
     // already flipped to ready. (A blocker missing from byNumber was created

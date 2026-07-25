@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { execFileSync } from "node:child_process";
 import { COMMENT_MARKER, runCheck, upsertComment } from "./retroactive-plans.mjs";
 
@@ -268,6 +268,27 @@ risk: high
 ---
 ## Acceptance criteria
 - [ ] the issue carries the declared risk tier
+`);
+
+// --- #470 fixtures: the vertical-slice rule. 0118 declares itself a stub and
+// names 0119 — created in the same batch — as the plan that repays it.
+await writeFile(join(planDir, "0118-stub-checkout.md"), `---
+title: Checkout screen against a fixture price
+priority: medium
+blocked_by: []
+stub: true
+repaid_by: 0119-live-pricing
+---
+## Acceptance criteria
+- [ ] the debt is visible on the issue
+`);
+await writeFile(join(planDir, "0119-live-pricing.md"), `---
+title: Serve real prices to checkout
+priority: medium
+blocked_by: []
+---
+## Acceptance criteria
+- [ ] repays the stub
 `);
 
 // --- in-memory GitHub API ----------------------------------------------
@@ -777,11 +798,21 @@ assert.ok(names(created).includes("state:ready"), `a grandfathered plan must sti
 // the exit status plus combined output. The size-budget gate runs before any
 // network call, so a dummy token/repo and no fetch mock are enough — and any
 // mutation attempt would surface as a fetch error rather than a silent pass.
-const runSyncOn = async (prefix, name, contents) => {
+// A gate that runs only after the issue listing (the #470 stub gate) needs a
+// GitHub that answers; `preload` is a module pre-imported into the child that
+// stubs `fetch` with an empty repo and throws on any mutation, so a gate that
+// wrongly let the sync reach pass 2a fails loudly instead of passing quietly.
+const runSyncOn = async (prefix, name, contents, preload = null) => {
   const dir = await mkdtemp(join(tmpdir(), prefix));
   await writeFile(join(dir, name), contents);
+  const preloadArgs = [];
+  if (preload) {
+    const stub = join(dir, "_fetch-stub.mjs");   // .mjs: never scanned as a plan
+    await writeFile(stub, preload);
+    preloadArgs.push("--import", pathToFileURL(stub).href);
+  }
   try {
-    execFileSync(process.execPath, [planSync], {
+    execFileSync(process.execPath, [...preloadArgs, planSync], {
       cwd: dir, // avoid loading the repo's .env; the gate makes no network call
       env: { GITHUB_TOKEN: "test-token", GITHUB_REPOSITORY: "o/r", PLAN_DIR: dir, PATH: process.env.PATH },
       stdio: ["ignore", "pipe", "pipe"],
@@ -961,5 +992,70 @@ assert.ok(
   !names(withEstimate).some((n) => n.startsWith("risk:")),
   `a plan with no risk key must carry no risk label, got: ${names(withEstimate)}`,
 );
+
+// --- #470: no plan ships a mock as a deliverable -------------------------
+
+const stubIssue = bySlugName("0118-stub-checkout");
+const repaymentIssue = bySlugName("0119-live-pricing");
+
+// Criterion 1: `stub` and `repaid_by` are part of the documented frontmatter
+// surface — the plan compiles as usual and neither key draws an
+// unknown-frontmatter-key warning.
+assert.ok(stubIssue, "0118-stub-checkout issue was created");
+assert.ok(names(stubIssue).includes("state:ready"), `a stub plan that names its repayment must still sync, got: ${names(stubIssue)}`);
+for (const key of ["stub", "repaid_by"]) {
+  assert.ok(
+    !logs.some((l) => l.includes("unknown frontmatter key") && l.includes(key)),
+    `a declared ${key} must not be reported as an unknown frontmatter key`,
+  );
+}
+
+// Criterion 3: the stub's issue body names the repayment issue, so the debt is
+// visible (and cross-linked) on GitHub rather than only in the plan file.
+assert.ok(repaymentIssue, "0119-live-pricing issue was created");
+assert.ok(
+  stubIssue.body.includes(`Repaid by #${repaymentIssue.number}`),
+  `the stub's issue body must name the repayment issue, got:\n${stubIssue.body}`,
+);
+
+// Criterion 5 (regression): a plan declaring neither key compiles exactly as
+// before — same state, and no repayment line grafted onto its body.
+assert.ok(names(withEstimate).includes("state:ready"), `a plan with no stub key must sync unchanged, got: ${names(withEstimate)}`);
+assert.ok(!withEstimate.body.includes("Repaid by #"), `a plan with no stub key must carry no repayment line, got:\n${withEstimate.body}`);
+
+// Criterion 2: a stub with no `repaid_by`, or one naming a slug that resolves to
+// no plan file and no issue, aborts the sync non-zero before any mutation,
+// naming the file (and the unresolved slug).
+const emptyRepo = `
+const ok = (data) => ({ ok: true, status: 200, json: async () => data, text: async () => JSON.stringify(data) });
+globalThis.fetch = async (url, opts = {}) => {
+  const method = (opts && opts.method) || "GET";
+  if (method !== "GET") throw new Error("the stub gate must abort before mutating: " + method + " " + url);
+  return ok([]);
+};
+`;
+for (const [frontmatter, kind, expected] of [
+  ["stub: true", "stub with no repaid_by", /repaid_by/],
+  ["stub: true\nrepaid_by: 0999-never-written", "stub naming an unresolved slug", /0999-never-written/],
+]) {
+  const debt = await runSyncOn("plan-sync-stub-", "0120-unpaid-stub.md", `---
+title: Ships a fixture and promises the rest later
+priority: medium
+blocked_by: []
+${frontmatter}
+---
+Body of 0120.
+
+## Acceptance criteria
+- [ ] never created
+`, emptyRepo);
+  assert.ok(debt.exit !== 0, `a ${kind} must exit non-zero`);
+  assert.ok(/0120-unpaid-stub/.test(debt.out), `the ${kind} error must name the file, got: ${debt.out}`);
+  assert.match(debt.out, expected, `the ${kind} error must name what is unresolved, got: ${debt.out}`);
+  assert.ok(/nothing was changed/i.test(debt.out), `the ${kind} error must state that nothing was changed, got: ${debt.out}`);
+}
+
+// Criterion 4 (plan/README.md documents the vertical-slice rule) is asserted in
+// plan-authoring-rules.test.mjs, for the same reason as #467/#468/#472 above.
 
 console.log("PASS plan-sync.test.mjs");

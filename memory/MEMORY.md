@@ -56,6 +56,12 @@ Rules:
   `excluded`. `scripts/manifest-check.mjs` gates both directions: a runtime
   script classified `excluded` fails (breaks shipped workflows), and a test
   file classified `framework`/`generated` fails (leaks tests to hosts) (#237).
+- `plan-sync` gates split by what they need: frontmatter gates (priority, risk,
+  size, locks, `stub` validity) run pre-network in pass 1; anything resolving a
+  slug (cycles, `repaid_by`) runs after the issue listing but still before pass
+  2a creates anything — so "nothing was changed" holds either way. A post-network
+  gate is tested by pre-importing a `fetch` stub into the child (`--import`) that
+  throws on any non-GET (#470).
 
 ## Gotchas & fragile areas
 - (e.g.) Payments module has no test harness; integration tests hit the sandbox API (#88).
