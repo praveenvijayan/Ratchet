@@ -130,7 +130,7 @@ const withLimitsAndExcludes = (lines, files, excludes) =>
     files,
   });
   assert.equal(res.code, 0, `excluded files must not count toward thresholds, got:\n${res.out}`);
-  assert.ok(res.out.includes("5 changed line"), `only the included file should count, got:\n${res.out}`);
+  assert.ok(res.out.includes("5 hand-written changed line"), `only the included file should count, got:\n${res.out}`);
   assert.ok(res.out.includes("1 file"), `only the included file count should remain, got:\n${res.out}`);
 }
 
@@ -227,7 +227,7 @@ const withLimitsAndExcludes = (lines, files, excludes) =>
   ];
   const res = await check({ gates: withLimits(10, 1), files });
   assert.equal(res.code, 0, `mirror files must not count toward thresholds, got:\n${res.out}`);
-  assert.ok(res.out.includes("5 changed line"), `only the non-mirror file should count its lines, got:\n${res.out}`);
+  assert.ok(res.out.includes("5 hand-written changed line"), `only the non-mirror file should count its lines, got:\n${res.out}`);
   assert.ok(res.out.includes("1 file"), `only the non-mirror file should count toward files, got:\n${res.out}`);
 }
 
@@ -301,4 +301,92 @@ const withLimitsAndExcludes = (lines, files, excludes) =>
   assert.ok(/at any depth/i.test(sizeSection), "GATES.md must document that a bare filename matches at any depth");
 }
 
-console.log("PASS pr-size-check.test.mjs (43 assertions)");
+// --- #484 AC1: the default exclude set covers generated artifacts beyond the
+// lockfiles — snapshot directories, `.snap` files and the install manifest —
+// with no host configuration at all (the fixture GATES.md has no exclude_paths).
+{
+  const files = [
+    { filename: "__snapshots__/root.test.js.snap", additions: 400, deletions: 0 },
+    { filename: "src/ui/__snapshots__/Button.test.js.snap", additions: 400, deletions: 0 },
+    { filename: "crates/api/snapshots/render.snap", additions: 400, deletions: 0 },
+    { filename: "ratchet-manifest.json", additions: 400, deletions: 0 },
+    { filename: "Gemfile.lock", additions: 400, deletions: 0 },
+    { filename: "composer.lock", additions: 400, deletions: 0 },
+    { filename: "Pipfile.lock", additions: 400, deletions: 0 },
+    { filename: "src/app.js", additions: 3, deletions: 2 },
+  ];
+  const res = await check({ gates: withLimits(10, 1), files });
+  assert.equal(res.code, 0, `generated artifacts must be excluded without host configuration, got:\n${res.out}`);
+  assert.ok(res.out.includes("5 hand-written changed line"), `only the hand-written file should count, got:\n${res.out}`);
+  assert.ok(res.out.includes("1 file"), `only the hand-written file should count toward files, got:\n${res.out}`);
+}
+
+// --- #484 AC2: host-configured excludes extend the defaults rather than
+// replacing them, and a host opts out of a single default explicitly with `!`.
+{
+  const files = [
+    { filename: "package-lock.json", additions: 500, deletions: 0 },
+    { filename: "generated/client.js", additions: 500, deletions: 0 },
+    { filename: "src/app.js", additions: 3, deletions: 2 },
+  ];
+  const extend = await check({ gates: withLimitsAndExcludes(10, 1, ["generated/**"]), files });
+  assert.equal(extend.code, 0, `a host exclude must add to the defaults, not replace them, got:\n${extend.out}`);
+  assert.ok(extend.out.includes("5 hand-written changed line"), `the default lockfile exclusion must survive host config, got:\n${extend.out}`);
+
+  const optOut = await check({
+    gates: withLimitsAndExcludes(10, 6, ["generated/**", "!package-lock.json"]),
+    files,
+  });
+  assert.equal(optOut.code, 1, "an explicit !package-lock.json opt-out must make the lockfile count again");
+  assert.ok(optOut.out.includes("505 hand-written"), `the opted-out default's lines must be counted, got:\n${optOut.out}`);
+}
+
+// --- #484 AC3: the output states the hand-written line count and names every
+// changed file excluded as generated, on both the passing and failing path.
+{
+  const files = [
+    { filename: "src/app.js", additions: 3, deletions: 2 },
+    { filename: "package-lock.json", additions: 500, deletions: 0 },
+  ];
+  const pass = await check({ gates: withLimits(10, 6), files });
+  assert.equal(pass.code, 0, "a hand-written-small PR passes");
+  assert.ok(pass.out.includes("5 hand-written changed line"), `the pass message must state the hand-written count, got:\n${pass.out}`);
+  assert.ok(
+    /Excluded as generated[\s\S]*package-lock\.json \(package-lock\.json\)/.test(pass.out),
+    `the pass message must name the excluded file and the pattern that excluded it, got:\n${pass.out}`,
+  );
+
+  const fail = await check({ gates: withLimits(1, 6), files });
+  assert.equal(fail.code, 1, "a hand-written-large PR fails");
+  assert.ok(fail.out.includes("5 hand-written changed lines"), `the failure must state the hand-written count, got:\n${fail.out}`);
+  assert.ok(/hand-written lines only/.test(fail.out), `the failure must state that the cap measures hand-written lines only, got:\n${fail.out}`);
+  assert.ok(
+    /Excluded as generated[\s\S]*package-lock\.json \(package-lock\.json\)/.test(fail.out),
+    `the failure must name the excluded file and its pattern, got:\n${fail.out}`,
+  );
+}
+
+// --- #484 AC4: the verdict tracks hand-written lines in both directions — a
+// generated-dominated diff still fails when the hand-written part is over the
+// cap, and a big lockfile does not fail an under-cap PR.
+{
+  const overDespiteGenerated = await check({
+    gates: withLimits(400, 6),
+    files: [
+      { filename: "pnpm-lock.yaml", additions: 9000, deletions: 0 },
+      { filename: "src/app.js", additions: 401, deletions: 0 },
+    ],
+  });
+  assert.equal(overDespiteGenerated.code, 1, "401 hand-written lines must fail even when the lockfile dominates the diff");
+
+  const underWithGenerated = await check({
+    gates: withLimits(400, 6),
+    files: [
+      { filename: "pnpm-lock.yaml", additions: 9000, deletions: 0 },
+      { filename: "src/app.js", additions: 399, deletions: 0 },
+    ],
+  });
+  assert.equal(underWithGenerated.code, 0, `399 hand-written lines plus a large lockfile must pass, got:\n${underWithGenerated.out}`);
+}
+
+console.log("PASS pr-size-check.test.mjs (57 assertions)");
