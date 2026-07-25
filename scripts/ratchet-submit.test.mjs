@@ -33,7 +33,7 @@ function makeGit({ integrated = true, conflict = false, pushCode = 0 } = {}) {
 const pushed = (git) => git.calls.some((a) => a[0] === "push");
 
 // In-memory GitHub API: list/create pulls, read issue, write labels.
-function makeApi({ pulls = [], title = "Add submit script", labels = ["state:in-progress"] } = {}) {
+function makeApi({ pulls = [], title = "Add submit script", labels = ["state:in-progress"], labelPostFails = false } = {}) {
   const store = { pulls: [...pulls], posts: 0 };
   const issue = { number: 337, title, labels: labels.map(label) };
   const respond = (data, status = 200) => ({
@@ -50,13 +50,21 @@ function makeApi({ pulls = [], title = "Add submit script", labels = ["state:in-
     if (method === "GET" && p === "/repos/o/r/pulls") return respond(store.pulls);
     if (method === "POST" && p === "/repos/o/r/pulls") {
       store.posts++;
-      store.pulls.push({ number: 100 + store.pulls.length, head: { ref: body.head } });
+      store.pulls.push({ number: 100 + store.pulls.length, head: { ref: body.head }, labels: [] });
       return respond(store.pulls[store.pulls.length - 1], 201);
     }
     if (method === "GET" && p === "/repos/o/r/issues/337") return respond(issue);
     if (method === "PUT" && p === "/repos/o/r/issues/337/labels") {
       issue.labels = body.labels.map(label);
       return respond(issue.labels);
+    }
+    // Adding labels to a PR goes through the issues endpoint, keyed by PR number.
+    const addTo = p.match(/^\/repos\/o\/r\/issues\/(\d+)\/labels$/);
+    if (method === "POST" && addTo) {
+      if (labelPostFails) return respond({ message: "label service unavailable" }, 500);
+      const pr = store.pulls.find((x) => x.number === Number(addTo[1]));
+      pr.labels = [...(pr.labels || []), ...body.labels.map(label)];
+      return respond(pr.labels);
     }
     throw new Error(`unexpected request: ${method} ${p}`);
   };
@@ -186,6 +194,40 @@ const stateLabels = (api) => api.issue.labels.map((l) => l.name).filter((n) => n
   assert.equal(markers.length, unique.size, "each criterion tested exactly once (no duplicate markers)");
   assert.equal(markers.length, CRITERIA_COUNT, `exactly ${CRITERIA_COUNT} criteria are tested`);
   for (let n = 1; n <= CRITERIA_COUNT; n++) assert.ok(unique.has(n), `criterion ${n} has a test`);
+}
+
+// --- #472 criterion 3: a PR closing a risk:high issue inherits the risk:high
+// label automatically; a normal-risk issue's PR gains no risk label, and a
+// failed label write leaves the handoff succeeded with a stated warning. ---
+{
+  const high = makeApi({ labels: ["state:in-progress", "risk:high"] });
+  const r = await invoke({ api: high });
+  assert.equal(r.code, 0, "the handoff still succeeds");
+  const prLabels = high.store.pulls[0].labels.map((l) => l.name);
+  assert.ok(prLabels.includes("risk:high"), `the PR must inherit risk:high, got: ${prLabels}`);
+
+  const normal = makeApi({ labels: ["state:in-progress"] });
+  await invoke({ api: normal });
+  assert.deepEqual(normal.store.pulls[0].labels, [], "a normal-risk issue's PR gains no risk label");
+
+  // Re-running must not stack duplicates on the PR.
+  await invoke({ api: high });
+  assert.equal(
+    high.store.pulls[0].labels.filter((l) => l.name === "risk:high").length,
+    1,
+    "re-running the handoff does not add risk:high twice",
+  );
+
+  // Error path: the label write fails after the PR exists and the issue is
+  // already in review — the handoff reports success with a warning, never a
+  // raw error or a non-zero exit that would invite a duplicate PR.
+  const flaky = makeApi({ labels: ["state:in-progress", "risk:high"], labelPostFails: true });
+  const degraded = await invoke({ api: flaky });
+  assert.equal(degraded.code, 0, "a failed label write does not fail the handoff");
+  const line = JSON.parse(degraded.out[0]);
+  assert.equal(line.result, "submitted", "the PR was still created");
+  assert.match(line.warning || "", /risk:high/, "the warning names the label that could not be set");
+  assert.match(degraded.err.join("\n"), /WARNING/, "the warning is also written to stderr");
 }
 
 console.log("PASS ratchet-submit.test.mjs (8 criteria)");
