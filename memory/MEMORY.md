@@ -141,6 +141,11 @@ Rules:
   without it behaves exactly as before. A criterion-mapped test that asserts on
   source strings leaves the criterion unmet and is a review rejection
   (`AGENTS.md` §6) (#469).
+- A test proves an absence with evidence only the forbidden code can produce (a
+  probe file at a path the runner never touches), never a bare substring of a
+  child's combined stdout+stderr — that stream also carries mkdtemp paths and CI
+  annotations, so a short needle flakes. `scripts/negative-assertions.mjs` is the
+  gate that enforces it; anchored needles (a phrase, `^`/`$`, `\b`) stay legal (#498).
 - SSE tests drive the mutation from the `until` predicate on the first observed
   frame, never from a `setTimeout` delay: a timed write can beat the stream
   opening on a loaded machine, so the whole file ships in one frame and the
