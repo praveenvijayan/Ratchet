@@ -38,8 +38,19 @@ report. The goal: turn "backlog drained" into a specific, actionable picture.
      catches any that already reached issues. A cycle is a **root** cause —
      surface it above ordinary blocked chains.
    - **In-flight** — note any `state:in-progress` (claimed; maybe abandoned →
-     `sweep-stale-claims` will requeue) or `state:in-review` (waiting on a human
-     to merge/review — the loop advances when they do).
+     `sweep-stale-claims` will requeue). For each `state:in-review` issue, look
+     at its PR before calling it blocked:
+     `gh pr list --state open --json number,body,labels,reviewDecision` and match
+     the PR whose body closes that issue.
+     - A PR **without** `risk:high` and without a `CHANGES_REQUESTED` verdict is
+       **flowing, not blocked**: the `auto-merge` workflow takes it once its
+       checks are green and an `APPROVED` verdict is recorded, with no human in
+       the path. Report it as awaiting that sweep — never as human-blocked, and
+       never as a reason the queue is stuck.
+     - A `risk:high` PR **is** waiting on a human: it also needs an `APPROVED`
+       review from a person plus a 15-minute hold since it became mergeable.
+     - A `CHANGES_REQUESTED` verdict is waiting on the **agent**, not the human —
+       the rework belongs to whoever owns the branch (`/ratchet-next`).
    - **Unmerged plans** — `gh pr list --head ratchet/planning --state open`. If a
      planning PR is open, its plan files have NOT become issues yet — merging it
      creates them.
