@@ -118,7 +118,10 @@ failed), no checks run, no review can flip a label, and the work is
 Set the issue to `state:in-review` and remove `state:in-progress`. Then **full
 stop** — no polling, no self-review, no nudging.
 
-### 6. Rework — when a human rejects (review, close-with-comment, or chat)
+### 6. Rework & review — when a human rejects (review, close-with-comment, chat)
+**Reviewing a PR, reject it when a criterion-mapped test asserts on source text
+instead of behaviour** — grepping the implementation for a name or label proves
+text exists, never that the behaviour happens, so that criterion is **unmet**.
 Route to `.agents/skills/ratchet-next/SKILL.md`. Work the **same branch and PR**
 in its worktree; apply the ownership rule first — a rework request aimed at you
 is a handoff, so overwrite `.ratchet-owner` if it isn't yours; otherwise it is
