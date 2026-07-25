@@ -135,3 +135,7 @@ Rules:
   without it behaves exactly as before. A criterion-mapped test that asserts on
   source strings leaves the criterion unmet and is a review rejection
   (`AGENTS.md` §6) (#469).
+- SSE tests drive the mutation from the `until` predicate on the first observed
+  frame, never from a `setTimeout` delay: a timed write can beat the stream
+  opening on a loaded machine, so the whole file ships in one frame and the
+  incremental-tail assertion fails without any real defect (#478).
