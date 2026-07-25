@@ -264,4 +264,27 @@ const readme = readFileSync(
   );
 }
 
-console.log("PASS plan-authoring-rules.test.mjs (5 criteria + #467/#468/#469/#472 README docs)");
+// --- #470 Criterion 4: plan/README.md documents the vertical-slice rule — a
+// plan delivers a working end-to-end path, or declares `stub: true` and names a
+// `repaid_by` plan file created in the same planning PR. Asserted here for the
+// same reason as #467/#468/#472 above.
+{
+  assert.match(readme, /## Vertical slice — `stub` and `repaid_by`/, "plan/README.md must document the stub and repaid_by keys");
+  assert.match(
+    readme,
+    /delivers a working end-to-end path/i,
+    "plan/README.md must state that a plan delivers a working end-to-end path",
+  );
+  assert.match(
+    readme,
+    /created in the same planning PR/i,
+    "plan/README.md must state that the repayment plan file is created in the same planning PR",
+  );
+  assert.match(
+    readme,
+    /aborts the sync non-zero/i,
+    "plan/README.md must state that an unrepaid stub aborts the sync",
+  );
+}
+
+console.log("PASS plan-authoring-rules.test.mjs (5 criteria + #467/#468/#469/#470/#472 README docs)");
