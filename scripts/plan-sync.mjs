@@ -13,6 +13,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { hasAcceptanceCriteria, planSlug, formatPlanMarker } from "./criteria.mjs";
 import { ghClient, paginate, resolveAuth } from "./gh-api.mjs";
+import { APPROVAL_KEY, auditMarker, buildRefs, issueAuditComment, matchPlan } from "./retroactive-plans.mjs";
 
 // Token/repo (from GITHUB_TOKEN | GITHUB_PAT and GITHUB_REPOSITORY, environment
 // or .env) and the shared REST client. Resolved at load so a missing credential
@@ -24,7 +25,7 @@ const EDITABLE_STATES = new Set(["state:ready", "state:draft"]);
 const VALID_PRIORITIES = new Set(["high", "medium", "low"]);
 // The documented frontmatter surface (see plan/README.md). Anything else is a
 // typo or an unsupported field: warned about, never silently honoured.
-const KNOWN_KEYS = new Set(["title", "priority", "labels", "blocked_by", "estimated_lines"]);
+const KNOWN_KEYS = new Set(["title", "priority", "labels", "blocked_by","estimated_lines", APPROVAL_KEY]);
 // The plan-time size budget. The PR size gate measures the same number after the
 // code exists, which only ever produces negotiation and overrides; refusing an
 // over-cap estimate here forces the split while splitting is still free.
@@ -293,8 +294,29 @@ async function main() {
     console.log(`CREATE #${created.number} ${slug}`);
   }
 
+  // Retroactive-plan detection (#471): live branches and open PRs, so a plan
+  // whose work already exists cannot enter the queue as ready work. It degrades
+  // on purpose — a failed listing warns loudly and the sync continues.
+  let retroRefs = null;
+  try {
+    retroRefs = buildRefs({
+      branches: await paginate(gh, `/repos/${REPO}/branches`, { cap: 300 }),
+      pulls: await paginate(gh, `/repos/${REPO}/pulls?state=open`, { cap: 100 }),
+    });
+  } catch (e) {
+    console.log(`WARNING: retroactive-plan check skipped — could not list branches/PRs (${e.message}); plans synced without it`);
+  }
+
+  // One audit comment per issue per outcome; the marker keeps re-syncs quiet.
+  const postAuditOnce = async (number, flag, opts) => {
+    const marker = auditMarker(flag.slug, opts.approved ? "approved" : "flagged");
+    const seen = await paginate(gh, `/repos/${REPO}/issues/${number}/comments`, { cap: 200 });
+    if (!seen.some((c) => (c.body || "").includes(marker))) await gh("POST", `/repos/${REPO}/issues/${number}/comments`, { body: issueAuditComment(flag, opts) });
+  };
+
   // Pass 2b: build bodies (with resolved Blocked by #N), then patch.
   const drafted = [];   // slugs that landed as state:draft (no acceptance criteria)
+  const flagged = [];   // slugs held at state:draft because their work already exists
   const byNumber = new Map(issues.map((i) => [i.number, i]));
   for (const [slug, { fm, body, hasCriteria }] of plans) {
     for (const s of (fm.blocked_by || []).filter((s) => !slugToNumber.has(s))) {
@@ -308,9 +330,17 @@ async function main() {
     // already flipped to ready. (A blocker missing from byNumber was created
     // in pass 2a, so it is open by definition.)
     const openBlockers = blockerNums.filter((n) => byNumber.get(n)?.state !== "closed");
-    const state = openBlockers.length ? "state:blocked" : (hasCriteria ? "state:ready" : "state:draft");
+    // A plan whose work already exists is not ready work, however complete its
+    // criteria: held at draft until a human writes the approval into the plan
+    // file. An approved plan syncs exactly as it always did.
+    const approval = fm[APPROVAL_KEY];
+    const matches = retroRefs ? matchPlan({ slug, title: fm.title }, retroRefs) : [];
+    const isRetro = matches.length > 0 && !approval;
+    const ready = hasCriteria && !isRetro;
+    const state = openBlockers.length ? "state:blocked" : (ready ? "state:ready" : "state:draft");
     const labels = [state, `priority:${fm.priority}`, ...usableLabels(`${slug}.md`, fm.labels || [])];
-    if (state === "state:draft") drafted.push(slug);
+    if (state === "state:draft" && hasCriteria === false) drafted.push(slug);
+    if (isRetro) flagged.push(slug);
 
     const existing = bySlug.get(slug);
     const current = stateLabels(existing).filter((l) => l.startsWith("state:"))[0];
@@ -320,6 +350,12 @@ async function main() {
     }
     await gh("PATCH", `/repos/${REPO}/issues/${existing.number}`, { title: fm.title, body: fullBody, labels });
     console.log(`UPDATE #${existing.number} [${state}] ${slug}`);
+    // Audit trail on the issue: why it is unpickable, or who let it through.
+    try {
+      if (matches.length) await postAuditOnce(existing.number, { slug, matches }, { approved: Boolean(approval), approval: approval || "" });
+    } catch (e) {
+      console.log(`WARNING: could not record the retroactive-plan note on #${existing.number} (${e.message})`);
+    }
   }
 
   // Loud summary: drafts are unpickable and freeze anything that depends on them.
@@ -330,6 +366,17 @@ async function main() {
     console.log(`them stays frozen. Add a "## Acceptance criteria" block with at least one`);
     console.log(`- [ ] item to each, then re-sync:`);
     for (const s of drafted) console.log(`  • ${s}`);
+  }
+
+  // Loud summary: a flagged plan is unpickable for a different reason — the fix
+  // is a human decision, not a missing criterion.
+  if (flagged.length) {
+    console.log("");
+    console.log(`WARNING: ${flagged.length} plan(s) match work that already exists on a branch or PR and`);
+    console.log(`were labelled state:draft — they will NOT be picked. Each issue carries a comment`);
+    console.log(`naming what it matched; approve one by adding "${APPROVAL_KEY}: <why>" to its plan file`);
+    console.log(`in a planning PR, then re-sync:`);
+    for (const s of flagged) console.log(`  • ${s}`);
   }
 }
 

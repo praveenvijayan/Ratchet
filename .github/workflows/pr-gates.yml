@@ -90,3 +90,24 @@ jobs:
           PR_CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           GITHUB_TOKEN: ${{ github.token }}
+
+  retroactive-plans:
+    # Planning PRs, not agent PRs (#471): a PR that ADDS a plan/*.md file whose
+    # work already exists on a branch or PR gets a comment naming the match, and
+    # plan-sync holds that plan at state:draft. It no-ops when a PR adds no plan
+    # file, so no branch-name rule is needed.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write   # owns one comment on the planning PR
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+      - name: Flag retroactive plans
+        run: node scripts/retroactive-plans.mjs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}

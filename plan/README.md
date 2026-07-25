@@ -187,10 +187,10 @@ One or two sentences: what this is and why it exists.
   the offending file and value are logged with the instruction to split the
   plan. A file that omits the key syncs as before with a warning naming it.
 - **Unknown frontmatter keys are ignored with a warning.** `title`, `priority`,
+  `labels`, `blocked_by`, and `retroactive_ok` are the only keys the compiler
+  understands. Any other key is logged as `WARNING: <file> has unknown frontmatter key '<key>'`
   `labels`, `blocked_by`, and `estimated_lines` are the only keys the compiler
-  understands. Any
-  other key is logged as `WARNING: <file> has unknown frontmatter key '<key>'`
-  and the sync continues.
+  understands.
 - **Acceptance criteria decide readiness.** A file with at least one `- [ ]`
   item under `## Acceptance criteria` becomes `state:ready`. Without criteria it
   becomes `state:draft` and no agent will pick it. If you cannot write the
@@ -209,6 +209,16 @@ One or two sentences: what this is and why it exists.
   issue in the cycle can ever unblock. The sync detects cycles before mutating
   GitHub, prints every slug in each cycle, and exits non-zero. Break the
   `blocked_by` edge and re-sync.
+- **A plan whose work already exists is flagged, not queued.** Plan-before-code
+  is hard rule 0. When a planning PR adds a plan file whose slug or title matches
+  a live branch or an open PR, the `retroactive-plans` check comments on the PR
+  naming the plan file and what it matched, and the sync gives that issue
+  `state:draft` — **unpickable** — however complete its criteria. A human
+  approves it by adding `retroactive_ok: spike merged as PR 229, written up
+  afterwards` to the plan's frontmatter in a planning PR: the approval lands in
+  git history, and the next sync flips the issue to ready and records the
+  approval, with what it matched, as a comment on the issue. Avoid `#` in the
+  note; the frontmatter parser reads it as an inline comment.
 - **The file owns content; GitHub owns state.** Edit a file and push: the sync
   updates the matching issue's title, body, and labels — *but only while the
   issue is still `state:ready` or `state:draft`*. Once work starts, the file is

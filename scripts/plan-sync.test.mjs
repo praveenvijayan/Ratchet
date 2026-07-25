@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
+import { COMMENT_MARKER, runCheck, upsertComment } from "./retroactive-plans.mjs";
 
 const planSync = fileURLToPath(new URL("./plan-sync.mjs", import.meta.url));
 
@@ -182,6 +183,7 @@ const issues = new Map([
   [92, { number: 92, state: "open", title: "Dup A", labels: [label("state:ready"), label("priority:P1")], body: "Body A\n\n<!-- plan-id: 0094-dup -->" }],
   [93, { number: 93, state: "open", title: "Dup B", labels: [label("state:ready"), label("priority:P1")], body: "Body B\n\n<!-- plan-id: 0094-dup -->" }],
 ]);
+const comments = [];   // #471 audit trail: { issue, body }
 let nextNumber = 200;
 const respond = (data, status = 200) => ({ ok: true, status, json: async () => data, text: async () => JSON.stringify(data) });
 
@@ -191,6 +193,21 @@ globalThis.fetch = async (url, opts = {}) => {
   const body = opts.body ? JSON.parse(opts.body) : null;
   if (method === "GET" && pathname === "/repos/o/r/issues") {
     return respond(Number(searchParams.get("page")) === 1 ? [...issues.values()] : []);
+  }
+  // #471: the sync reads live branches and open PRs to spot retroactive plans.
+  if (method === "GET" && pathname === "/repos/o/r/branches") {
+    const live = [{ name: "main" }, { name: "spike/no-retroactive-plans" }, { name: "spike/approved-spike" }];
+    return respond(Number(searchParams.get("page")) === 1 ? live : []);
+  }
+  if (method === "GET" && pathname === "/repos/o/r/pulls") return respond([]);
+  const issueComments = pathname.match(/^\/repos\/o\/r\/issues\/(\d+)\/comments$/);
+  if (method === "GET" && issueComments) {
+    const forIssue = comments.filter((c) => c.issue === Number(issueComments[1]));
+    return respond(Number(searchParams.get("page")) === 1 ? forIssue : []);
+  }
+  if (method === "POST" && issueComments) {
+    comments.push({ issue: Number(issueComments[1]), body: body.body });
+    return respond({ id: comments.length }, 201);
   }
   if (method === "POST" && pathname === "/repos/o/r/issues") {
     const issue = { number: nextNumber++, state: "open", title: body.title, body: body.body, labels: (body.labels || []).map(label) };
@@ -310,6 +327,78 @@ assert.ok(
 
 // #85 AC2: non-reserved labels keep their original case when applied.
 assert.ok(names(caseReservedLabels).includes("Team:Ops"), `0083 should preserve ordinary custom label case, got: ${names(caseReservedLabels)}`);
+
+// --- #471: plans whose work already exists -------------------------------
+// AC2: a plan matching a live branch syncs state:draft — unpickable — until a
+// human approves it in the plan file; both the hold and the approval leave an
+// audit comment on the issue, and the mechanism is documented for authors.
+const commentsOn = (issue) => comments.filter((c) => c.issue === issue.number).map((c) => c.body);
+{
+  const flagged = [...issues.values()].find((i) => i.body.includes("plan-id: 0196-no-retroactive-plans"));
+  const approved = [...issues.values()].find((i) => i.body.includes("plan-id: 0198-approved-spike"));
+  assert.ok(names(flagged).includes("state:draft"), `0196 matches branch spike/no-retroactive-plans, so it must sync draft, got: ${names(flagged)}`);
+  assert.ok(names(approved).includes("state:ready"), `0198 carries retroactive_ok, so it must sync ready, got: ${names(approved)}`);
+  const [flagNote, ...extraFlagNotes] = commentsOn(flagged);
+  assert.equal(extraFlagNotes.length, 0, "a flagged issue carries exactly one audit comment");
+  assert.ok(flagNote.includes("ratchet:retroactive:0196-no-retroactive-plans:flagged"), "the audit comment is marked so re-syncs never duplicate it");
+  assert.ok(/state:draft/.test(flagNote) && /retroactive_ok/.test(flagNote), `the audit comment must state the hold and how to approve, got:\n${flagNote}`);
+  const [okNote, ...extraOkNotes] = commentsOn(approved);
+  assert.equal(extraOkNotes.length, 0, "an approved issue records the approval once");
+  assert.ok(/approved/i.test(okNote) && /spike landed first/.test(okNote), `the approval audit must quote the human's reason, got:\n${okNote}`);
+  assert.ok(
+    logs.some((l) => l.includes("WARNING") && l.includes("already exists")),
+    "the sync says loudly that a plan was held for matching existing work",
+  );
+}
+
+// #471 AC3: a plan matching no branch and no PR syncs exactly as before — ready
+// (asserted above), with no retroactive comment on its issue.
+assert.deepEqual(commentsOn(withSections), [], `an unmatched plan gets no retroactive comment, got: ${JSON.stringify(commentsOn(withSections))}`);
+
+// #471 AC1 + AC4: the planning-PR check compares each ADDED plan file against
+// open branches and PRs, and posts one comment naming the plan file, the
+// branch/PR it matched, and the text that matched — never a bare failure.
+{
+  const planTexts = {
+    "plan/0196-no-retroactive-plans.md": "---\ntitle: Flag retroactive plans\npriority: medium\n---\nBody.\n",
+    "plan/0197-fresh-idea.md": "---\ntitle: Add a wholly unrelated widget exporter\npriority: low\n---\nBody.\n",
+  };
+  const page1 = (path, rows) => (path.includes("page=1") ? rows : []);
+  const postedOnPr = [];
+  const checkGh = async (method, path, body) => {
+    if (path.startsWith("/repos/o/r/pulls/500/files")) return page1(path, [
+      { status: "added", filename: "plan/0196-no-retroactive-plans.md" },
+      { status: "added", filename: "plan/0197-fresh-idea.md" },
+      { status: "modified", filename: "plan/0100-old.md" },
+    ]);
+    if (path === "/repos/o/r/pulls/500") return { number: 500, head: { ref: "ratchet/planning" } };
+    if (path.startsWith("/repos/o/r/branches")) return page1(path, [{ name: "main" }, { name: "ratchet/planning" }, { name: "spike/no-retroactive-plans" }]);
+    if (path.startsWith("/repos/o/r/pulls?state=open")) return page1(path, [
+      { number: 229, title: "Spike: skip the plan step", body: "Prototype for plan/0196-no-retroactive-plans.md\nnothing else", head: { ref: "spike/quick-experiment" } },
+      { number: 500, title: "plan: flag retroactive plans", body: "the planning PR itself", head: { ref: "ratchet/planning" } },
+    ]);
+    if (method === "GET" && path.startsWith("/repos/o/r/issues/500/comments")) return [];
+    if (method === "POST" && path === "/repos/o/r/issues/500/comments") { postedOnPr.push(body.body); return { id: 1 }; }
+    throw new Error(`unexpected request: ${method} ${path}`);
+  };
+
+  const check = await runCheck({ gh: checkGh, repo: "o/r", prNumber: 500, readPlan: async (f) => planTexts[f] });
+  const flaggedFiles = check.flags.map((f) => f.file);
+  assert.deepEqual(flaggedFiles, ["plan/0196-no-retroactive-plans.md"], `only the plan matching existing work is flagged, got: ${flaggedFiles}`);
+  const matched = check.flags[0].matches.map((m) => m.label);
+  assert.ok(matched.some((l) => l.includes("spike/no-retroactive-plans")) && matched.some((l) => l.includes("PR #229")), `the matching branch and PR must both be named, got: ${matched}`);
+  assert.ok(!matched.some((l) => l.includes("PR #500")), `the planning PR must never flag its own plans, got: ${matched}`);
+
+  await upsertComment(checkGh, "o/r", 500, check.comment, { createIfMissing: check.flags.length > 0 });
+  assert.equal(postedOnPr.length, 1, `the check posts exactly one comment, got ${postedOnPr.length}`);
+  const report = postedOnPr[0];
+  assert.ok(report.includes(COMMENT_MARKER) && report.includes("plan/0196-no-retroactive-plans.md"), "the comment is marked and names the flagged plan file");
+  assert.ok(!report.includes("0197-fresh-idea"), "the comment never names an unflagged plan");
+  // AC4: every line names the field it matched on and quotes the matching text.
+  assert.match(report, /plan slug `0196-no-retroactive-plans` matches the branch name of branch `spike\/no-retroactive-plans`/, `each match names what matched and where, got:\n${report}`);
+  assert.ok(report.includes("Prototype for plan/0196-no-retroactive-plans.md"), "a PR-body match quotes the matching line");
+  assert.ok(report.includes("state:draft") && report.includes("retroactive_ok"), "the report states the consequence and how a human approves");
+}
 
 // #56 AC1: a sync that skipped any plan file for invalid frontmatter finishes
 // as a visible failure, not a green run.
