@@ -22,6 +22,7 @@ import {
   mkdtempSync,
   mkdirSync,
   writeFileSync,
+  readFileSync,
   rmSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -163,4 +164,109 @@ test("real repo: ratchet-next and ratchet-status carry all owned detail (CLI exi
   assert.match(cli.stdout, /all owned detail present/);
 });
 
-console.log(`\nskill-detail: ${pass} tests passed.`);
+// --- Issue #502: the skills stop claiming human review is the only merge gate.
+// Plan 0201 made the merge tiered and 0209 put that in the kernel; these four
+// skills still taught the pre-0201 rule as fact. Each block below is named
+// after the acceptance criterion it covers and reads the canonical
+// `.agents/skills/**` source (the mirrors are checked by skill-parity).
+
+// Read a canonical SKILL.md, whitespace-normalised so a wrapped phrase matches.
+const skillText = (skill) =>
+  readFileSync(
+    fileURLToPath(new URL(`../.agents/skills/${skill}/SKILL.md`, import.meta.url)),
+    "utf8",
+  ).replace(/\s+/g, " ");
+
+// Slice a markdown section: from its heading to the next heading of the same or
+// a shallower level (or the end of the document).
+const section = (doc, heading, stopRe) => {
+  const start = doc.indexOf(heading);
+  assert.ok(start >= 0, `skill must contain the section heading: ${heading}`);
+  const rest = doc.slice(start + heading.length);
+  const end = rest.search(stopRe);
+  return (heading + (end === -1 ? rest : rest.slice(0, end))).replace(/\s+/g, " ");
+};
+
+// --- Test: "ratchet-next separates the agent ban from the merge gate"
+{
+  const next = readFileSync(
+    fileURLToPath(new URL("../.agents/skills/ratchet-next/SKILL.md", import.meta.url)),
+    "utf8",
+  );
+  const rules = section(next, "## Hard rules", /\n## /);
+  // The ban on the agent is unchanged…
+  assert.match(rules, /You never merge or approve/, "ratchet-next must still forbid the agent merging or approving");
+  // …but it no longer claims the human's merge is the only gate.
+  assert.doesNotMatch(rules, /only gate/i, "ratchet-next must not claim the human's merge/review is the only gate");
+  assert.match(rules, /`auto-merge`/, "ratchet-next must name the auto-merge workflow as the normal-risk merger");
+  assert.match(rules, /no human in the path/i, "ratchet-next must say a normal-risk PR merges with no human in the path");
+  assert.match(rules, /`risk:high`/, "ratchet-next must say which PRs still wait for a human");
+  // And the advance path keys off the merge event, not off a human acting.
+  assert.match(rules, /merge event/i, "ratchet-next must trigger its advance path on the merge event");
+  assert.doesNotMatch(rules, /next trigger is the next human decision/i, "ratchet-next must not make the next trigger a human decision");
+}
+
+// --- Test: "the herd rules keep the supervisor ban without the only-gate claim"
+{
+  const herd = skillText("ratchet-herd");
+  // The supervisor is still forbidden every write action, in both places.
+  assert.match(herd, /supervisor never merges, approves, closes, or labels anything/i, "the herd skill must still say the supervisor never merges, approves, closes, or labels");
+  assert.match(herd, /Never merge, approve, close, or label/, "the herd hard rules must still forbid merging, approving, closing, and labelling");
+  // Without asserting that a human is the only gate.
+  assert.doesNotMatch(herd, /only gate/i, "the herd skill must not claim human review is the only gate");
+  assert.match(herd, /`auto-merge`/, "the herd skill must name what does merge a normal-risk PR");
+}
+
+// --- Test: "ratchet-status does not report auto-mergeable work as human-blocked"
+{
+  const status = skillText("ratchet-status");
+  // The old blanket diagnosis is gone.
+  assert.doesNotMatch(status, /`state:in-review` \(waiting on a human/i, "ratchet-status must not diagnose every in-review issue as waiting on a human");
+  // A normal-risk in-review PR is reported as flowing, not blocked.
+  assert.match(status, /`auto-merge`/, "ratchet-status must name the auto-merge sweep that takes normal-risk work");
+  assert.match(status, /flowing, not blocked/i, "ratchet-status must call a normal-risk in-review PR flowing, not blocked");
+  assert.match(status, /never as human-blocked/i, "ratchet-status must forbid reporting auto-mergeable work as human-blocked");
+  // And the genuinely human-blocked case is still identified.
+  assert.match(status, /`risk:high` PR \*\*is\*\* waiting on a human/i, "ratchet-status must still identify a risk:high PR as waiting on a human");
+  assert.match(status, /`CHANGES_REQUESTED`/, "ratchet-status must treat a changes-requested verdict separately");
+}
+
+// --- Test: "ratchet-init explains protection without the human-only-way claim"
+{
+  const init = skillText("ratchet-init");
+  assert.doesNotMatch(init, /the human's merge is the only way/i, "ratchet-init must not justify protection as making the human's merge the only way onto main");
+  assert.doesNotMatch(init, /the human's merge stays the gate/i, "ratchet-init must not describe the required-PR rule as keeping the human's merge the gate");
+  // Protection is explained by what it actually does.
+  assert.match(init, /direct pushes/i, "ratchet-init must explain protection as blocking direct pushes to main");
+  assert.match(init, /`gates` and `size`/, "ratchet-init must name the gates and size checks protection requires");
+  assert.match(init, /automated and human merges alike/i, "ratchet-init must say the requirement binds automated and human merges alike");
+}
+
+// --- Test: "the mirrors match the canonical skill sources"
+{
+  const parity = fileURLToPath(new URL("./skill-parity.mjs", import.meta.url));
+  const cli = spawnSync(process.execPath, [parity], {
+    encoding: "utf8",
+    cwd: fileURLToPath(new URL("..", import.meta.url)),
+  });
+  assert.equal(cli.status, 0, `skill-parity must pass — run ./setup.sh to regenerate the mirrors:\n${cli.stdout}${cli.stderr}`);
+}
+
+// --- Test: "every criterion has exactly one test named after it"
+{
+  const self = readFileSync(fileURLToPath(import.meta.url), "utf8");
+  const names = [
+    "ratchet-next separates the agent ban from the merge gate",
+    "the herd rules keep the supervisor ban without the only-gate claim",
+    "ratchet-status does not report auto-mergeable work as human-blocked",
+    "ratchet-init explains protection without the human-only-way claim",
+    "the mirrors match the canonical skill sources",
+    "every criterion has exactly one test named after it",
+  ];
+  for (const name of names) {
+    const hits = (self.match(new RegExp(`--- Test: "${name.replace(/[|\\{}()[\]^$+*?.]/g, "\\$&")}"`, "g")) || []).length;
+    assert.equal(hits, 1, `expected exactly one test block named "${name}", found ${hits}`);
+  }
+}
+
+console.log(`\nskill-detail: ${pass} tests passed + 6 tiered-merge criteria.`);

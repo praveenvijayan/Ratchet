@@ -82,5 +82,11 @@ Then:
 - Resume only work you can prove is yours — this conversation's claim or an
   explicit human handoff, verified against `.ratchet-owner`. Foreign
   in-progress work is untouchable.
-- You never merge or approve — the human's merge/review is the only gate.
-- One issue at a time, then stop. The next trigger is the next human decision.
+- You never merge or approve — but the merge is not a human's alone. A PR
+  **without** `risk:high` is merged by the `auto-merge` workflow once its checks
+  are green and its latest recorded review verdict is `APPROVED`, with no human
+  in the path; only a `risk:high` PR also waits for a human's `APPROVED` review
+  and a 15-minute hold. So advance on the **merge event**, not on a human
+  acting — a PR that merged with nobody touching it is normal, not an anomaly.
+- One issue at a time, then stop. The next trigger is the next merge or review
+  decision, whether the system or a human made it.

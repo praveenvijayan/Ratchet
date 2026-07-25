@@ -9,7 +9,8 @@ allowed-tools: Read, Edit, Write, Glob, Grep, Bash(ls:*), Bash(gh:*)
 
 Jobs: create the state machine's labels, make `AGENTS.md` match this project's
 stack, ensure the PAT the issue flow depends on is in place, and offer to
-protect `main` so the human's merge is the only way onto it.
+protect `main` so direct pushes are blocked and every merge arrives through a
+checked PR.
 
 ## Preflight
 
@@ -153,8 +154,11 @@ creating a token and setting a secret are credential actions the user owns):
 
 Hard Rule 6 ("never merge, never push to `main`") is prompt obedience until a
 GitHub mechanism enforces it — an agent with push access can violate every rule
-mechanically. This step offers to protect `main` so the human's merge is the
-only way in. It is the **one** place `/ratchet-init` may change repo settings,
+mechanically. This step offers to protect `main` so **direct pushes to it are
+blocked**: every change arrives through a pull request whose `gates` and `size`
+checks passed, and that requirement binds automated and human merges alike — the
+`auto-merge` workflow cannot bypass a required check any more than a person can.
+It is the **one** place `/ratchet-init` may change repo settings,
 and only after the user explicitly says yes.
 
 1. **Read the current status first — always, and record it.** The Step 6 report
@@ -177,7 +181,8 @@ and only after the user explicitly says yes.
    Apply **only** on an explicit yes. The protection to offer:
    - **Require a pull request before merging** — blocks direct pushes to `main`
      (`required_pull_request_reviews` with `required_approving_review_count: 0`;
-     the human's merge stays the gate, no forced approval ceremony).
+     no forced approval ceremony — the recorded review verdict, not this
+     protection rule, is what `auto-merge` waits on).
    - **Require the `gates` and `size` status checks** to pass. GitHub reports the
      `.github/workflows/pr-gates.yml` jobs under the context names **`gates`**
      and **`size`** (the job ids) — those exact strings are what must be
