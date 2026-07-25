@@ -152,6 +152,21 @@ Body of 0094.
 - [ ] no third issue is ever created for this slug
 `);
 
+// #467 AC1 fixture: a plan declaring the size budget under the cap compiles
+// normally — the key is part of the documented frontmatter surface, so it must
+// never draw an unknown-frontmatter-key warning.
+await writeFile(join(planDir, "0096-with-estimate.md"), `---
+title: Declares a size budget under the cap
+priority: medium
+blocked_by: []
+estimated_lines: 120
+---
+Body of 0096.
+
+## Acceptance criteria
+- [ ] a declared estimated_lines is accepted
+`);
+
 // --- in-memory GitHub API ----------------------------------------------
 const label = (name) => ({ name });
 const issues = new Map([
@@ -499,5 +514,87 @@ try {
 }
 assert.equal(ac3Exit, 0, `a second sync run must create no issues; got exit ${ac3Exit}: ${ac3Out}`);
 assert.match(ac3Out, /AC3-OK/, "two-run idempotency check must reach its success marker");
+
+// --- #467: the plan-time size budget ------------------------------------
+
+// AC1: a plan may declare `estimated_lines`; the key is understood, so the file
+// compiles as usual and draws no unknown-frontmatter-key warning.
+const withEstimate = [...issues.values()].find((i) => (i.body || "").includes("plan-id: 0096-with-estimate"));
+assert.ok(withEstimate, "0096-with-estimate issue was created");
+assert.ok(names(withEstimate).includes("state:ready"), `0096 should be ready, got: ${names(withEstimate)}`);
+assert.ok(
+  !logs.some((l) => l.includes("unknown frontmatter key") && l.includes("estimated_lines")),
+  "a declared estimated_lines must not be reported as an unknown frontmatter key",
+);
+
+// AC4: a plan without `estimated_lines` still syncs, but warns naming the file.
+assert.ok(
+  logs.some((l) => l.includes("WARNING") && l.includes("0063-new-blocker.md") && l.includes("estimated_lines")),
+  "a plan missing estimated_lines must warn, naming the file",
+);
+assert.ok(names(created).includes("state:ready"), `a grandfathered plan must still sync, got: ${names(created)}`);
+
+// Runs plan-sync against a throwaway plan dir holding a single file, and returns
+// the exit status plus combined output. The size-budget gate runs before any
+// network call, so a dummy token/repo and no fetch mock are enough — and any
+// mutation attempt would surface as a fetch error rather than a silent pass.
+const runSyncOn = async (prefix, name, contents) => {
+  const dir = await mkdtemp(join(tmpdir(), prefix));
+  await writeFile(join(dir, name), contents);
+  try {
+    execFileSync(process.execPath, [planSync], {
+      cwd: dir, // avoid loading the repo's .env; the gate makes no network call
+      env: { GITHUB_TOKEN: "test-token", GITHUB_REPOSITORY: "o/r", PLAN_DIR: dir, PATH: process.env.PATH },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    return { exit: 0, out: "" };
+  } catch (e) {
+    return { exit: e.status ?? 1, out: `${e.stderr || ""}${e.stdout || ""}` };
+  }
+};
+
+// AC2: an estimate over the 400-line cap aborts the sync non-zero before any
+// mutation, naming the file and the value and telling the author to split.
+const oversize = await runSyncOn("plan-sync-oversize-", "0097-too-big.md", `---
+title: Estimates more than the cap allows
+priority: medium
+blocked_by: []
+estimated_lines: 401
+---
+Body of 0097.
+
+## Acceptance criteria
+- [ ] never created
+`);
+assert.ok(oversize.exit !== 0, "an over-cap estimated_lines must exit non-zero");
+assert.ok(/0097-too-big/.test(oversize.out) && /401/.test(oversize.out), `the over-cap error must name the file and the value, got: ${oversize.out}`);
+assert.ok(/split/i.test(oversize.out), `the over-cap error must instruct the author to split the plan, got: ${oversize.out}`);
+assert.ok(/nothing was changed/i.test(oversize.out), `the over-cap error must state that nothing was changed, got: ${oversize.out}`);
+
+// AC3: a non-integer or negative estimate aborts the same way, naming the file
+// and the invalid value.
+for (const [value, kind] of [["-50", "negative"], ["about 200", "non-integer"]]) {
+  const bad = await runSyncOn("plan-sync-badsize-", "0098-bad-estimate.md", `---
+title: Declares an unusable size budget
+priority: medium
+blocked_by: []
+estimated_lines: ${value}
+---
+Body of 0098.
+
+## Acceptance criteria
+- [ ] never created
+`);
+  assert.ok(bad.exit !== 0, `a ${kind} estimated_lines must exit non-zero`);
+  assert.ok(
+    bad.out.includes("0098-bad-estimate") && bad.out.includes(value),
+    `a ${kind} estimated_lines error must name the file and the invalid value, got: ${bad.out}`,
+  );
+}
+
+// AC5 (plan/README.md documents the key) is asserted in
+// plan-authoring-rules.test.mjs: this suite writes NNNN-*.md fixtures, and a
+// test file may not both name plan slugs and resolve the repo's plan/ dir (the
+// #191 guard in docs-refresh.test.mjs).
 
 console.log("PASS plan-sync.test.mjs");

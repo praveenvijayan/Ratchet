@@ -24,7 +24,11 @@ const EDITABLE_STATES = new Set(["state:ready", "state:draft"]);
 const VALID_PRIORITIES = new Set(["high", "medium", "low"]);
 // The documented frontmatter surface (see plan/README.md). Anything else is a
 // typo or an unsupported field: warned about, never silently honoured.
-const KNOWN_KEYS = new Set(["title", "priority", "labels", "blocked_by"]);
+const KNOWN_KEYS = new Set(["title", "priority", "labels", "blocked_by", "estimated_lines"]);
+// The plan-time size budget. The PR size gate measures the same number after the
+// code exists, which only ever produces negotiation and overrides; refusing an
+// over-cap estimate here forces the split while splitting is still free.
+const MAX_ESTIMATED_LINES = 400;
 
 // --- minimal frontmatter parser for the documented format only ---
 function parsePlan(text) {
@@ -81,6 +85,23 @@ function usableLabels(file, labels = []) {
     }
   }
   return kept;
+}
+
+// `estimated_lines` is the author's estimate of hand-written changed lines for
+// the plan (generated files excluded). Returns a human-readable reason string
+// when the declared value is unusable or over the cap, or null when it is fine.
+// Anything that is not a plain non-negative integer is rejected rather than
+// coerced: a budget that silently reads as NaN or 0 is worse than no budget.
+function sizeBudgetReason(raw) {
+  const value = String(raw).trim();
+  if (!/^\d+$/.test(value)) {
+    return `invalid estimated_lines '${value}' — must be a non-negative whole number`;
+  }
+  const lines = Number(value);
+  if (lines > MAX_ESTIMATED_LINES) {
+    return `estimated_lines ${lines} is over the ${MAX_ESTIMATED_LINES}-line cap`;
+  }
+  return null;
 }
 
 // Detect blocked_by cycles across live plan files and marker-resolved issues.
@@ -144,6 +165,7 @@ async function main() {
   // must leave every issue untouched.
   const plans = new Map();
   const invalidPlans = [];
+  const oversizePlans = [];
   for (const file of files) {
     const slug = file.replace(/\.md$/, "");
     const parsed = parsePlan(await readFile(join(PLAN_DIR, file), "utf8"));
@@ -156,6 +178,18 @@ async function main() {
     if (!VALID_PRIORITIES.has(parsed.fm.priority)) {
       invalidPlans.push(`${file} (invalid priority '${parsed.fm.priority}', must be high, medium, or low)`);
       continue;
+    }
+    // The size budget is a hard gate for the same reason the PR size cap is:
+    // an over-cap plan has to become several plans, and that decision is only
+    // cheap before any code exists. Absence is grandfathered with a warning.
+    if (parsed.fm.estimated_lines === undefined) {
+      console.log(`WARNING: ${file} is missing 'estimated_lines' (the plan-time size budget) — grandfathered, but new plans must declare it`);
+    } else {
+      const reason = sizeBudgetReason(parsed.fm.estimated_lines);
+      if (reason) {
+        oversizePlans.push(`${file} (${reason})`);
+        continue;
+      }
     }
     // Unknown keys and a missing blocked_by are warnings, not skips: the file
     // is still compiled. Warn once per unknown key, naming file and key.
@@ -177,6 +211,16 @@ async function main() {
     console.error("ERROR: invalid plan frontmatter skipped one or more files. Nothing was changed.");
     console.error("Fix these plan files, then re-sync:");
     for (const reason of invalidPlans) console.error(`  • ${reason}`);
+    process.exit(1);
+  }
+
+  // Size-budget gate — before any network call, so nothing on GitHub changes.
+  if (oversizePlans.length) {
+    console.error(`ERROR: plan size budget rejected one or more files. Nothing was changed.`);
+    console.error(`A plan may estimate at most ${MAX_ESTIMATED_LINES} hand-written changed lines`);
+    console.error(`(generated files excluded). Split the plan into smaller plan files — one`);
+    console.error(`issue each — before writing any code, then re-sync:`);
+    for (const reason of oversizePlans) console.error(`  • ${reason}`);
     process.exit(1);
   }
 
