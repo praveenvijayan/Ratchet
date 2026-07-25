@@ -110,7 +110,8 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 | 4z20  | test: framework-plan-check      | `node scripts/framework-plan-check.test.mjs`      | exit 0 |
 | 4z21  | test: red-main-alert            | `node scripts/red-main-alert.test.mjs`            | exit 0 |
 | 4z22  | test: debt-scan                 | `node scripts/debt-scan.test.mjs`                 | exit 0 |
-| 4z23  | test: gates-hermetic            | `node scripts/gates-hermetic.test.mjs`            | exit 0 |
+| 4z23  | test: auto-merge                | `node scripts/auto-merge.test.mjs`                | exit 0 |
+| 4z25  | test: gates-hermetic            | `node scripts/gates-hermetic.test.mjs`            | exit 0 |
 | 4r    | test-coverage                   | `node scripts/gates-coverage.mjs`                 | exit 0 |
 | 4z    | skill-parity                    | `node scripts/skill-parity.mjs`                   | exit 0 |
 | 4z10  | skill-detail                    | `node scripts/skill-detail.mjs`                   | exit 0 |
