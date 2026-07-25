@@ -219,6 +219,8 @@ scripts/
   gates-hermetic.test.mjs       Regression test for the agent-CLI-free gate run
   map-onboarding.test.mjs       Guard: MAP.md exists, is current, tolerates absence
   gates-table.mjs               Shared parser for the GATES.md markdown table
+  negative-assertions.mjs       Guard: absence proofs use anchored evidence, not bare needles
+  negative-assertions.test.mjs  Regression test for the negative-assertion guard
   herd.mjs                      ratchet-herd config loader, validator, init
   herd.test.mjs                 Regression test for herd config
   herd-adapters.mjs             Leaf module: adapter resolution (resolveAdapter/substitute/extractUsage), imports nothing from herd.mjs

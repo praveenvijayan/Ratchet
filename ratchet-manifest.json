@@ -190,6 +190,11 @@
       "profile": "core"
     },
     {
+      "path": "scripts/negative-assertions.mjs",
+      "class": "framework",
+      "profile": "core"
+    },
+    {
       "path": "scripts/verify-issue-body.mjs",
       "class": "framework",
       "profile": "core"
@@ -488,6 +493,10 @@
     },
     {
       "path": "scripts/gates-coverage.test.mjs",
+      "class": "excluded"
+    },
+    {
+      "path": "scripts/negative-assertions.test.mjs",
       "class": "excluded"
     },
     {

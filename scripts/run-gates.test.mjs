@@ -24,6 +24,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdtemp, writeFile, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -102,6 +103,34 @@ async function runGatesWithBase(baseRows, headRows) {
 // markdown table cell and runs identically on macOS and Linux CI.
 const echo = (token) => `\`node -e "console.log('${token}')"\``;
 const fail = "`node -e \"process.exit(3)\"`";
+
+// A gate command whose ONLY observable effect is a file it writes (#498). The
+// runner never creates that path, so "the probe is absent" proves the command
+// never ran — evidence a stray `42` in the child's own stdout/stderr (a mkdtemp
+// path, a `::error::` annotation) can neither fake nor destroy.
+let probes = 0;
+const probePath = () => join(dir, `probe-${probes++}`);
+const probeCommand = (probe) =>
+  `node -e "require('fs').writeFileSync('${probe}','ran')"`;
+
+// A fixture runner that deliberately commits the bug #49 AC2b forbids: it
+// truncates an ambiguous row at the stray pipe and executes the prefix. It
+// exists so the AC2b assertion can be shown to catch that regression without
+// editing run-gates.mjs, whose correct behaviour would hide the check.
+const TRUNCATING_RUNNER = join(dir, "truncating-runner.mjs");
+await writeFile(
+  TRUNCATING_RUNNER,
+  [
+    'import { readFileSync } from "node:fs";',
+    'import { spawnSync } from "node:child_process";',
+    'const text = readFileSync(process.env.GATES_FILE, "utf8");',
+    'const row = text.split("\\n").find((l) => /^\\|\\s*1\\s*\\|/.test(l));',
+    "const command = row.split(\"|\")[3].trim(); // the truncated prefix",
+    'const r = spawnSync(command, { shell: true, encoding: "utf8" });',
+    "process.exit(r.status ?? 1);",
+    "",
+  ].join("\n"),
+);
 
 // A gate command that reports what gate config it actually inherited. Asserting
 // on this — not on run-gates.mjs's source text — is what proves a child was
@@ -221,16 +250,39 @@ const CHILD_SAW_NOTHING = "CHILD_SAW BASE=[] GATES=[]";
 
 // --- #49 AC2b: a stray unescaped pipe changes the column count; rather than
 // truncate the command to its prefix and run that, the run fails naming the row.
-// The prefix computes `6*7`, so its output (`42`) differs from its source text
-// (`6*7`, which the row echo contains): a missing `42` proves it never ran ----
+// The prefix's only observable effect is the probe file it writes, so an absent
+// probe — not an absent substring of the child's whole output — proves it never
+// ran (#498) ------------------------------------------------------------------
 {
-  const command = "node -e \"console.log(6*7)\" | tee log";
+  const probe = probePath();
+  const command = `${probeCommand(probe)} | tee log`;
   const { status, out } = await runGates([
     { order: 1, gate: "test", command },
   ]);
   assert.notEqual(status, 0, "a row with an ambiguous column count must fail the run");
-  assert.ok(!out.includes("42"), "the truncated command prefix must never be executed");
+  assert.ok(!existsSync(probe), "the truncated command prefix must never be executed");
   assert.ok(/column/i.test(out), "the failure must explain the row's column count is ambiguous");
+}
+
+// --- #498 AC1: that assertion must be able to fail. A fixture runner (never
+// run-gates.mjs itself) truncates the same ambiguous row and executes the
+// prefix; the probe then exists, so the AC2b assertion catches the regression --
+{
+  const probe = probePath();
+  const gatesFile = join(dir, "GATES-truncating.md");
+  await writeFile(
+    gatesFile,
+    gatesTable([{ order: 1, gate: "test", command: `${probeCommand(probe)} | tee log` }]),
+  );
+  const res = spawnSync("node", [TRUNCATING_RUNNER], {
+    encoding: "utf8",
+    env: { ...process.env, GATES_FILE: gatesFile },
+  });
+  assert.equal(res.status, 0, `the fixture runner must execute the prefix, got: ${res.stderr}`);
+  assert.ok(
+    existsSync(probe),
+    "a runner that executes the truncated prefix leaves the probe — so the AC2b assertion catches it",
+  );
 }
 
 // --- #88 AC1: an unrelated table elsewhere in GATES.md is documentation, not
@@ -252,18 +304,19 @@ const CHILD_SAW_NOTHING = "CHILD_SAW BASE=[] GATES=[]";
 // --- #88 AC2: malformed rows inside the gates table still fail loudly and
 // name the bad row, rather than being mistaken for unrelated documentation ----
 {
+  const probe = probePath();
   const { status, out } = await runGatesText([
     "# Gates",
     "",
     "| Order | Gate | Command | Pass condition |",
     "|-------|------|---------|----------------|",
-    "| 1 | test | node -e \"console.log(6*7)\" | tee log | — |",
+    `| 1 | test | ${probeCommand(probe)} | tee log | — |`,
     "",
   ].join("\n"));
   assert.notEqual(status, 0, "a malformed row inside the gates table must fail the run");
   assert.ok(/line 5/i.test(out), "the failure must name the malformed row's line");
   assert.ok(out.includes("tee log"), "the failure must include the malformed row text");
-  assert.ok(!out.includes("42"), "the truncated command prefix must never be executed");
+  assert.ok(!existsSync(probe), "the truncated command prefix must never be executed");
 }
 
 // --- #84 AC1: gates are judged by the base-branch GATES.md, not the PR's copy.

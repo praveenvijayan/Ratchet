@@ -113,6 +113,7 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 | 4z23  | test: auto-merge                | `node scripts/auto-merge.test.mjs`                | exit 0 |
 | 4z24  | test: weekly-failure-review     | `node scripts/weekly-failure-review.test.mjs`     | exit 0 |
 | 4z25  | test: gates-hermetic            | `node scripts/gates-hermetic.test.mjs`            | exit 0 |
+| 4z26  | test: negative-assertions       | `node scripts/negative-assertions.test.mjs`       | exit 0 |
 | 4r    | test-coverage                   | `node scripts/gates-coverage.mjs`                 | exit 0 |
 | 4z    | skill-parity                    | `node scripts/skill-parity.mjs`                   | exit 0 |
 | 4z10  | skill-detail                    | `node scripts/skill-detail.mjs`                   | exit 0 |
@@ -120,6 +121,7 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 | 4z6   | manifest-check                  | `node scripts/manifest-check.mjs`                 | exit 0 |
 | 4z17  | protocol-coverage               | `node scripts/protocol-coverage.mjs`              | exit 0 |
 | 4z24  | gates-hermetic                  | `node scripts/gates-hermetic.mjs`                 | exit 0 |
+| 4z27  | negative-assertions             | `node scripts/negative-assertions.mjs`            | exit 0 |
 | 5     | build       | TODO: build command               | —              |
 | 6     | audit       | TODO: audit command               | —              |
 | 7     | secret-scan | TODO: secret-scan command         | —              |
