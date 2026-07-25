@@ -62,6 +62,12 @@ Rules:
   2a creates anything — so "nothing was changed" holds either way. A post-network
   gate is tested by pre-importing a `fetch` stub into the child (`--import`) that
   throws on any non-GET (#470).
+- `run-gates.mjs` owns the gate-config trust boundary: it resolves
+  `BASE_GATES_FILE || GATES_FILE` for itself, then strips **both** from the
+  environment of every gate command it spawns, so no suite can inherit CI's
+  config and have it outrank its own fixture. Suites therefore need no per-suite
+  strip; the trade is that `gates-hermetic.mjs`, being a gate row, reads the
+  working-tree `GATES.md` (#494, replacing PR #492's hotfix).
 
 ## Gotchas & fragile areas
 - (e.g.) Payments module has no test harness; integration tests hit the sandbox API (#88).

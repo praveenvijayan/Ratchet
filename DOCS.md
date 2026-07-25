@@ -529,6 +529,16 @@ an honest PR.
   change is deferred to the human reviewer — flagged, never silently honored and
   never silently ignored. Review the `GATES.md` diff deliberately: it changes how
   *future* PRs are judged.
+- **The boundary is enforced at the spawn.** `run-gates.mjs` owns the gate-config trust boundary:
+  it resolves the authoritative config itself, then removes `BASE_GATES_FILE` and
+  `GATES_FILE` from the environment of **every gate command it spawns**. So
+  no gate suite may read gate config from the ambient environment — a suite that
+  spawns a runner or a check against its own fixture config gets that fixture,
+  never CI's. Before this, each gate command inherited CI's config and it
+  outranked the fixture, so suites inverted or recursed **in CI only**, and the
+  fix had to be remembered per suite (PR #492, #494). One consequence worth
+  knowing: `scripts/gates-hermetic.mjs` runs as a gate row, so it too now reads
+  the working-tree `GATES.md` rather than the base copy.
 - **Local runs are unaffected.** `BASE_GATES_FILE` is set only by CI. The local
   verify step (§8, AGENTS.md step 4) runs `run-gates.mjs` against the working
   tree's `GATES.md` exactly as before — there is no base/head split on a

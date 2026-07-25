@@ -387,4 +387,20 @@ const memory = read("memory/MEMORY.md");
   assert.ok(docs.includes(REQUIRES_MARKER), "DOCS must show the marker a suite uses to declare a host binary");
 }
 
-console.log("PASS docs-refresh.test.mjs (6 #60 criteria + 4 #191 criteria + 4 #91 criteria + 3 #233 criteria + 2 #268 criteria + 7 #347 criteria + 1 #421 criterion + 1 #497 criterion)");
+// #494 Criterion 4: DOCS.md states that run-gates.mjs owns the gate-config trust
+// boundary and that no gate suite may read gate config from the ambient
+// environment — the rule a future suite has to be able to look up.
+{
+  assert.match(
+    docs,
+    /`run-gates\.mjs` owns the gate-config trust boundary/i,
+    "DOCS must state that run-gates.mjs owns the gate-config trust boundary",
+  );
+  assert.match(
+    docs,
+    /no gate suite may read gate config from the ambient environment/i,
+    "DOCS must state that no gate suite may read gate config from the ambient environment",
+  );
+}
+
+console.log("PASS docs-refresh.test.mjs (6 #60 criteria + 4 #191 criteria + 4 #91 criteria + 3 #233 criteria + 2 #268 criteria + 7 #347 criteria + 1 #421 criterion + 1 #497 criterion + 1 #494 criterion)");

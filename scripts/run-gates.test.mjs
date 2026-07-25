@@ -18,6 +18,9 @@
 // gate keeps the normal green success presentation (AC2).
 // Plus #88: unrelated extra tables in GATES.md do not abort gate parsing (AC1);
 // malformed rows inside the gates table still fail loudly naming the row (AC2).
+// Plus #494: a spawned gate command inherits neither gate-config variable (C1);
+// a CI-like run uses its own fixture table and terminates (C2); the per-suite
+// strips PR #492 added are gone and both affected suites still pass (C3).
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -32,13 +35,11 @@ import { fileURLToPath } from "node:url";
 const RUNNER = fileURLToPath(new URL("./run-gates.mjs", import.meta.url));
 const dir = await mkdtemp(join(tmpdir(), "run-gates-test-"));
 
-// The fixture environment for a spawned runner. BASE_GATES_FILE is stripped:
-// the pr-gates job sets it on the very step that runs this suite, every child
-// inherits it, and run-gates.mjs prefers it over GATES_FILE (#84). Left in, a
-// spawned runner reads the REAL gate table instead of the fixture — including
-// its own `test: run-gates` row — and recurses until the job times out. The
-// one test that genuinely needs it sets it explicitly (runGatesWithBase).
-const { BASE_GATES_FILE: _base, ...cleanEnv } = process.env;
+// The fixture environment for a spawned runner is simply this process's own —
+// no per-suite scrubbing. run-gates.mjs strips BASE_GATES_FILE and GATES_FILE
+// from every gate command it spawns (#494), so when CI runs this suite as a gate
+// it never sees them; the strip PR #492 added here is no longer load-bearing and
+// is gone. The tests that need either variable set it explicitly.
 
 // Write a GATES.md fixture and run the runner against it. GITHUB_STEP_SUMMARY
 // points at a per-invocation file so we can assert on the check summary.
@@ -50,7 +51,7 @@ async function runGates(rows) {
   await writeFile(gatesFile, gatesTable(rows));
   const res = spawnSync("node", [RUNNER], {
     encoding: "utf8",
-    env: { ...cleanEnv, GATES_FILE: gatesFile, GITHUB_STEP_SUMMARY: summaryFile },
+    env: { ...process.env, GATES_FILE: gatesFile, GITHUB_STEP_SUMMARY: summaryFile },
   });
   const summary = await readFile(summaryFile, "utf8").catch(() => "");
   return { status: res.status, out: (res.stdout || "") + (res.stderr || ""), summary };
@@ -63,7 +64,7 @@ async function runGatesText(text) {
   await writeFile(gatesFile, text);
   const res = spawnSync("node", [RUNNER], {
     encoding: "utf8",
-    env: { ...cleanEnv, GATES_FILE: gatesFile, GITHUB_STEP_SUMMARY: summaryFile },
+    env: { ...process.env, GATES_FILE: gatesFile, GITHUB_STEP_SUMMARY: summaryFile },
   });
   const summary = await readFile(summaryFile, "utf8").catch(() => "");
   return { status: res.status, out: (res.stdout || "") + (res.stderr || ""), summary };
@@ -92,7 +93,7 @@ async function runGatesWithBase(baseRows, headRows) {
   await writeFile(headFile, gatesTable(headRows));
   const res = spawnSync("node", [RUNNER], {
     encoding: "utf8",
-    env: { ...cleanEnv, GATES_FILE: headFile, BASE_GATES_FILE: baseFile, GITHUB_STEP_SUMMARY: summaryFile },
+    env: { ...process.env, GATES_FILE: headFile, BASE_GATES_FILE: baseFile, GITHUB_STEP_SUMMARY: summaryFile },
   });
   const summary = await readFile(summaryFile, "utf8").catch(() => "");
   return { status: res.status, out: (res.stdout || "") + (res.stderr || ""), summary };
@@ -130,6 +131,13 @@ await writeFile(
     "",
   ].join("\n"),
 );
+
+// A gate command that reports what gate config it actually inherited. Asserting
+// on this — not on run-gates.mjs's source text — is what proves a child was
+// cleaned: a source grep only proves a variable name is written somewhere.
+const envProbe =
+  "`node -e \"console.log('CHILD_SAW BASE=[' + (process.env.BASE_GATES_FILE || '') + '] GATES=[' + (process.env.GATES_FILE || '') + ']')\"`";
+const CHILD_SAW_NOTHING = "CHILD_SAW BASE=[] GATES=[]";
 
 // --- Criterion 1: runs in order, fail-fast ------------------------------
 {
@@ -268,7 +276,7 @@ await writeFile(
   );
   const res = spawnSync("node", [TRUNCATING_RUNNER], {
     encoding: "utf8",
-    env: { ...cleanEnv, GATES_FILE: gatesFile },
+    env: { ...process.env, GATES_FILE: gatesFile },
   });
   assert.equal(res.status, 0, `the fixture runner must execute the prefix, got: ${res.stderr}`);
   assert.ok(
@@ -359,4 +367,109 @@ await writeFile(
   assert.ok(/after (it )?merge/i.test(section), "DOCS.md must state a config change takes effect only after merge");
 }
 
-console.log("PASS run-gates.test.mjs (14 criteria, 45 assertions)");
+// --- #494 Criterion 1: every gate command run-gates spawns sees neither
+// BASE_GATES_FILE nor GATES_FILE, while the runner itself still judges by the
+// base copy. The probe is a real spawned gate that prints what it inherited —
+// the only thing that proves the child was cleaned. The head table carries a
+// different command for the same gate, so the #84 rule is asserted in the same
+// run: the base copy decides, the PR's own copy never executes ----------------
+{
+  const { status, out } = await runGatesWithBase(
+    [{ order: 1, gate: "env-probe", command: envProbe }],
+    [{ order: 1, gate: "env-probe", command: echo("HEAD_CONFIG_RAN") }],
+  );
+  assert.equal(status, 0, `the probe gate must run and pass, got:\n${out}`);
+  assert.ok(
+    out.includes(CHILD_SAW_NOTHING),
+    `a spawned gate command must inherit neither BASE_GATES_FILE nor GATES_FILE, got:\n${out}`,
+  );
+  assert.ok(!out.includes("HEAD_CONFIG_RAN"), "the runner must still judge by the base copy, not the PR's (#84)");
+}
+
+// --- #494 Criterion 2: a gate run under a CI-like environment (both config
+// variables set on the runner) runs its own fixture table and terminates.
+//
+// The variables are paired the only way that can be asserted: BASE_GATES_FILE
+// carries the two-row fixture — that is exactly what CI's BASE_GATES_FILE is, a
+// copy of the base branch's gate table — while a copy of the REAL GATES.md sits
+// in GATES_FILE as leak bait. Pointing BASE_GATES_FILE at the real copy instead
+// cannot be asserted at all: it outranks GATES_FILE (#84), so the fixture would
+// be ignored and the whole real gate table would re-run, which this guard must
+// not do. Either variable reaching the nested runner is caught: the fixture's
+// own second row spawns a runner, and the real copy carries `test: run-gates` —
+// so a leak recurses instead of terminating, which is why the run is timed and
+// the timeout kill is asserted against ---------------------------------------
+{
+  const realCopy = join(dir, "real-GATES-copy.md");
+  await writeFile(realCopy, await readFile(fileURLToPath(new URL("../GATES.md", import.meta.url)), "utf8"));
+  const innerFixture = join(dir, "inner-GATES.md");
+  await writeFile(innerFixture, gatesTable([{ order: 1, gate: "inner", command: echo("INNER_FIXTURE_RAN") }]));
+  const ciConfig = join(dir, "ci-GATES.md");
+  await writeFile(
+    ciConfig,
+    gatesTable([
+      { order: 1, gate: "env-probe", command: envProbe },
+      { order: 2, gate: "test: nested-runner", command: `\`GATES_FILE="${innerFixture}" node "${RUNNER}"\`` },
+    ]),
+  );
+  const summaryFile = join(dir, "summary-ci.md");
+  const res = spawnSync("node", [RUNNER], {
+    encoding: "utf8",
+    timeout: 120_000,
+    env: { ...process.env, BASE_GATES_FILE: ciConfig, GATES_FILE: realCopy, GITHUB_STEP_SUMMARY: summaryFile },
+  });
+  const out = (res.stdout || "") + (res.stderr || "");
+  assert.equal(res.signal, null, "the CI-like run must terminate on its own — a kill means it recursed");
+  assert.equal(res.status, 0, `the CI-like run must pass, got:\n${out}`);
+  assert.ok(/2 gate\(s\) passed/.test(out), `exactly the two fixture gates must run, got:\n${out}`);
+  assert.ok(out.includes(CHILD_SAW_NOTHING), "the CI-like run's gate commands must inherit no gate config");
+  assert.ok(out.includes("INNER_FIXTURE_RAN"), "the nested runner must use its own fixture table");
+  assert.ok(!out.includes("test: plan-sync"), "no gate from the real table may run");
+}
+
+// --- #494 Criterion 3: the per-suite BASE_GATES_FILE strips PR #492 added to
+// pr-size-check.test.mjs and run-gates.test.mjs are no longer load-bearing. Both
+// were removed; this runs both suites the way CI does — as gate commands of a
+// run-gates invocation whose OWN environment carries both config variables — and
+// requires them to pass. The real GATES.md copy is again the leak bait: a suite
+// that inherited it would read the real table instead of its fixtures and fail.
+//
+// The nesting sentinel is what keeps this finite: the inner copy of this suite
+// skips this block only (every other test in it still runs), since it would
+// otherwise run itself forever -----------------------------------------------
+if (!process.env.RATCHET_TEST_NESTED_SUITES) {
+  const scripts = fileURLToPath(new URL(".", import.meta.url));
+  const realCopy = join(dir, "real-GATES-copy-suites.md");
+  await writeFile(realCopy, await readFile(fileURLToPath(new URL("../GATES.md", import.meta.url)), "utf8"));
+  const suitesConfig = join(dir, "suites-GATES.md");
+  await writeFile(
+    suitesConfig,
+    gatesTable([
+      { order: 1, gate: "test: pr-size-check", command: `\`node "${join(scripts, "pr-size-check.test.mjs")}"\`` },
+      { order: 2, gate: "test: run-gates", command: `\`node "${join(scripts, "run-gates.test.mjs")}"\`` },
+    ]),
+  );
+  const summaryFile = join(dir, "summary-suites.md");
+  const res = spawnSync("node", [RUNNER], {
+    encoding: "utf8",
+    timeout: 300_000,
+    env: {
+      ...process.env,
+      BASE_GATES_FILE: suitesConfig,
+      GATES_FILE: realCopy,
+      RATCHET_TEST_NESTED_SUITES: "1",
+      GITHUB_STEP_SUMMARY: summaryFile,
+    },
+  });
+  const out = (res.stdout || "") + (res.stderr || "");
+  assert.equal(res.signal, null, "the two suites must terminate on their own under a CI-like environment");
+  assert.equal(
+    res.status,
+    0,
+    `pr-size-check.test.mjs and run-gates.test.mjs must pass with BASE_GATES_FILE set on the runner, got:\n${out}`,
+  );
+  assert.ok(out.includes("PASS pr-size-check.test.mjs"), "pr-size-check.test.mjs must pass without its own strip");
+  assert.ok(out.includes("PASS run-gates.test.mjs"), "run-gates.test.mjs must pass without its own strip");
+}
+
+console.log("PASS run-gates.test.mjs (17 criteria, 60 assertions)");
