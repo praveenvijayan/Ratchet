@@ -169,7 +169,11 @@ self-invoke**. It skips only the planning round trip — it still runs the
    branch, heading to a PR. Discovered work — any size, however obvious —
    becomes a `plan/*.md`, then you STOP; finding a fix is not permission to apply
    it. Only exception: the human-triggered hotfix lane, which still ends in a
-   reviewed PR.
+   reviewed PR. **Framework work is not exempt:** changes to `scripts/**` or
+   `.github/workflows/**` need the same plan file, criteria and size budget as
+   product work — there is no version-update lane. The `framework-plan` check
+   enforces it; emergencies use the `override:framework-plan` label, which
+   records itself on the PR.
 1. <!-- ratchet:invariant:plan-source --> Issues come only from `plan/*.md` via
    sync; never hand-author issues unless explicitly told to.
 2. <!-- ratchet:invariant:claim-ref --> The claim is the `agent/issue-<N>` ref,

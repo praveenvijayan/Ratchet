@@ -208,6 +208,8 @@ scripts/
   criteria.mjs                  Shared acceptance-criteria readiness rule
   criteria.test.mjs             Regression test for the readiness rule
   docs-refresh.test.mjs         Regression test for documentation inventory
+  framework-plan-check.mjs      Guard: scripts/** and workflow PRs trace to a planned issue
+  framework-plan-check.test.mjs Regression test for the framework-plan gate
   gh-api.mjs                    Shared GitHub REST client (ghClient, paginate, resolveAuth)
   gh-api.test.mjs               Regression test for the shared GitHub client
   gh-api-migration.test.mjs     Guard: sweep/label/conflict scripts use the shared client

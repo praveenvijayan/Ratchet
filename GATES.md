@@ -107,6 +107,7 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 | 4z16  | test: protocol-coverage         | `node scripts/protocol-coverage.test.mjs`         | exit 0 |
 | 4z18  | test: static-autodeploy         | `node scripts/static-autodeploy.test.mjs`         | exit 0 |
 | 4z19  | test: release-pr-gates          | `node scripts/release-pr-gates.test.mjs`          | exit 0 |
+| 4z20  | test: framework-plan-check      | `node scripts/framework-plan-check.test.mjs`      | exit 0 |
 | 4r    | test-coverage                   | `node scripts/gates-coverage.mjs`                 | exit 0 |
 | 4z    | skill-parity                    | `node scripts/skill-parity.mjs`                   | exit 0 |
 | 4z10  | skill-detail                    | `node scripts/skill-detail.mjs`                   | exit 0 |
@@ -159,3 +160,20 @@ read them before writing a pattern:
 - **A pattern containing `/` is anchored at the repo root.** So `docs/report.md`
   matches only the top-level file, and `generated/**` matches everything under a
   root-level `generated/` directory.
+
+## Framework paths (plan protocol applies)
+
+Enforced server-side by the `pr-gates` workflow
+(`scripts/framework-plan-check.mjs`): a PR touching any path below must trace to
+an issue carrying a `<!-- plan-id: ... -->` marker, or the check goes red naming
+the offending paths. Framework work gets the same plan files, criteria and size
+budgets as product work — there is no version-update lane (AGENTS.md hard rule
+0). Same patterns and matching rules as `exclude_paths` above, and the check
+reads this list from the base branch so a PR cannot exempt itself.
+
+- framework_paths: [scripts/**, .github/workflows/**]
+
+Emergencies only: a human with write access adds the `override:framework-plan`
+label to the PR. The check then passes and posts a comment naming the paths it
+let through, so the override is on the record twice — the label event in the PR
+timeline and that comment.
