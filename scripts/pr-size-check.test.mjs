@@ -37,7 +37,13 @@ async function check({ gates = "", baseGates, additions, deletions, changedFiles
   // this the subprocess inherits them via `...process.env` and silently
   // fetches the real, currently-open PR's files instead of using the
   // fixture's synthetic aggregates/PR_FILES_JSON.
-  const { GITHUB_TOKEN: _t, GITHUB_REPOSITORY: _r, PR_NUMBER: _n, ...restEnv } = process.env;
+  // BASE_GATES_FILE is stripped for the same reason and is the sharper trap:
+  // the pr-gates job sets it on the step that runs run-gates.mjs, every suite
+  // inherits it, and pr-size-check.mjs prefers it over GATES_FILE (#84). Left
+  // in, the real base thresholds silently override every fixture below, so the
+  // configurable-threshold cases invert and the gate fails in CI only. It is
+  // re-added explicitly, per call, when a test passes `baseGates`.
+  const { GITHUB_TOKEN: _t, GITHUB_REPOSITORY: _r, PR_NUMBER: _n, BASE_GATES_FILE: _b, ...restEnv } = process.env;
   const env = {
     ...restEnv,
     GATES_FILE: gatesFile,
