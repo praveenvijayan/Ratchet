@@ -15,7 +15,9 @@ the script writes — the skill adds no behavior of its own, so an operator with
 no skill runs the exact same commands by hand.
 
 The supervisor never merges, approves, closes, or labels anything, and neither
-does this skill — human review is the only gate.
+does this skill. Merging belongs to the system and to human reviewers — the
+`auto-merge` workflow takes a normal-risk PR, a human takes a `risk:high` one —
+never to the supervisor.
 
 ## Pinned worker dispatch rules
 
@@ -98,7 +100,8 @@ workers).
   read of a file it writes — never reimplement its logic in the skill.
 - Config missing or invalid → surface the script's message and start nothing.
 - Never run two supervisors at once; attach to the running one instead.
-- Never merge, approve, close, or label — human review is the only gate.
+- Never merge, approve, close, or label — the `auto-merge` workflow and human
+  reviewers own those actions; the supervisor never takes them.
 - Edit this skill only at `.agents/skills/ratchet-herd/SKILL.md`, then run
   `./setup.sh` to regenerate the `.claude` and `plugin` mirrors. Never edit the
   mirrors directly.
