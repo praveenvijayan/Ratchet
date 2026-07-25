@@ -215,6 +215,8 @@ scripts/
   gh-api-migration.test.mjs     Guard: sweep/label/conflict scripts use the shared client
   gates-coverage.mjs            Guard: every *.test.mjs runs in a GATES.md row
   gates-coverage.test.mjs       Regression test for the coverage guard
+  gates-hermetic.mjs            Guard: no gate suite needs an agent CLI on PATH
+  gates-hermetic.test.mjs       Regression test for the agent-CLI-free gate run
   map-onboarding.test.mjs       Guard: MAP.md exists, is current, tolerates absence
   gates-table.mjs               Shared parser for the GATES.md markdown table
   herd.mjs                      ratchet-herd config loader, validator, init
@@ -420,6 +422,20 @@ of `AGENTS.md`: every routing-table file path, every `<!-- ratchet:invariant:<id
 marker, and every kernel-named `ratchet-*.mjs` script must still resolve to a real
 artifact, or the build fails. It is how the always-loaded kernel is kept from
 drifting out of sync with the skills, references, and scripts it defers to.
+
+**A gate suite may not depend on a binary outside the toolchain.** The toolchain
+is `node`, `git`, `gh` and the platform's standard utilities — nothing else may
+decide whether a suite passes. An agent CLI in particular is installed on every
+machine that could write a suite and on no CI runner, so a suite that reaches for
+one is green locally and red in CI, where the failure is most expensive to read
+(PR #495). The `gates-hermetic` gate (`scripts/gates-hermetic.mjs`) makes that
+difference measurable *before* CI sees it: after the test rows have passed
+normally, it re-runs those same suites once — never the whole gate table — with a
+PATH that mirrors the real one minus every adapter launch binary the shipped
+`defaultConfig()` names, and exits non-zero naming **every** suite that fails only
+under it. A suite that genuinely needs a real host binary declares it in its own
+source, where the dependency lives, and is skipped rather than failed — a
+`// ratchet:requires-host-binary: claude — reason` line in the suite itself.
 
 ### Security: the unattended runner's trust boundary
 

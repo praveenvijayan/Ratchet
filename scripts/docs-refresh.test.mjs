@@ -374,4 +374,17 @@ const memory = read("memory/MEMORY.md");
   );
 }
 
-console.log("PASS docs-refresh.test.mjs (6 #60 criteria + 4 #191 criteria + 4 #91 criteria + 3 #233 criteria + 2 #268 criteria + 7 #347 criteria + 1 #421 criterion)");
+// #497 Criterion 4 (docs half): DOCS.md states the rule the gates-hermetic gate
+// enforces — a gate suite may not depend on a binary outside the toolchain — and
+// names the declaration a suite uses when it legitimately needs one.
+{
+  const { REQUIRES_MARKER } = await import("./gates-hermetic.mjs");
+  assert.match(
+    docs,
+    /gate suite may not depend on a binary outside the toolchain/i,
+    "DOCS must state that a gate suite may not depend on a binary outside the toolchain",
+  );
+  assert.ok(docs.includes(REQUIRES_MARKER), "DOCS must show the marker a suite uses to declare a host binary");
+}
+
+console.log("PASS docs-refresh.test.mjs (6 #60 criteria + 4 #191 criteria + 4 #91 criteria + 3 #233 criteria + 2 #268 criteria + 7 #347 criteria + 1 #421 criterion + 1 #497 criterion)");

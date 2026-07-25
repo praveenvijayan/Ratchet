@@ -170,6 +170,11 @@
       "profile": "core"
     },
     {
+      "path": "scripts/gates-hermetic.mjs",
+      "class": "framework",
+      "profile": "core"
+    },
+    {
       "path": "scripts/gates-table.mjs",
       "class": "framework",
       "profile": "core"
@@ -463,6 +468,10 @@
     },
     {
       "path": "scripts/gates-coverage.test.mjs",
+      "class": "excluded"
+    },
+    {
+      "path": "scripts/gates-hermetic.test.mjs",
       "class": "excluded"
     },
     {

@@ -110,12 +110,14 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 | 4z20  | test: framework-plan-check      | `node scripts/framework-plan-check.test.mjs`      | exit 0 |
 | 4z21  | test: red-main-alert            | `node scripts/red-main-alert.test.mjs`            | exit 0 |
 | 4z22  | test: debt-scan                 | `node scripts/debt-scan.test.mjs`                 | exit 0 |
+| 4z23  | test: gates-hermetic            | `node scripts/gates-hermetic.test.mjs`            | exit 0 |
 | 4r    | test-coverage                   | `node scripts/gates-coverage.mjs`                 | exit 0 |
 | 4z    | skill-parity                    | `node scripts/skill-parity.mjs`                   | exit 0 |
 | 4z10  | skill-detail                    | `node scripts/skill-detail.mjs`                   | exit 0 |
 | 4z4   | version-consistency             | `node scripts/version-consistency.mjs`            | exit 0 |
 | 4z6   | manifest-check                  | `node scripts/manifest-check.mjs`                 | exit 0 |
 | 4z17  | protocol-coverage               | `node scripts/protocol-coverage.mjs`              | exit 0 |
+| 4z24  | gates-hermetic                  | `node scripts/gates-hermetic.mjs`                 | exit 0 |
 | 5     | build       | TODO: build command               | —              |
 | 6     | audit       | TODO: audit command               | —              |
 | 7     | secret-scan | TODO: secret-scan command         | —              |
@@ -123,7 +125,10 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 Each `scripts/*.test.mjs` suite gets its own named `test:` row so `run-gates`
 lists every suite it ran (coverage at a glance). The `test-coverage` gate
 (`scripts/gates-coverage.mjs`) fails if a suite exists that no row above runs,
-so a new suite can never be added without wiring it in here.
+so a new suite can never be added without wiring it in here. The last row,
+`gates-hermetic`, re-runs those same suites once with every agent CLI hidden
+from `PATH`, so a suite that only passes on a machine with an agent installed
+is caught locally instead of in CI.
 
 ## PR size limit
 
