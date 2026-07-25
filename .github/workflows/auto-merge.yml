@@ -1,0 +1,31 @@
+name: auto-merge
+
+# Tiered review (plan 0201). Normal-risk PRs merge on green checks plus an
+# APPROVED recorded review verdict, with no human wait; `risk:high` PRs never
+# auto-merge on the verdict alone — they also need a human approval and a
+# 15-minute hold since becoming mergeable. Decision logic lives in
+# scripts/auto-merge.mjs; this workflow is only its trigger and env.
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write  # merging the PR (also covers actions/checkout's read)
+  pull-requests: write
+  checks: read
+  statuses: read
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+      - run: node scripts/auto-merge.mjs
+        env:
+          GITHUB_TOKEN: ${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}

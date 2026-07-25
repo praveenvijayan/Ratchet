@@ -76,6 +76,11 @@
       "profile": "core"
     },
     {
+      "path": ".github/workflows/auto-merge.yml",
+      "class": "framework",
+      "profile": "core"
+    },
+    {
       "path": ".github/workflows/conflicted-prs.yml",
       "class": "framework",
       "profile": "core"
@@ -226,6 +231,11 @@
     },
     {
       "path": "scripts/review-verdict-sweep.mjs",
+      "class": "framework",
+      "profile": "core"
+    },
+    {
+      "path": "scripts/auto-merge.mjs",
       "class": "framework",
       "profile": "core"
     },
@@ -671,6 +681,10 @@
     },
     {
       "path": "scripts/review-verdict-workflow.test.mjs",
+      "class": "excluded"
+    },
+    {
+      "path": "scripts/auto-merge.test.mjs",
       "class": "excluded"
     },
     {
