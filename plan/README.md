@@ -19,6 +19,7 @@ title: <imperative summary of the one change>
 priority: high              # high | medium | low   (required)
 labels: [area]              # optional extra labels
 blocked_by: []              # other slugs like [0002-user-model], or []  (required)
+estimated_lines: 120        # hand-written changed lines you expect (max 400)
 ---
 
 One or two sentences: what this is and why it exists.
@@ -110,6 +111,25 @@ exactly as it always has), and the building agent must honour them.
 looks for its checkboxes — reserving `- [ ]` for criteria keeps "which boxes are
 the criteria" unambiguous for the reviewer and the sync alike.
 
+## The size budget — `estimated_lines`
+
+Declare, in frontmatter, how many **hand-written changed lines** you expect the
+change to take. Count only lines a person writes: **generated files are
+excluded** (lockfiles, generated skill mirrors, build output — the same
+exclusions the PR size gate applies). The estimate is a budget, not a promise;
+it exists to force the split decision while splitting is still free.
+
+**Over 400 means split the plan before writing any code.** The sync refuses an
+`estimated_lines` over 400 — it aborts non-zero, names the file and the value,
+and changes nothing on GitHub. The fix is never to raise the number: break the
+plan into several smaller plan files, one issue each, and let `blocked_by`
+carry the ordering. This is the same 400-line cap the `pr-gates` size check
+enforces on the finished PR, moved to the only point where honouring it is
+cheap — after the code exists, an over-cap PR can only be renegotiated.
+
+A plan with no `estimated_lines` still syncs (existing plans are
+grandfathered), but it logs a warning naming the file. New plans declare it.
+
 ## File naming
 
 `NNNN-short-slug.md` — e.g. `0001-email-login.md`. The stem (`0001-email-login`)
@@ -142,6 +162,7 @@ title: Add email/password login
 priority: high              # high | medium | low   (required)
 labels: [auth, backend]     # optional extra labels
 blocked_by: [0002-user-model]   # other slugs, or []  (required, may be empty)
+estimated_lines: 120        # hand-written changed lines you expect (max 400)
 ---
 
 One or two sentences: what this is and why it exists.
@@ -161,10 +182,15 @@ One or two sentences: what this is and why it exists.
   `low`. Any other value aborts the sync the same way (the file is not
   "skipped" — the entire run stops, logged as an invalid priority, because
   silently sorting a bad value would corrupt triage order.
+- **`estimated_lines` is capped at 400.** A value over the cap, or one that is
+  not a non-negative whole number, aborts the sync before it touches GitHub:
+  the offending file and value are logged with the instruction to split the
+  plan. A file that omits the key syncs as before with a warning naming it.
 - **Unknown frontmatter keys are ignored with a warning.** `title`, `priority`,
   `labels`, `blocked_by`, and `retroactive_ok` are the only keys the compiler
   understands. Any other key is logged as `WARNING: <file> has unknown frontmatter key '<key>'`
-  and the sync continues.
+  `labels`, `blocked_by`, and `estimated_lines` are the only keys the compiler
+  understands.
 - **Acceptance criteria decide readiness.** A file with at least one `- [ ]`
   item under `## Acceptance criteria` becomes `state:ready`. Without criteria it
   becomes `state:draft` and no agent will pick it. If you cannot write the
