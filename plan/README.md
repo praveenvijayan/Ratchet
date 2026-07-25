@@ -283,6 +283,38 @@ other, not a promise in a merged PR description.
 > deliverables. Each one "passed" its criteria, and later work paid the de-fake
 > tax to replace fixtures nobody had recorded as debt.
 
+## Ingesting deferred scope
+
+Disclosing what a PR left out is honest, but disclosure alone rots: "the retry
+path comes later" in a merged PR body is debt nobody is holding. Declare it in
+the PR body under a `## Deferred scope` heading, one `-` bullet per item, and
+`scripts/debt-scan.mjs` — a check on the planning PR — holds the loop to it.
+While an item is outstanding the check is **red**, naming the PR and the item.
+
+There are exactly two ways to clear one, and the failure output names both for
+every item:
+
+- **Cover it.** Add a plan file whose body carries the line
+  `Ingests deferred scope from #<PR>` (a plain body line, not frontmatter — so
+  covering a deferral never changes what the sync compiles). Active plans and
+  archived ones under `plan/done/` both count: debt covered by shipped work is
+  not outstanding.
+- **Retire it.** Add the PR number to `retired_deferrals` in the
+  `## Deferred-scope debt scan` section of `GATES.md`, and say why in the PR.
+  Retiring means *this will never be built* — it is not "later".
+
+Unlike the size and framework-path config, this config is read from the PR's own
+checkout, not the base branch: retiring has to be something the author can do in
+the very PR the check is failing. The trade is deliberate — a retirement is a
+diff line the reviewer sees, on the record.
+
+**Source markers are optional and host-owned.** Set `deferral_marker` in the
+same `GATES.md` section to a regex that captures the plan slug a marker defers
+to — e.g. `DEFERRED\(([\w-]+)\)` — and the scan also reports every marker whose
+slug resolves to no plan file, with `file:line`. With no `deferral_marker` set,
+the source scan does not run at all: the framework assumes no `TODO`, `FIXME` or
+`@defer` convention of its own.
+
 ## File naming
 
 `NNNN-short-slug.md` — e.g. `0001-email-login.md`. The stem (`0001-email-login`)

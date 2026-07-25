@@ -288,6 +288,8 @@ scripts/
   ratchet-update.test.mjs       Regression test for the updater
   ratchet-watch.mjs             Webhook receiver / event classifier
   ratchet-watch.sh              Real-time GitHub→local bridge
+  debt-scan.mjs                 Deferred scope in merged PRs must become plan files
+  debt-scan.test.mjs            Regression test for the deferred-scope debt scan
   red-main-alert.mjs            Alert when a workflow goes red on main; resolve on recovery
   red-main-alert.test.mjs       Regression test for the red-main alert
   release.mjs                   Opt-in release tag + changelog publisher

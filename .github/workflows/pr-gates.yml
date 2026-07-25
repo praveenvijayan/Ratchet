@@ -114,6 +114,23 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
 
+  # Deferred scope must become plan files (#481). Deliberately NOT limited to
+  # any branch pattern: the planning PR is where a deferral is covered or
+  # retired, and that PR carries no agent/issue-* head. Config (and therefore a
+  # retirement) is read from the PR's own checkout — see GATES.md.
+  debt-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+      - name: Check deferred scope has become plan files
+        run: node scripts/debt-scan.mjs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+
   # Framework work goes through plans too (#473). Deliberately NOT limited to
   # agent/issue-* branches: the lane this closes is exactly the hand-opened
   # "version update" PR (#190) that never had an issue at all.
