@@ -115,4 +115,21 @@ const readme = readFileSync(
   }
 }
 
-console.log("PASS plan-authoring-rules.test.mjs (5 criteria)");
+// --- #467 Criterion 5: plan/README.md documents the estimated_lines size
+// budget — hand-written changed lines only, generated files excluded, and an
+// estimate over 400 means splitting the plan before any code is written. This
+// lives here rather than in plan-sync.test.mjs because that suite writes
+// NNNN-*.md fixtures, and the #191 guard forbids a test file that names plan
+// slugs from also resolving the repo's plan/ directory.
+{
+  assert.match(readme, /estimated_lines/, "plan/README.md must document the estimated_lines key");
+  assert.match(readme, /hand-written changed lines/i, "plan/README.md must say the estimate counts hand-written changed lines");
+  assert.match(readme, /generated files[\s\S]{0,20}excluded/i, "plan/README.md must say generated files are excluded from the estimate");
+  assert.match(
+    readme,
+    /over 400 means split[\s\S]{0,60}before writing any code/i,
+    "plan/README.md must say an estimate over 400 means splitting the plan before writing code",
+  );
+}
+
+console.log("PASS plan-authoring-rules.test.mjs (5 criteria + #467 README docs)");
