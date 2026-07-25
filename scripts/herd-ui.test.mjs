@@ -249,12 +249,22 @@ await inTempDir(async (dir) => {
   writeFileSync(statePath, JSON.stringify({ 5: { adapter: "claude", pid: 1, attempts: 1, status: "dispatched", pr: null, logFile } }));
   writeFileSync(logFile, "hello\n");
   await withServer({ statePath, eventsPath: join(dir, "e.jsonl"), escalationsPath: join(dir, "esc.md") }, async (base) => {
+    // Append only once the initial frame has actually arrived, not after a
+    // wall-clock guess: on a slow machine a timed append lands before the
+    // stream opens and the whole file ships in one frame, failing the
+    // new-bytes-only assertion below for a reason that is not a real defect.
+    let appended = false;
     const streamDone = sseCollect(
       `${base}/api/log?issue=5`,
-      (frames) => frames.filter((f) => f.event === "log").map((f) => f.data).join("").includes("world"),
+      (frames) => {
+        if (!appended && frames.some((f) => f.event === "log")) {
+          appended = true;
+          appendFileSync(logFile, "world\n");
+          return false;
+        }
+        return frames.filter((f) => f.event === "log").map((f) => f.data).join("").includes("world");
+      },
     );
-    // Give the stream a moment to emit the initial content, then append.
-    setTimeout(() => appendFileSync(logFile, "world\n"), 120);
     const frames = await streamDone;
     const logText = frames.filter((f) => f.event === "log").map((f) => f.data).join("");
     assert.match(logText, /hello/, "initial log content is tailed");
@@ -263,6 +273,19 @@ await inTempDir(async (dir) => {
     // carries 'world' must not also carry the already-sent 'hello'.
     const worldFrame = frames.filter((f) => f.event === "log").find((f) => f.data.includes("world"));
     assert.ok(!worldFrame.data.includes("hello"), "the update frame carries only new bytes, not a re-read");
+
+    // Negative control: removing the wall-clock delay must not turn the stream
+    // assertions into ones that can never fail. With nothing appended, the same
+    // collector still reports a broken stream loudly instead of resolving.
+    await assert.rejects(
+      () => sseCollect(
+        `${base}/api/log?issue=5`,
+        (fr) => fr.filter((f) => f.event === "log").map((f) => f.data).join("").includes("never-appended"),
+        400,
+      ),
+      /SSE timeout; got \d+ frames/,
+      "a stream that never delivers the awaited bytes fails the test instead of passing silently",
+    );
   });
 });
 
@@ -279,14 +302,21 @@ await inTempDir(async (dir) => {
   const keyBefore = snapshotKey(empty);
 
   await withServer({ statePath, eventsPath, escalationsPath: join(dir, "x.md") }, async (base) => {
+    // Change the state only after the opening snapshot frame has landed, so
+    // "a second frame followed the change" is proven, not raced.
+    let changed = false;
     const streamDone = sseCollect(
       `${base}/api/stream`,
-      (frames) => frames.length >= 2, // initial snapshot + one after the change
+      (frames) => {
+        if (!changed && frames.length === 1) {
+          changed = true;
+          writeFileSync(statePath, JSON.stringify({ 8: { adapter: "claude", pid: 9, attempts: 1, status: "dispatched", pr: null, logFile: "l.log" } }));
+          appendFileSync(eventsPath, JSON.stringify({ ts: new Date(NOW).toISOString(), event: "dispatch", issue: 8 }) + "\n");
+          return false;
+        }
+        return frames.length >= 2; // initial snapshot + one after the change
+      },
     );
-    setTimeout(() => {
-      writeFileSync(statePath, JSON.stringify({ 8: { adapter: "claude", pid: 9, attempts: 1, status: "dispatched", pr: null, logFile: "l.log" } }));
-      appendFileSync(eventsPath, JSON.stringify({ ts: new Date(NOW).toISOString(), event: "dispatch", issue: 8 }) + "\n");
-    }, 120);
     const frames = await streamDone;
     assert.equal(frames[0].event, "snapshot", "the stream opens with the current snapshot");
     assert.equal(frames[0].data.workers.length, 0, "initially empty");
@@ -788,12 +818,19 @@ await inTempDir(async (dir) => {
   writeFileSync(escPath, "");
 
   await withServer({ statePath, eventsPath, escalationsPath: escPath }, async (base) => {
+    // Append after the initial frame has arrived — observed, not timed.
+    let appended = false;
     const streamDone = sseCollect(
       `${base}/api/timeline?issue=5`,
-      (frames) => frames.filter((f) => f.event === "timeline").flatMap((f) => f.data).length >= 2,
+      (frames) => {
+        if (!appended && frames.some((f) => f.event === "timeline")) {
+          appended = true;
+          appendFileSync(eventsPath, JSON.stringify({ ts: "2026-07-09T12:10:00Z", event: "pr-opened", issue: 5, pr: 42 }) + "\n");
+          return false;
+        }
+        return frames.filter((f) => f.event === "timeline").flatMap((f) => f.data).length >= 2;
+      },
     );
-    // After the initial frame, append a new event
-    setTimeout(() => appendFileSync(eventsPath, JSON.stringify({ ts: "2026-07-09T12:10:00Z", event: "pr-opened", issue: 5, pr: 42 }) + "\n"), 120);
     const frames = await streamDone;
     const allEvents = frames.filter((f) => f.event === "timeline").flatMap((f) => f.data);
     assert.equal(allEvents.length, 2, "the new event appended live without a reload");

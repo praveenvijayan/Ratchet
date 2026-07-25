@@ -118,11 +118,20 @@ await inTempDir(async (dir) => {
   // client-side, so the server side is unchanged. Verify the stream carries new
   // content that the client's renderLog would filter.
   await withServer({ statePath, eventsPath: join(dir, "e.jsonl"), escalationsPath: join(dir, "esc.md") }, async (base) => {
+    // Append once the initial frame has landed rather than after a fixed delay:
+    // a timed append can beat the stream opening on a loaded machine.
+    let appended = false;
     const streamDone = sseCollect(
       `${base}/api/log?issue=9`,
-      (frames) => frames.filter((f) => f.event === "log").map((f) => f.data).join("").includes("error: again"),
+      (frames) => {
+        if (!appended && frames.some((f) => f.event === "log")) {
+          appended = true;
+          appendFileSync(logFile, "error: again\nwarning: low disk\n");
+          return false;
+        }
+        return frames.filter((f) => f.event === "log").map((f) => f.data).join("").includes("error: again");
+      },
     );
-    setTimeout(() => appendFileSync(logFile, "error: again\nwarning: low disk\n"), 120);
     const frames = await streamDone;
     const logText = frames.filter((f) => f.event === "log").map((f) => f.data).join("");
     assert.match(logText, /error: again/, "new tailed lines arrive at the client");
