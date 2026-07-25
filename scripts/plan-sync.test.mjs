@@ -100,6 +100,23 @@ Body of 0081.
 ## Test notes
 - [ ] this checkbox is not an acceptance criterion
 `);
+// #469 Criterion 2 (second clause): the optional ## Human runbook section — the
+// checks only a human can perform — is carried into the issue verbatim, exactly
+// like ## Non-functional and ## Test notes, with no compiler change.
+const runbookBody = `Body of 0084.
+
+## Acceptance criteria
+- [ ] core behaviour works
+
+## Human runbook
+- sign in on staging with a real Google account and confirm the session sticks`;
+await writeFile(join(planDir, "0084-human-runbook.md"), `---
+title: Has a human runbook
+priority: medium
+blocked_by: []
+---
+${runbookBody}
+`);
 // #56 AC2: labels that would corrupt the state machine are never applied from
 // plan frontmatter, while ordinary custom labels still pass through.
 await writeFile(join(planDir, "0082-reserved-labels.md"), `---
@@ -290,6 +307,42 @@ assert.ok(
   names(notesOnly).includes("state:draft"),
   `0081 must stay draft: ## Test notes checkboxes must not fake acceptance criteria, got: ${names(notesOnly)}`,
 );
+
+// #469 Criterion 2 (second clause): a plan carrying ## Human runbook compiles to
+// a ready issue whose body reproduces the section verbatim — same treatment as
+// ## Non-functional and ## Test notes, no compiler change.
+const withRunbook = [...issues.values()].find((i) => i.body.includes("plan-id: 0084-human-runbook"));
+assert.ok(withRunbook, "0084-human-runbook issue was created");
+assert.ok(names(withRunbook).includes("state:ready"), `0084 should be ready, got: ${names(withRunbook)}`);
+assert.equal(
+  withRunbook.body,
+  `${runbookBody}\n\n<!-- plan-id: 0084-human-runbook -->`,
+  "0084 body must reproduce the plan body, ## Human runbook included, verbatim",
+);
+
+// #469 Criterion 5 regression: a plan file WITHOUT the new ## Human runbook
+// section compiles and syncs exactly as before — its rendered body is still the
+// plan body plus the plan-id marker and nothing else, and it is still ready.
+const noRunbook = [...issues.values()].find((i) => i.body.includes("plan-id: 0080-with-sections"));
+assert.ok(noRunbook, "0080-with-sections issue was created");
+assert.ok(!noRunbook.body.includes("## Human runbook"), "a plan without the section must not gain one");
+assert.equal(
+  noRunbook.body,
+  `Body of 0080.
+
+## Acceptance criteria
+- [ ] core behaviour works
+
+## Non-functional
+- p95 latency under 200 ms
+
+## Test notes
+- exercise the retry path under simulated network loss
+
+<!-- plan-id: 0080-with-sections -->`,
+  "a plan without ## Human runbook must render exactly as it did before the section existed",
+);
+assert.ok(names(noRunbook).includes("state:ready"), `0080 must still be ready, got: ${names(noRunbook)}`);
 
 // #56 AC2: labels entries beginning state: or priority: are never applied to
 // the issue and produce a warning naming the file.

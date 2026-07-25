@@ -128,3 +128,10 @@ Rules:
 
 ## Recurring patterns
 - (e.g.) New API routes follow the handler/validator/service split in `src/api/` (#175).
+- Acceptance criteria must name the mechanism that proves them (test, command,
+  or observable check); checks only a human can run go in the optional
+  `## Human runbook` section, which the sync copies verbatim like
+  `## Non-functional` / `## Test notes` — the compiler is unchanged, so a plan
+  without it behaves exactly as before. A criterion-mapped test that asserts on
+  source strings leaves the criterion unmet and is a review rejection
+  (`AGENTS.md` §6) (#469).

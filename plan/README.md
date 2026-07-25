@@ -35,6 +35,45 @@ One or two sentences: what this is and why it exists.
 credentials" is testable; "handle errors properly" is not. If a criterion can't
 be checked by reading code or running a test, rewrite it.
 
+### Every criterion names how the agent proves it
+
+Observable is not enough on its own. **Every criterion must be provable by the
+building agent through a named mechanism** — one of exactly three:
+
+- a **test** the agent can run (`node scripts/foo.test.mjs` asserts the outcome),
+- a **command** whose exit code decides (`node scripts/bar.mjs` exits `0`),
+- an **observable check** the agent can make in the repo or in the program's
+  output (a rendered page contains the control, an API response carries the
+  field, a workflow file declares the step).
+
+A criterion with no such mechanism cannot be closed by the agent: it either
+stalls the issue or gets waved through on a hunch. Rewrite it until the
+mechanism is named.
+
+```markdown
+Before — unverifiable: names an environment, not a proof
+- [ ] Sign-in works on staging
+
+After — verifiable: names the call, the outcome, and the test that runs it
+- [ ] POST /session with valid credentials returns 200 and a session cookie
+      (test: "sign-in returns a session")
+```
+
+The "before" form gives the agent no stopping condition and the reviewer nothing
+to diff test names against. The "after" form gives both. If the only honest
+version of a check needs a human — a real browser session, a third-party
+account, production credentials, a subjective judgement — it is **not** an
+acceptance criterion: move it to `## Human runbook` below.
+
+**UI and behaviour criteria require behaviour tests, and a test that asserts on
+source strings does not satisfy a criterion.** Grepping the implementation for a
+class name, a label, a selector, or a function call proves only that some text
+exists in a file — never that the behaviour happens. Render the component and
+assert on what it produces; call the function and assert on what it returns; run
+the command and assert on its output. A criterion whose only evidence is a
+source-string assertion is **unmet**, and the reviewer rejects the PR for it
+(`AGENTS.md` step 6).
+
 **Encode ordering as `blocked_by`, never only in prose.** The sync sees
 dependencies **only** through `blocked_by` slugs; prose ordering is invisible to
 it. Any sequencing you state in a plan file's prose must **also** appear as
@@ -79,10 +118,10 @@ padding.
 ### Optional sections — raising the floor above the happy path
 
 Acceptance criteria are the floor, not the ceiling: production defects live
-precisely in the cases the criteria didn't enumerate. Two **optional** sections
+precisely in the cases the criteria didn't enumerate. Three **optional** sections
 let a plan demand more without weakening the one-test-per-criterion rule. Put
 them in the body below the criteria; the sync carries them into the issue
-verbatim (no compiler change — a plan that omits both compiles and behaves
+verbatim (no compiler change — a plan that omits them compiles and behaves
 exactly as it always has), and the building agent must honour them.
 
 ```markdown
@@ -93,6 +132,10 @@ exactly as it always has), and the building agent must honour them.
 ## Test notes
 - exercise the retry path under simulated network loss
 - property test: encode∘decode is identity for any valid input
+
+## Human runbook
+- sign in on staging with a real Google account and confirm the session sticks
+- confirm the invoice PDF prints correctly on A4
 ```
 
 - **`## Non-functional`** — constraints the change must satisfy that aren't a
@@ -105,8 +148,16 @@ exactly as it always has), and the building agent must honour them.
   building agent writes these in addition to the per-criterion tests, each named
   after the case it covers. Because the plan asked for them, they are planned
   coverage, not padding (see `AGENTS.md` step 3).
+- **`## Human runbook`** — checks **only a human can perform**: a real browser
+  session, a third-party account, production credentials, a subjective visual
+  judgement. These are deliberately *not* acceptance criteria — the building
+  agent cannot prove them, so they never gate its stopping condition and never
+  stall the issue. The sync carries the section into the issue verbatim, exactly
+  like the other two, and the human reviewing the PR walks it. This is the #289
+  fix generalised: an unverifiable "works on staging" check becomes an explicit
+  runbook item instead of a criterion no agent can close.
 
-**Use plain `-` bullets in both sections, never `- [ ]`.** Only a
+**Use plain `-` bullets in all three sections, never `- [ ]`.** Only a
 `## Acceptance criteria` block makes an issue pickable, and the readiness check
 looks for its checkboxes — reserving `- [ ]` for criteria keeps "which boxes are
 the criteria" unambiguous for the reviewer and the sync alike.
