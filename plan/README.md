@@ -22,6 +22,8 @@ blocked_by: []              # other slugs like [0002-user-model], or []  (requir
 estimated_lines: 120        # hand-written changed lines you expect (max 400)
 locks: []                   # exclusive resources this plan takes  (optional)
 risk: normal                # high | normal  (optional, defaults to normal)
+stub: false                 # true only if this ships less than a working path
+repaid_by: <slug>           # required when stub: true — the plan that finishes it
 ---
 
 One or two sentences: what this is and why it exists.
@@ -247,6 +249,39 @@ cheap review lane.
 
 If a plan touches one of those and does not say `risk: high`, the plan is
 wrong — fix the plan file, not the review.
+
+## Vertical slice — `stub` and `repaid_by`
+
+**A plan delivers a working end-to-end path.** Not a screen wired to fixtures,
+not a service with a hard-coded return, not a "real implementation arrives
+later" note in the prose. Slice the work vertically — thinner is fine, fake is
+not — so that what merges is genuinely done.
+
+Where a slice honestly cannot reach the end of the path yet, say so in
+frontmatter and name the plan that finishes it:
+
+```yaml
+stub: true
+repaid_by: 0211-live-pricing-service
+```
+
+`stub` is a **closed set: `true` or `false`**, optional, and absent means
+`false`. Any other value aborts the sync, exactly like a bad `risk`.
+
+**The repayment plan file is created in the same planning PR.** A stub whose
+`repaid_by` is missing, or whose slug resolves to no plan file and no issue,
+**aborts the sync non-zero** before it touches GitHub, naming the file and the
+unresolved slug. There is no way to record the debt and defer writing it down:
+the repayment plan exists, or the stub does not sync.
+
+The debt is then visible where the work is. The stub's issue body carries a
+`Repaid by #N` line linking the repayment issue, so anyone reading the stub on
+GitHub sees what is still owed — and the repayment is queued work like any
+other, not a promise in a merged PR description.
+
+> Why this rule exists: the screens-first era (#106–#114) shipped mocks as
+> deliverables. Each one "passed" its criteria, and later work paid the de-fake
+> tax to replace fixtures nobody had recorded as debt.
 
 ## File naming
 
