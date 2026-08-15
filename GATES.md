@@ -100,6 +100,7 @@ Run in order, fail-fast. Replace the commands with your stack's equivalents
 | 4z8   | test: ratchet-uninstall         | `node scripts/ratchet-uninstall.test.mjs`         | exit 0 |
 | 4z9   | test: install-lifecycle         | `node scripts/install-lifecycle.test.mjs`         | exit 0 |
 | 4z11  | test: ratchet-requeue-heartbeat | `node scripts/ratchet-requeue-heartbeat.test.mjs` | exit 0 |
+| 4z28  | test: attempt-record            | `node scripts/attempt-record.test.mjs`            | exit 0 |
 | 4z12  | test: ratchet-submit            | `node scripts/ratchet-submit.test.mjs`            | exit 0 |
 | 4z13  | test: ratchet-start             | `node scripts/ratchet-start.test.mjs`             | exit 0 |
 | 4z15  | test: agents-kernel             | `node scripts/agents-kernel.test.mjs`             | exit 0 |

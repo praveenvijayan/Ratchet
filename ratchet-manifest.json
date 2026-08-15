@@ -692,6 +692,10 @@
       "class": "excluded"
     },
     {
+      "path": "scripts/attempt-record.test.mjs",
+      "class": "excluded"
+    },
+    {
       "path": "scripts/ratchet-submit.test.mjs",
       "class": "excluded"
     },

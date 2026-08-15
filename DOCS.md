@@ -280,6 +280,7 @@ scripts/
   ratchet-heartbeat.mjs         Post a lease heartbeat comment to renew a claim without pushing
   ratchet-requeue.mjs           Return an issue to state:ready with an explaining comment
   ratchet-requeue-heartbeat.test.mjs Regression test for the requeue and heartbeat scripts
+  attempt-record.test.mjs       Regression test for the requeue attempt record and its parser
   ratchet-submit.mjs            Preflight the PR handoff: integrate/gate/push/PR/label, fail-fast
   ratchet-submit.test.mjs       Regression test for the submit preflight
   ratchet-start.mjs             Deterministic claim: server-side ref, worktree, owner marker, label flip, assign
@@ -914,7 +915,7 @@ spelling out multi-step shell an agent could get subtly wrong.
 | Script | Invocation | Exit codes |
 |--------|------------|------------|
 | `ratchet-start.mjs` | `node scripts/ratchet-start.mjs --issue <N> --owner "<id>"` | `0` claimed/resumed · `2` invalid args · `3` foreign (ref exists — another owner) · `4` unsafe (worktree owner mismatch) · `1` API/other failure |
-| `ratchet-requeue.mjs` | `node scripts/ratchet-requeue.mjs --issue <N> --reason "<text>"` | `0` success · `2` invalid args · `1` API failure |
+| `ratchet-requeue.mjs` | `node scripts/ratchet-requeue.mjs --issue <N> --reason "<text>" [--gate "<name>"] [--owner "<id>"]` | `0` success · `2` invalid args · `1` API failure |
 | `ratchet-heartbeat.mjs` | `node scripts/ratchet-heartbeat.mjs --issue <N>` | `0` success · `2` invalid args · `1` API failure |
 | `ratchet-submit.mjs` | `node scripts/ratchet-submit.mjs --issue <N> --body-file <path>` | `0` success/idempotent · `2` invalid args or bad body first line · `4` not integrated / would conflict · `5` red gate · `1` API/other failure |
 
@@ -926,6 +927,25 @@ pushes, keeps a single PR whose first line must be `Closes #<N>`, and flips the 
 to `state:in-review`. `ratchet-heartbeat.mjs` renews a claim's lease during a long
 build without pushing code; `ratchet-requeue.mjs` returns an issue to `state:ready`
 with an explaining comment when work is abandoned or over-scoped.
+
+That requeue comment is also the issue's **attempt record**. It still reads as
+prose for a human, but it carries a second marker line the tooling parses back:
+
+```
+<!-- ratchet-requeue -->
+<!-- ratchet-attempt {"attempt":2,"owner":"agent-7","gate":"test: plan-sync","reason":"red gate"} -->
+```
+
+The attempt number is one greater than the count of records already on the
+issue (starting at 1), and `--gate` / `--owner` are optional — given but empty
+is an argument error, not a blank field. `parseAttemptRecords(comments)`,
+exported from `ratchet-requeue.mjs`, is the single reader: it returns the
+ordered ledger oldest first, ignores every non-record comment, and reads a
+pre-record `<!-- ratchet-requeue -->` comment (including the one herd's
+`recoverClaim` posts) as one legacy attempt whose body is its reason, so no
+history is lost. The payload escapes `<` and `>` and the last marker line wins,
+so a reason quoting a marker cannot forge or hide a record. Still one comment
+and one POST per requeue — the comment-first ordering is unchanged.
 
 Both `--flag value` and `--flag=value` forms are accepted. Every argument is
 validated before any API call, so a bad invocation exits `2` without mutating
