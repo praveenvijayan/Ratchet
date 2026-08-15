@@ -75,7 +75,10 @@ Rules:
   `parseAttemptRecords()` (exported from `ratchet-requeue.mjs`) is the one
   reader — legacy marker-only comments still count as an attempt, `<`/`>` are
   escaped in the payload and the last marker line wins, so a reason quoting a
-  marker cannot forge a record (#521).
+  marker cannot forge a record (#521). `sweep-stale-claims` writes the same
+  record on every requeue it performs (shared encoder, shared numbering, owner
+  null); non-requeue outcomes get plain comments, and a failed post is logged,
+  never fatal — labels land before the comment (#522).
 
 ## Gotchas & fragile areas
 - (e.g.) Payments module has no test harness; integration tests hit the sandbox API (#88).
