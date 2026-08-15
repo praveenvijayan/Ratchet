@@ -8,6 +8,12 @@
 
 import assert from "node:assert/strict";
 import { decideSweep, main } from "./sweep-stale-claims.mjs";
+import {
+  REQUEUE_MARKER,
+  encodeAttemptRecord,
+  parseAttemptRecord,
+  parseAttemptRecords,
+} from "./ratchet-requeue.mjs";
 
 const HOUR = 3600 * 1000;
 const now = 1_700_000_000_000; // fixed clock (no Date.now dependence)
@@ -357,6 +363,7 @@ assert.equal(decideSweep({ ...base, state: "state:blocked" }).sweep, false, "non
     if (method === "GET" && pathname === "/repos/o/r/pulls/810/reviews") return respond([{ state: "CHANGES_REQUESTED", body: "Please tighten the edge case." }]);
     if (method === "GET" && pathname === "/repos/o/r/pulls/82") return respond({ number: 82, state: "closed", comments: 0, review_comments: 0 });
     if (method === "GET" && pathname === "/repos/o/r/pulls/82/reviews") return respond([]);
+    if (method === "GET" && /\/issues\/\d+\/comments$/.test(pathname)) return respond([]);
     if (method !== "GET") return respond({}, 200);
     throw new Error(`unexpected request: ${method} ${pathname}`);
   };
@@ -406,6 +413,139 @@ assert.equal(decideSweep({ ...base, state: "state:blocked" }).sweep, false, "non
   process.env.REWORK_GRACE_HOURS = "later";
   await assert.rejects(() => main(), /REWORK_GRACE_HOURS.*later/, "invalid REWORK_GRACE_HOURS must fail loudly");
   assert.equal(called, false, "invalid REWORK_GRACE_HOURS must fail before any API call");
+}
+
+// --- #522 orchestration: every sweep requeue writes an attempt record --------
+// One in-memory run covers all three requeue classifications, the two
+// non-requeue decisions, and a rejected comment POST. #960 is listed first so
+// its failed post has the whole rest of the sweep left to block.
+{
+  const staleIso = new Date(now - 3 * HOUR).toISOString();
+  const recentIso = new Date(now - 0.5 * HOUR).toISOString();
+  const label = (name) => ({ name });
+  const withCriteria = "Body.\n\n## Acceptance criteria\n- [ ] does the thing\n";
+  const priorRecord = (fields) => ({
+    created_at: staleIso,
+    body: `${fields.reason}\n\n${REQUEUE_MARKER}\n${encodeAttemptRecord(fields)}`,
+  });
+  const openIssues = [
+    { number: 960, pull_request: undefined, updated_at: staleIso, assignees: [], labels: [label("state:in-review")] },
+    { number: 910, pull_request: undefined, updated_at: staleIso, assignees: [], labels: [label("state:in-progress")] },
+    { number: 920, pull_request: undefined, updated_at: staleIso, assignees: [], labels: [label("state:in-review")] },
+    { number: 930, pull_request: undefined, updated_at: staleIso, assignees: [], labels: [label("state:changes-requested")] },
+    { number: 940, pull_request: undefined, updated_at: staleIso, assignees: [], labels: [label("state:in-review")] },
+    { number: 950, pull_request: undefined, updated_at: staleIso, assignees: [], labels: [label("state:in-progress")] },
+  ];
+  // #910 already carries two agent-written requeue records; the sweep's record
+  // must interleave after them as attempt 3.
+  const commentStore = {
+    910: [
+      priorRecord({ attempt: 1, owner: "agent-1", reason: "ran out of scope" }),
+      priorRecord({ attempt: 2, owner: "agent-2", gate: "test: herd", reason: "red gate" }),
+    ],
+  };
+  const calls = [];
+  const respond = (data, status = 200) => ({ ok: status < 400, status, json: async () => data, text: async () => JSON.stringify(data) });
+  globalThis.fetch = async (url, opts = {}) => {
+    const { pathname, searchParams } = new URL(url);
+    const method = opts.method || "GET";
+    const body = opts.body ? JSON.parse(opts.body) : null;
+    calls.push({ method, pathname, body });
+    if (method === "GET" && pathname === "/repos/o/r/issues") {
+      return respond(Number(searchParams.get("page")) === 1 ? openIssues : []);
+    }
+    if (method === "GET" && /^\/repos\/o\/r\/issues\/\d+$/.test(pathname)) {
+      const n = Number(pathname.split("/").pop());
+      return respond({ ...openIssues.find((i) => i.number === n), body: withCriteria });
+    }
+    if (method === "GET" && pathname === "/repos/o/r/compare/main...agent/issue-910") return respond({ ahead_by: 0 });
+    if (method === "GET" && pathname === "/repos/o/r/compare/main...agent/issue-930") return respond({ ahead_by: 2 });
+    if (method === "GET" && pathname === "/repos/o/r/compare/main...agent/issue-950") return respond({ ahead_by: 1 });
+    if (method === "GET" && pathname === "/repos/o/r/commits") {
+      return respond([{ commit: { committer: { date: searchParams.get("sha") === "agent/issue-950" ? recentIso : staleIso } } }]);
+    }
+    if (method === "GET" && /\/issues\/(\d+)\/comments$/.test(pathname)) {
+      const n = Number(pathname.match(/issues\/(\d+)\/comments$/)[1]);
+      return respond(Number(searchParams.get("page")) === 1 ? commentStore[n] ?? [] : []);
+    }
+    if (method === "POST" && /\/issues\/(\d+)\/comments$/.test(pathname)) {
+      const n = Number(pathname.match(/issues\/(\d+)\/comments$/)[1]);
+      if (n === 960) return respond({ message: "boom" }, 500);
+      (commentStore[n] ??= []).push({ created_at: recentIso, body: body.body });
+      return respond({}, 201);
+    }
+    if (method === "GET" && /\/issues\/\d+\/events$/.test(pathname)) {
+      return respond([{ event: "labeled", label: { name: "state:in-progress" }, created_at: staleIso }]);
+    }
+    if (method === "GET" && pathname === "/repos/o/r/pulls") {
+      if (searchParams.get("head") === "o:agent/issue-940") {
+        return respond(Number(searchParams.get("page")) === 1 ? [{ number: 94, state: "closed", merged_at: "2026-01-01T00:00:00Z", closed_at: staleIso }] : []);
+      }
+      return respond([]); // #920 / #960: no PR at all
+    }
+    if (method !== "GET") return respond({}, 200);
+    throw new Error(`unexpected request: ${method} ${pathname}`);
+  };
+
+  process.env.GITHUB_TOKEN = "test-token";
+  process.env.GITHUB_REPOSITORY = "o/r";
+  process.env.STALE_HOURS = "2";
+  process.env.REWORK_GRACE_HOURS = "2";
+  process.env.SWEEP_NOW = String(now);
+  const logs = [];
+  const realLog = console.log;
+  console.log = (...a) => logs.push(a.join(" "));
+  try {
+    await main();
+  } finally {
+    console.log = realLog;
+  }
+
+  const put = (n) => calls.find((c) => c.method === "PUT" && c.pathname === `/repos/o/r/issues/${n}/labels`);
+  const posted = (n) => calls.filter((c) => c.method === "POST" && c.pathname === `/repos/o/r/issues/${n}/comments`);
+  const record = (n) => parseAttemptRecord(posted(n)[0].body.body);
+
+  // 0212 Criterion 1 (stale zero-commit claim): the requeue comment parses back
+  // as a record whose reason names that classification.
+  assert.ok(record(910), "#910's sweep comment must parse as an attempt record");
+  assert.equal(record(910).legacy, false, "#910's record is structured, not legacy");
+  assert.match(record(910).reason, /^Stale claim swept:/, "#910's reason names the stale-claim classification");
+  assert.match(record(910).reason, /Orphaned claim ref deleted/, "#910's reason names the zero-commit variant");
+
+  // 0212 Criterion 1 (in-review without a live PR).
+  assert.ok(record(920), "#920's sweep comment must parse as an attempt record");
+  assert.match(record(920).reason, /^Stale review swept:/, "#920's reason names the in-review classification");
+  assert.match(record(920).reason, /no open PR/, "#920's reason names the missing PR");
+
+  // 0212 Criterion 1 (changes-requested timeout).
+  assert.ok(record(930), "#930's sweep comment must parse as an attempt record");
+  assert.match(record(930).reason, /^Stale rework swept:/, "#930's reason names the changes-requested classification");
+
+  // 0212 Criterion 2: requeue-written and sweep-written records on one issue
+  // read back through the shared parser as a single ordered ledger.
+  const ledger = parseAttemptRecords(commentStore[910]);
+  assert.equal(ledger.length, 3, "#910's ledger holds both requeue records and the sweep record");
+  assert.deepEqual(ledger.slice(0, 2).map((r) => r.reason), ["ran out of scope", "red gate"], "the requeue records come back first, oldest first");
+  assert.match(ledger[2].reason, /^Stale claim swept:/, "the sweep record follows in comment order");
+  assert.deepEqual(ledger.map((r) => r.owner), ["agent-1", "agent-2", null], "each record keeps its source's owner field");
+
+  // 0212 Criterion 3: numbering is monotonic across sources — the sweep record
+  // after two requeue records is attempt 3.
+  assert.deepEqual(ledger.map((r) => r.attempt), [1, 2, 3], "the sweep record continues the requeue numbering");
+
+  // 0212 Criterion 4: non-requeue decisions write no record — fresh work gets
+  // no comment at all, merged-PR-blocked cleanup gets a plain comment only.
+  assert.equal(posted(950).length, 0, "fresh work gets no comment and no record");
+  assert.equal(posted(940).length, 1, "merged-PR cleanup still gets its explanatory comment");
+  assert.ok(put(940).body.labels.includes("state:blocked"), "#940 is blocked cleanup, not a requeue");
+  assert.equal(parseAttemptRecord(posted(940)[0].body.body), null, "the blocked-cleanup comment is not an attempt record");
+
+  // 0212 Criterion 5: a failed record post never blocks the sweep — the label
+  // transition completed, the failure is logged naming the issue, and every
+  // later issue was still swept.
+  assert.ok(put(960)?.body.labels.includes("state:ready"), "#960's label transition completes despite the failed post");
+  assert.ok(logs.some((l) => l.includes("#960")), "the failed post is visible in the log, naming the issue");
+  assert.ok(put(910) && put(920) && put(930) && put(940), "the sweep carried on past the failed post");
 }
 
 console.log("PASS sweep-stale-claims.test.mjs (issue #87 robustness covered)");

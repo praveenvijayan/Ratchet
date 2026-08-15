@@ -17,6 +17,10 @@
 import { leaseReference, isStale, isHeartbeat } from "./sweep-lease.mjs";
 import { classifyRequeue } from "./criteria.mjs";
 import { ghClient, paginate, resolveAuth } from "./gh-api.mjs";
+// A sweep requeue ends an attempt just like an agent-initiated requeue does, so
+// it writes the same structured record through the same encoder — one format,
+// one parser (parseAttemptRecords), one ledger across both sources.
+import { REQUEUE_MARKER, encodeAttemptRecord, parseAttemptRecords } from "./ratchet-requeue.mjs";
 import { fileURLToPath } from "node:url";
 
 // The three lifecycle states the sweep patrols. state:in-progress is the
@@ -327,7 +331,22 @@ export async function main({ auth = resolveAuth } = {}) {
     if (final.deleteRef) {
       await gh("DELETE", `/repos/${repo}/git/refs/heads/${branch}`).catch(() => {});
     }
-    await gh("POST", `/repos/${repo}/issues/${issue.number}/comments`, { body: final.comment });
+    // Only a state:ready outcome is an abandoned attempt — a non-ready hold
+    // (merged-PR cleanup at state:blocked, criteria-loss hold at state:draft)
+    // posts the plain explanatory comment with no record. The labels above are
+    // already written, so a failure here degrades to a logged gap in the
+    // ledger naming the issue — never a stalled sweep.
+    try {
+      let body = final.comment;
+      if (final.targetState === "state:ready") {
+        const prior = await paginate(gh, `/repos/${repo}/issues/${issue.number}/comments`);
+        const attempt = parseAttemptRecords(prior).length + 1;
+        body = `${final.comment}\n\n${REQUEUE_MARKER}\n${encodeAttemptRecord({ attempt, reason: final.reason })}`;
+      }
+      await gh("POST", `/repos/${repo}/issues/${issue.number}/comments`, { body });
+    } catch (e) {
+      console.log(`comment post failed for #${issue.number}: ${String(e.message).split("\n")[0]}`);
+    }
     console.log(`swept #${issue.number} (${state}) -> ${final.targetState}${final.deleteRef ? " (claim ref deleted)" : ""}`);
     swept++;
   }
