@@ -403,4 +403,16 @@ const memory = read("memory/MEMORY.md");
   );
 }
 
-console.log("PASS docs-refresh.test.mjs (6 #60 criteria + 4 #191 criteria + 4 #91 criteria + 3 #233 criteria + 2 #268 criteria + 7 #347 criteria + 1 #421 criterion + 1 #497 criterion + 1 #494 criterion)");
+// #523 Criterion 5: DOCS.md documents the attempt ledger end to end — records
+// are requeue comments on the issue, ratchet-requeue.mjs and sweep-stale-claims
+// write them, and the claim surfaces them as priorAttempts (with the warning
+// degradation when the read fails).
+{
+  assert.match(docs, /attempt record/i, "DOCS must document the attempt record");
+  assert.match(docs, /`ratchet-requeue\.mjs` is not the record's only writer: `sweep-stale-claims`/, "DOCS must name both writers of the ledger");
+  assert.match(docs, /The claim is the ledger's read side/i, "DOCS must document the claim as the ledger's read side");
+  assert.ok(docs.includes("`priorAttempts`"), "DOCS must name the priorAttempts field the claim emits");
+  assert.match(docs, /`priorAttempts` is omitted and a `warning` field/, "DOCS must document the warning degradation on a failed read");
+}
+
+console.log("PASS docs-refresh.test.mjs (6 #60 criteria + 4 #191 criteria + 4 #91 criteria + 3 #233 criteria + 2 #268 criteria + 7 #347 criteria + 1 #421 criterion + 1 #497 criterion + 1 #494 criterion + 1 #523 criterion)");

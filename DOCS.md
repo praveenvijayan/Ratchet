@@ -954,6 +954,15 @@ so abandonment lands in the ledger too. Both sources share the numbering — a
 sweep record on an issue with two requeue records is attempt 3 — and read back
 through the same `parseAttemptRecords()`.
 
+The claim is the ledger's read side: on a successful claim or resume,
+`ratchet-start.mjs` includes a `priorAttempts` array in its JSON line — attempt
+number, comment timestamp, gate when recorded, and reason, oldest first — so
+the next claimant starts informed instead of repeating a recorded dead end
+(the kernel's build step makes acting on it mandatory). An issue with no
+records claims exactly as before with an empty array; a failed comment read
+never blocks the claim — `priorAttempts` is omitted and a `warning` field
+names the failure. Exit codes and every pre-existing JSON field are unchanged.
+
 Both `--flag value` and `--flag=value` forms are accepted. Every argument is
 validated before any API call, so a bad invocation exits `2` without mutating
 GitHub.

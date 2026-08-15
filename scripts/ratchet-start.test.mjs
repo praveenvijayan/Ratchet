@@ -10,6 +10,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { run as start } from "./ratchet-start.mjs";
+import { REQUEUE_MARKER, encodeAttemptRecord } from "./ratchet-requeue.mjs";
 
 const auth = () => ({ token: "t", repo: "o/r" });
 const OWNER = "claude-code slate-otter-3581";
@@ -19,7 +20,7 @@ const MARKER = join(WT, ".ratchet-owner");
 
 // A world whose git runner, filesystem, and GitHub API share one event log, so a
 // test can assert both what happened and the order it happened in.
-function makeWorld({ labels = ["state:ready", "priority:medium"], refConflict = false, failAt = null, seedWorktree = null } = {}) {
+function makeWorld({ labels = ["state:ready", "priority:medium"], refConflict = false, failAt = null, seedWorktree = null, comments = [] } = {}) {
   const events = [], files = new Map(), dirs = new Set();
   if (seedWorktree) { dirs.add(WT); files.set(MARKER, seedWorktree); }
   const fs = {
@@ -51,6 +52,9 @@ function makeWorld({ labels = ["state:ready", "priority:medium"], refConflict = 
       return respond({ ref: body.ref }, 201);
     }
     if (method === "GET" && p === "/repos/o/r/issues/335") return respond(issue);
+    if (method === "GET" && p === "/repos/o/r/issues/335/comments") {
+      return respond(Number(new URL(url).searchParams.get("page") || "1") === 1 ? comments : []);
+    }
     if (method === "PUT" && p === "/repos/o/r/issues/335/labels") { store.labelPuts.push(body.labels); issue.labels = body.labels.map((name) => ({ name })); return respond(issue.labels); }
     if (p === "/user") return respond({ login: "tester" });
     if (method === "POST" && p === "/repos/o/r/issues/335/assignees") { store.assignees.push(...body.assignees); return respond(issue, 201); }
@@ -195,11 +199,83 @@ const addedWorktree = (w) => w.git.calls.some((a) => a[0] === "worktree" && a[1]
   assert.equal(w.git.calls.filter((a) => a[0] === "worktree" && a[1] === "add").length, 1, "the worktree is added exactly once");
 }
 
+// A record comment as it exists on an issue before this claim (0211/0212 format).
+const recordComment = (fields, created_at) => ({
+  created_at,
+  body: `${fields.reason}\n\n${REQUEUE_MARKER}\n${encodeAttemptRecord(fields)}`,
+});
+
+// --- Criterion 10: (#523 AC1) a claim (and a resume) of an issue carrying two
+// attempt records reports both in priorAttempts, oldest first, each with its
+// attempt number, comment timestamp, gate when recorded, and reason. --------
+{
+  const comments = [
+    { created_at: "2026-08-01T00:00:00Z", body: "just a human note" },
+    recordComment({ attempt: 1, owner: "agent-1", reason: "ran out of scope" }, "2026-08-02T00:00:00Z"),
+    recordComment({ attempt: 2, owner: "agent-2", gate: "test: herd", reason: "red gate" }, "2026-08-03T00:00:00Z"),
+  ];
+  const w = makeWorld({ comments });
+  const r = await invoke({ world: w });
+  assert.equal(r.code, 0, "a claim over prior records still succeeds");
+  assert.deepEqual(
+    r.json.priorAttempts,
+    [
+      { attempt: 1, at: "2026-08-02T00:00:00Z", reason: "ran out of scope" },
+      { attempt: 2, at: "2026-08-03T00:00:00Z", gate: "test: herd", reason: "red gate" },
+    ],
+    "both records surface in order with attempt, timestamp, gate when recorded, and reason",
+  );
+
+  const resumed = await invoke({ world: makeWorld({ comments, seedWorktree: `${OWNER} issue-335 claimed earlier\n` }) });
+  assert.equal(resumed.json.result, "resumed", "the resume path still resumes");
+  assert.deepEqual(resumed.json.priorAttempts, r.json.priorAttempts, "a resume surfaces the same ledger as a claim");
+}
+
+// --- Criterion 11: (#523 AC2) an issue with no attempt records claims exactly
+// as today — priorAttempts is empty and the output shape is otherwise
+// unchanged. -----------------------------------------------------------------
+{
+  const r = await invoke({ world: makeWorld() });
+  assert.equal(r.code, 0, "a recordless claim succeeds");
+  assert.deepEqual(r.json.priorAttempts, [], "priorAttempts is an empty array");
+  assert.deepEqual(
+    Object.keys(r.json).sort(),
+    ["assignee", "branch", "issue", "owner", "priorAttempts", "result", "state", "worktree"],
+    "no other field is added, renamed, or removed",
+  );
+}
+
+// --- Criterion 12: (#523 AC3) a failed comment read never blocks the claim —
+// the claim completes, priorAttempts is absent, and a warning names the fetch
+// failure. ---------------------------------------------------------------------
+{
+  const w = makeWorld({ failAt: "/repos/o/r/issues/335/comments" });
+  const r = await invoke({ world: w });
+  assert.equal(r.code, 0, "the claim completes despite the failed comment read");
+  assert.equal(r.json.result, "claimed", "the result is still a claim");
+  assert.ok(!("priorAttempts" in r.json), "priorAttempts is absent when the read failed");
+  assert.match(r.json.warning, /prior attempts unavailable/, "a warning says the history could not be read");
+  assert.match(r.json.warning, /boom/, "the warning names the underlying fetch failure");
+  assert.ok(w.store.refs.has("refs/heads/agent/issue-335"), "the claim ref was still created");
+}
+
+// --- Test note (#523): an issue whose only history is a pre-0211 prose requeue
+// comment still yields one priorAttempts entry at claim time. ----------------
+{
+  const legacy = { created_at: "2026-07-01T00:00:00Z", body: `over-scope: needs a split\n\n${REQUEUE_MARKER}` };
+  const r = await invoke({ world: makeWorld({ comments: [legacy] }) });
+  assert.deepEqual(
+    r.json.priorAttempts,
+    [{ attempt: 1, at: "2026-07-01T00:00:00Z", reason: "over-scope: needs a split" }],
+    "a legacy prose notice surfaces as one attempt with its body as the reason",
+  );
+}
+
 // --- Criterion 9: every criterion above has exactly one test named after it.
 // Counts THIS file's own `Criterion N` markers so archiving the plan on close
 // can never break it. ------------------------------------------------------
 {
-  const N = 9;
+  const N = 12;
   const self = readFileSync(fileURLToPath(import.meta.url), "utf8");
   const markers = [...self.matchAll(/^\/\/ --- Criterion (\d+):/gim)].map((m) => Number(m[1]));
   assert.equal(markers.length, new Set(markers).size, "each criterion tested exactly once");
@@ -207,4 +283,4 @@ const addedWorktree = (w) => w.git.calls.some((a) => a[0] === "worktree" && a[1]
   for (let n = 1; n <= N; n++) assert.ok(markers.includes(n), `criterion ${n} has a test`);
 }
 
-console.log("PASS ratchet-start.test.mjs (9 criteria)");
+console.log("PASS ratchet-start.test.mjs (12 criteria + 1 test note)");

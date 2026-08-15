@@ -255,4 +255,14 @@ const section = (doc, heading, stopRe) => {
   }
 }
 
-console.log("PASS agents-kernel.test.mjs (8 criteria + 5 tiered-merge criteria)");
+// --- Issue #523 (Criterion 4 of plan 0213): the claim surfaces the attempt
+// ledger, so the kernel's build step must order the agent to read the surfaced
+// prior attempts before implementing and to not repeat a recorded failure.
+{
+  const step3 = section(agents, "### 3. Build", /\n#{2,3} /);
+  assert.match(step3, /`priorAttempts`/, "the build step must name the claim's priorAttempts field");
+  assert.match(step3, /before implementing/i, "the build step must order the ledger read before implementation");
+  assert.match(step3, /never repeat an approach[^.]*already\s*failed/i, "the build step must forbid repeating an approach a record says already failed");
+}
+
+console.log("PASS agents-kernel.test.mjs (8 criteria + 5 tiered-merge criteria + 1 #523 criterion)");
