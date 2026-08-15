@@ -69,6 +69,14 @@ Rules:
   strip; the trade is that `gates-hermetic.mjs`, being a gate row, reads the
   working-tree `GATES.md` (#494, replacing PR #492's hotfix).
 
+- A requeue comment is the issue's attempt ledger entry: prose plus a
+  `<!-- ratchet-attempt {json} -->` line under the unchanged
+  `<!-- ratchet-requeue -->` marker, in the same single comment/POST.
+  `parseAttemptRecords()` (exported from `ratchet-requeue.mjs`) is the one
+  reader — legacy marker-only comments still count as an attempt, `<`/`>` are
+  escaped in the payload and the last marker line wins, so a reason quoting a
+  marker cannot forge a record (#521).
+
 ## Gotchas & fragile areas
 - (e.g.) Payments module has no test harness; integration tests hit the sandbox API (#88).
 - Escalation acknowledgements persist in `.ratchet/herd-resolutions.jsonl` (one
