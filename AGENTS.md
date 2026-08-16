@@ -83,7 +83,9 @@ overwrite `.ratchet-owner` with your OWNER_ID. **Pick → claim → build is one
 motion — don't ask "shall I start?"; start.**
 
 ### 3. Build — to the criteria, nothing more
-Implement exactly the acceptance criteria, in small conventional commits,
+Before implementing, read the claim's `priorAttempts` (the attempt ledger
+`ratchet-start.mjs` surfaces): never repeat an approach a record says already
+failed. Implement exactly the acceptance criteria, in small conventional commits,
 following repo patterns. **The criteria are the test plan:** exactly one test per
 criterion, named after it, exercised through the public interface — no
 mock-verifying tests, no implementation-detail assertions. Write **also**

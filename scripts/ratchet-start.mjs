@@ -22,7 +22,10 @@ import { existsSync, readFileSync, writeFileSync, appendFileSync } from "node:fs
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { ghClient, resolveAuth } from "./gh-api.mjs";
+import { ghClient, paginate, resolveAuth } from "./gh-api.mjs";
+// The read side of the attempt ledger (plans 0211/0212): the shared parser owns
+// record recognition and numbering; this script only surfaces what it reads.
+import { parseAttemptRecord, parseAttemptRecords } from "./ratchet-requeue.mjs";
 
 const usageErr = (msg) => Object.assign(new Error(msg), { usage: true });
 const labelNames = (labels) => (labels || []).map((l) => (typeof l === "string" ? l : l.name));
@@ -93,6 +96,30 @@ export async function run({
   const worktree = `../wt/issue-${issue}`;
   const emit = (obj, code) => (out(JSON.stringify({ ...obj, issue, owner })), code);
 
+  // Surface the issue's prior attempts (0213) on every successful claim or
+  // resume, so a claimant never starts blind on an issue that already burned
+  // an agent. Returns { priorAttempts } — attempt number, comment timestamp,
+  // gate when recorded, and reason, oldest first — or, when anything in the
+  // read fails, { warning } naming the failure: history is advisory and must
+  // never block the claim itself.
+  const attemptHistory = async () => {
+    try {
+      const { token, repo } = auth();
+      const gh = ghClient(token, { fetchImpl });
+      const comments = await paginate(gh, `/repos/${repo}/issues/${issue}/comments`);
+      const recordComments = comments.filter((c) => parseAttemptRecord(c && typeof c === "object" ? c.body : c));
+      const priorAttempts = parseAttemptRecords(recordComments).map((r, i) => ({
+        attempt: r.attempt,
+        at: recordComments[i]?.created_at ?? null,
+        ...(r.gate ? { gate: r.gate } : {}),
+        reason: r.reason,
+      }));
+      return { priorAttempts };
+    } catch (e) {
+      return { warning: `prior attempts unavailable: ${String(e.message).split("\n")[0]}` };
+    }
+  };
+
   try {
     // Resume/safety gate first — before any mutation. An existing worktree means
     // this issue is already attached: reuse it when the recorded owner matches
@@ -103,7 +130,7 @@ export async function run({
       try { marker = fs.readFileSync(join(worktree, ".ratchet-owner"), "utf8"); } catch { marker = ""; }
       if (markerOwner(marker) !== owner)
         return emit({ result: "unsafe", error: "worktree is owned by a different owner id" }, 4);
-      return emit({ result: "resumed", branch, worktree }, 0);
+      return emit({ result: "resumed", branch, worktree, ...(await attemptHistory()) }, 0);
     }
 
     const { token, repo } = auth();
@@ -145,7 +172,7 @@ export async function run({
     const me = await gh("GET", "/user");
     await gh("POST", `/repos/${repo}/issues/${issue}/assignees`, { assignees: [me.login] });
 
-    return emit({ result: "claimed", branch, worktree, state: "state:in-progress", assignee: me.login }, 0);
+    return emit({ result: "claimed", branch, worktree, state: "state:in-progress", assignee: me.login, ...(await attemptHistory()) }, 0);
   } catch (e) {
     return emit({ result: "error", error: String(e.message).split("\n")[0] }, 1);
   }
