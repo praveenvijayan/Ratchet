@@ -78,10 +78,7 @@ Rules:
   marker cannot forge a record (#521). `sweep-stale-claims` writes the same
   record on every requeue it performs (shared encoder, shared numbering, owner
   null); non-requeue outcomes get plain comments, and a failed post is logged,
-  never fatal — labels land before the comment (#522). `ratchet-start.mjs` is
-  the read side: claim/resume JSON carries `priorAttempts` (attempt, timestamp,
-  gate, reason; empty array when none) or a `warning` on a failed read — the
-  ledger is advisory and never blocks the claim (#523).
+  never fatal — labels land before the comment (#522).
 
 ## Gotchas & fragile areas
 - (e.g.) Payments module has no test harness; integration tests hit the sandbox API (#88).
